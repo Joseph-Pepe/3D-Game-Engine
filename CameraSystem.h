@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <print>
 
+#include "Math.h"
+
 // ==================================================================================
 // 3D CAMERA & Catmull-Rom Spline
 // ==================================================================================
@@ -13,86 +15,6 @@
     - Use Catmull-Rom Spline for cinematic fly-throughs, and smooth orbital paths.
     - P(t) = (1/2) (2P_1 + t(-P_0 + P_2) + t^2(2P_0 - 5P_1 + 4P_2 - P_3) + t^3(-P_0 + 3P_1 - 3P_2 + P_3)), where it evaluates 4 points (P_0, P_1, P_2, P_3)
 */
-
-// --- MATH UTILITIES FOR CAMERA PATHING (Stack-friendly, zero heap allocation) ---
-
-FORCE_INLINE Vector3DStack Lerp(const Vector3DStack& a, const Vector3DStack& b, float t) {
-    // V = A + t * (B - A)
-    return a + ((b - a) * t);
-}
-
-FORCE_INLINE Vector3DStack CatmullRom(const Vector3DStack& p0, const Vector3DStack& p1, 
-                                      const Vector3DStack& p2, const Vector3DStack& p3, float t) {
-    float t2 = t * t;
-    float t3 = t2 * t;
-
-    // Evaluates in a few CPU cycles using standard ALUs
-    Vector3DStack v0 = p1 * 2.0f;
-    Vector3DStack v1 = (p2 - p0) * t;
-    Vector3DStack v2 = (p0 * 2.0f - p1 * 5.0f + p2 * 4.0f - p3) * t2;
-    Vector3DStack v3 = (p1 * 3.0f - p0 - p2 * 3.0f + p3) * t3;
-
-    return (v0 + v1 + v2 + v3) * 0.5f;
-}
-
-// ==================================================================================
-// 3D CAMERA & MATRIX MATH
-// ==================================================================================
-
-// --- 4x4 MATRIX MATH (Stack Allocated, Column-Major for OpenGL) ---
-struct Matrix4 {
-    float m[16] = {0}; // Initializes to all zeros
-
-    // Creates an Identity Matrix
-    static Matrix4 Identity() {
-        Matrix4 mat;
-        mat.m[0] = 1.0f; mat.m[5] = 1.0f; mat.m[10] = 1.0f; mat.m[15] = 1.0f;
-        return mat;
-    }
-
-    // Creates a Perspective Projection Matrix
-    static Matrix4 Perspective(float fovY_degrees, float aspect, float nearZ, float farZ) {
-        Matrix4 mat;
-        float fovY_rad = fovY_degrees * (3.14159265359f / 180.0f);
-        float tanHalfFovY = std::tan(fovY_rad / 2.0f);
-
-        mat.m[0] = 1.0f / (aspect * tanHalfFovY);
-        mat.m[5] = 1.0f / tanHalfFovY;
-        mat.m[10] = -(farZ + nearZ) / (farZ - nearZ);
-        mat.m[11] = -1.0f;
-        mat.m[14] = -(2.0f * farZ * nearZ) / (farZ - nearZ);
-        return mat;
-    }
-
-    // Creates a View Matrix (LookAt)
-    static Matrix4 LookAt(const Vector3DStack& eye, const Vector3DStack& target, const Vector3DStack& upVec) {
-
-        // 1. Forward Vector (Z)
-        Vector3DStack f = target - eye;
-        float fLen = std::sqrt(f.dot(f));
-        f = f * (1.0f / fLen);
-
-        // 2. Right Vector (X)
-        Vector3DStack r = f.cross(upVec);
-        float rLen = std::sqrt(r.dot(r));
-        r = r * (1.0f / rLen);
-
-        // 3. Up Vector (Y)
-        Vector3DStack u = r.cross(f);
-
-        // 4. Build Column-Major Matrix
-        Matrix4 mat = Identity();
-        mat.m[0] = r.data[0];  mat.m[4] = r.data[1];  mat.m[8] = r.data[2];
-        mat.m[1] = u.data[0];  mat.m[5] = u.data[1];  mat.m[9] = u.data[2];
-        mat.m[2] = -f.data[0]; mat.m[6] = -f.data[1]; mat.m[10] = -f.data[2];
-
-        // Translation offsets
-        mat.m[12] = -r.dot(eye);
-        mat.m[13] = -u.dot(eye);
-        mat.m[14] = f.dot(eye);
-        return mat;
-    }
-};
 
 // --- CINEMATIC CAMERA SYSTEM ---
 class CinematicCamera {
