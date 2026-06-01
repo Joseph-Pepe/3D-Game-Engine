@@ -16,10 +16,10 @@
 
 
 
-
 // --- MATH UTILITIES FOR CAMERA PATHING ---
 
 FORCE_INLINE Vector3DStack Lerp(const Vector3DStack& a, const Vector3DStack& b, float t) {
+    // V = A + t * (B - A)
     return a + ((b - a) * t);
 }
 
@@ -28,6 +28,7 @@ FORCE_INLINE Vector3DStack CatmullRom(const Vector3DStack& p0, const Vector3DSta
     float t2 = t * t;
     float t3 = t2 * t;
 
+    // Evaluates in a few CPU cycles using standard ALUs
     Vector3DStack v0 = p1 * 2.0f;
     Vector3DStack v1 = (p2 - p0) * t;
     Vector3DStack v2 = (p0 * 2.0f - p1 * 5.0f + p2 * 4.0f - p3) * t2;
@@ -91,8 +92,8 @@ class CinematicCamera {
 private:
     std::vector<Vector3DStack> controlPoints;
     std::vector<Vector3DStack> lookAtTargets;
-    float currentProgress = 0.0f; 
-    float traversalSpeed = 0.1f;  
+    float currentProgress = 0.0f;  // Global timeline progress (0.0 to 1.0)
+    float traversalSpeed = 0.1f;   // Percentage of track completed per second
 
 public:
     Vector3DStack position;
@@ -100,34 +101,52 @@ public:
 
     CinematicCamera() : position(0.0f, 0.0f, 0.0f), target(0.0f, 0.0f, -1.0f) {}
 
+    // Add a physical coordinate for the camera to fly through
     void AddWaypoint(const Vector3DStack& pos, const Vector3DStack& lookAt) {
         controlPoints.push_back(pos);
         lookAtTargets.push_back(lookAt);
     }
 
+    // Set how fast the camera completes the entire track
     void SetSpeed(float speed) { traversalSpeed = speed; }
 
+    // Runs once per frame on the Main UI/Render Thread
     FORCE_INLINE void Update(float deltaTime) {
         size_t count = controlPoints.size();
-        if (count < 2) return; 
+        if (count < 2) return;  // Need at least 2 points to Lerp, 4 to perfectly Spline
 
+        // Advance global timeline
         currentProgress += traversalSpeed * deltaTime;
         if (currentProgress > 1.0f) currentProgress = 1.0f; 
 
+        // 1. Calculate which segment of the spline we are currently in
+        // A track with 5 points has 4 physical segments.
         float segmentCount = static_cast<float>(count - 1);
         float scaledProgress = currentProgress * segmentCount;
+
+        // Truncate float to get the active array index
         int currentIndex = static_cast<int>(scaledProgress);
+
+        // Local t is the progress strictly between the current node and the next node
         float localT = scaledProgress - static_cast<float>(currentIndex);
 
+        // 2. Fetch the 4 Control Points (Clamp to bounds to prevent segfaults)
         int i0 = std::max(0, currentIndex - 1);
         int i1 = currentIndex;
         int i2 = std::min(static_cast<int>(count - 1), currentIndex + 1);
         int i3 = std::min(static_cast<int>(count - 1), currentIndex + 2);
 
+        // 3. Compute Smooth Spline Position
         position = CatmullRom(controlPoints[i0], controlPoints[i1], controlPoints[i2], controlPoints[i3], localT);
+
+        // 4. Compute Camera Rotation/Target
+        // Look-at targets can usually just be linearly interpolated unless you want 
+        // the camera panning to be distinctly eased.
         target = Lerp(lookAtTargets[i1], lookAtTargets[i2], localT);
     }
 
+    // Builds the View Matrix to send to your Shader Pipeline
+    // (Assuming standard math; easily swapped with GLM if you use it for matrices)
     void PrintTelemetry() const {
         std::println("Cam Pos: [{}, {}, {}] | Target: [{}, {}, {}]", 
                      position.data[0], position.data[1], position.data[2],
