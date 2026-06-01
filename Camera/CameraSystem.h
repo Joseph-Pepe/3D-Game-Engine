@@ -45,12 +45,14 @@ FORCE_INLINE Vector3DStack CatmullRom(const Vector3DStack& p0, const Vector3DSta
 struct Matrix4 {
     float m[16] = {0}; // Initializes to all zeros
 
+    // Creates an Identity Matrix
     static Matrix4 Identity() {
         Matrix4 mat;
         mat.m[0] = 1.0f; mat.m[5] = 1.0f; mat.m[10] = 1.0f; mat.m[15] = 1.0f;
         return mat;
     }
 
+    // Creates a Perspective Projection Matrix
     static Matrix4 Perspective(float fovY_degrees, float aspect, float nearZ, float farZ) {
         Matrix4 mat;
         float fovY_rad = fovY_degrees * (3.14159265359f / 180.0f);
@@ -64,6 +66,7 @@ struct Matrix4 {
         return mat;
     }
 
+    // Creates a View Matrix (LookAt)
     static Matrix4 LookAt(const Vector3DStack& eye, const Vector3DStack& target, const Vector3DStack& upVec) {
         Vector3DStack f = target - eye;
         float fLen = std::sqrt(f.dot(f));
