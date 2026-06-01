@@ -15,7 +15,7 @@
 #include "Math.h"
 
 // ==================================================================================
-// COROUTINE MEMORY POOL (Zero-OS Allocation), GLOBAL JOB SYSTEM QUEUE 
+// COROUTINE MEMORY POOL (Zero-OS Allocation), GLOBAL JOB SYSTEM 
 // ==================================================================================
 
 // --- GLOBAL JOB SYSTEM QUEUE --- 
