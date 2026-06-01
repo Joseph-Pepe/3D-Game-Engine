@@ -166,7 +166,7 @@ public:
 
     FreeCamera(Vector3DStack position = Vector3DStack(0.0f, 200.0f, 1000.0f)) {
         Position = position;
-        WorldUp = Vector3DStack(0.0f, 1.0f, 0.0f); 
+        WorldUp = Vector3DStack(0.0f, 1.0f, 0.0f);  // Assuming Y is up
         UpdateCameraVectors();
     }
 
@@ -174,6 +174,7 @@ public:
         return Matrix4::LookAt(Position, Position + Front, Up);
     }
 
+    // WASD Movement (0=Forward, 1=Backward, 2=Left, 3=Right, 4=Up, 5=Down)
     void ProcessKeyboard(int direction, float deltaTime) {
         float velocity = MovementSpeed * deltaTime;
         if (direction == 0) Position = Position + (Front * velocity);
@@ -191,6 +192,7 @@ public:
         Yaw += xoffset;
         Pitch += yoffset;
 
+        // Constrain pitch to prevent screen-flipping (Gimbal Lock)
         if (Pitch > 89.0f) Pitch = 89.0f;
         if (Pitch < -89.0f) Pitch = -89.0f;
 
@@ -200,16 +202,21 @@ public:
 private:
     void UpdateCameraVectors() {
         Vector3DStack front;
+
+        // Convert to radians
         float yawRad = Yaw * (3.14159265359f / 180.0f);
         float pitchRad = Pitch * (3.14159265359f / 180.0f);
 
+        // Spherical coordinates to Cartesian coordinates
         front.data[0] = std::cos(yawRad) * std::cos(pitchRad);
         front.data[1] = std::sin(pitchRad);
         front.data[2] = std::sin(yawRad) * std::cos(pitchRad);
-        
+
+        // Normalize Front
         float lenF = std::sqrt(front.dot(front));
         Front = front * (1.0f / lenF);
 
+        // Re-calculate Right and Up
         Right = Front.cross(WorldUp);
         float lenR = std::sqrt(Right.dot(Right));
         Right = Right * (1.0f / lenR);
