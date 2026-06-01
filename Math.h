@@ -274,6 +274,13 @@ struct SIMDVector8 {
     }
 };
 
+// 96 Bytes total: Fits perfectly into two 64-byte L1 Cache lines.
+struct alignas(32) ParticleBlock8 {
+    __m256 x;
+    __m256 y;
+    __m256 z;
+};
+
 // ==================================================================================
 // 3. SSE / SCALAR VECTORS
 // ==================================================================================
