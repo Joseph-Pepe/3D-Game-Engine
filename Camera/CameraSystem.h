@@ -68,21 +68,27 @@ struct Matrix4 {
 
     // Creates a View Matrix (LookAt)
     static Matrix4 LookAt(const Vector3DStack& eye, const Vector3DStack& target, const Vector3DStack& upVec) {
+
+        // 1. Forward Vector (Z)
         Vector3DStack f = target - eye;
         float fLen = std::sqrt(f.dot(f));
         f = f * (1.0f / fLen);
 
+        // 2. Right Vector (X)
         Vector3DStack r = f.cross(upVec);
         float rLen = std::sqrt(r.dot(r));
         r = r * (1.0f / rLen);
 
+        // 3. Up Vector (Y)
         Vector3DStack u = r.cross(f);
 
+        // 4. Build Column-Major Matrix
         Matrix4 mat = Identity();
         mat.m[0] = r.data[0];  mat.m[4] = r.data[1];  mat.m[8] = r.data[2];
         mat.m[1] = u.data[0];  mat.m[5] = u.data[1];  mat.m[9] = u.data[2];
         mat.m[2] = -f.data[0]; mat.m[6] = -f.data[1]; mat.m[10] = -f.data[2];
 
+        // Translation offsets
         mat.m[12] = -r.dot(eye);
         mat.m[13] = -u.dot(eye);
         mat.m[14] = f.dot(eye);
