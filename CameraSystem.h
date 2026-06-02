@@ -4,19 +4,22 @@
 #include <cmath>
 #include <algorithm>
 #include <print>
+
 #include "Math.h"
+
 // ==================================================================================
 // 3D CAMERA & Catmull-Rom Spline
 // ==================================================================================
 /*
     - 3D camera is a single entity. 
-    - Use Catmull-Rom Spline for cinematic fly-throughs, and smooth orbital paths.
+    - Use Catmull-Rom Spline for cinematic paths for buttery smooth fly-throughs, and orbital paths without that rigid snapping of linear interpolation.
     - P(t) = (1/2) (2P_1 + t(-P_0 + P_2) + t^2(2P_0 - 5P_1 + 4P_2 - P_3) + t^3(-P_0 + 3P_1 - 3P_2 + P_3)), where it evaluates 4 points (P_0, P_1, P_2, P_3)
 */
 
 // --- CINEMATIC CAMERA SYSTEM ---
 class CinematicCamera {
 private:
+    // Kept as Vector3DStack because CatmullRom uses heavy vector math operations where SSE acceleration actually benefits the 4-point polynomial evaluation.
     std::vector<Vector3DStack> controlPoints;
     std::vector<Vector3DStack> lookAtTargets;
     float currentProgress = 0.0f;  // Global timeline progress (0.0 to 1.0)
@@ -72,6 +75,15 @@ public:
         target = Lerp(lookAtTargets[i1], lookAtTargets[i2], localT);
     }
 
+    // Convert the SSE Vectors to Scalar to interface with the C++26 Matrix Math
+    Matrix4 GetViewMatrix() const {
+        return Matrix4::LookAt(
+            Vector3DScalar(position.data[0], position.data[1], position.data[2]),
+            Vector3DScalar(target.data[0], target.data[1], target.data[2]),
+            Vector3DScalar(0.0f, 1.0f, 0.0f)
+        );
+    }
+
     // Builds the View Matrix to send to your Shader Pipeline
     // (Assuming standard math; easily swapped with GLM if you use it for matrices)
     void PrintTelemetry() const {
@@ -81,16 +93,33 @@ public:
     }
 };
 
+// Strongly typed movement strictly prevents invalid input
+enum class CameraMove {
+    FORWARD, BACKWARD, LEFT, RIGHT, UP, DOWN
+};
+
 // --- INTERACTIVE FREE-LOOK CAMERA ---
 class FreeCamera {
+
+// ===============================================
+// PRECISION LOSS PREVENTION 
+// ===============================================
+/*
+    - Its best to prevent tiny floating-point truncation errors from compounding, causing the camera to slowly drift off its perfect axis.
+    - std::numbers::pi_v<float> means the compiler uses the absolute maximum IEEE-754 floating-point precision available for the specific hardware architecture to represent pi.
+    - This ensures perfect rotational stability no matter how long the player spins the camera.
+*/
+
 public:
-    Vector3DStack Position, Front, Up, Right, WorldUp;
+    // Converted to Pure Scalar: Eliminates FPU-to-SSE shuffling penalties
+    Vector3DScalar Position, Front, Up, Right, WorldUp;
+
     float Yaw = -90.0f, Pitch = 0.0f;
     float MovementSpeed = 800.0f, MouseSensitivity = 0.15f;
 
-    FreeCamera(Vector3DStack position = Vector3DStack(0.0f, 200.0f, 1000.0f)) {
+    FreeCamera(Vector3DScalar position = Vector3DScalar(0.0f, 200.0f, 1000.0f)) {
         Position = position;
-        WorldUp = Vector3DStack(0.0f, 1.0f, 0.0f);  // Assuming Y is up
+        WorldUp = Vector3DScalar(0.0f, 1.0f, 0.0f);  // Assuming Y is up
         UpdateCameraVectors();
     }
 
@@ -99,14 +128,31 @@ public:
     }
 
     // WASD Movement (0=Forward, 1=Backward, 2=Left, 3=Right, 4=Up, 5=Down)
-    void ProcessKeyboard(int direction, float deltaTime) {
+    void ProcessKeyboard(CameraMove direction, float deltaTime) {
         float velocity = MovementSpeed * deltaTime;
-        if (direction == 0) Position = Position + (Front * velocity);
-        if (direction == 1) Position = Position - (Front * velocity);
-        if (direction == 2) Position = Position - (Right * velocity);
-        if (direction == 3) Position = Position + (Right * velocity);
-        if (direction == 4) Position = Position + (WorldUp * velocity); 
-        if (direction == 5) Position = Position - (WorldUp * velocity); 
+
+        // ===============================================
+        // BRANCHLESS JUMP TABLES (SWITCH) 
+        // ===============================================
+        /*
+            - An if-statement used would cause the CPU branch predictor to constantly try to guess which key the user was pressing.
+            - Occassionally it would guess wrong and flush its execution pipeline (a penalty of ~15 cycles).
+            
+            - A switch statement is optimized into a highly efficient jump table.
+            - Executes the exact movement in a single instruction cycle without evaluating the other conditions.
+            - Calcultes an offset based on enum integer and performs a single, direct memory jump to the correct logic.
+            - Bypasses branch predictor.
+        */
+
+        // Branchless Jump Table via Switch
+        switch (direction) {
+            case CameraMove::FORWARD:  Position = Position + (Front * velocity); break;
+            case CameraMove::BACKWARD: Position = Position - (Front * velocity); break;
+            case CameraMove::LEFT:     Position = Position - (Right * velocity); break;
+            case CameraMove::RIGHT:    Position = Position + (Right * velocity); break;
+            case CameraMove::UP:       Position = Position + (WorldUp * velocity); break;
+            case CameraMove::DOWN:     Position = Position - (WorldUp * velocity); break;
+        }
     }
 
     void ProcessMouseMovement(float xoffset, float yoffset) {
@@ -125,16 +171,17 @@ public:
 
 private:
     void UpdateCameraVectors() {
-        Vector3DStack front;
+        Vector3DScalar front;
 
-        // Convert to radians
-        float yawRad = Yaw * (3.14159265359f / 180.0f);
-        float pitchRad = Pitch * (3.14159265359f / 180.0f);
+        // [C++20]: Constants at maximum hardware precision (Convert to radians)
+        // [std::numbers::pi_v<float>]: Prevents floating-point truncation issues during rapid camera rotations.
+        float yawRad = Yaw * (std::numbers::pi_v<float> / 180.0f);
+        float pitchRad = Pitch * (std::numbers::pi_v<float> / 180.0f);
 
         // Spherical coordinates to Cartesian coordinates
-        front.data[0] = std::cos(yawRad) * std::cos(pitchRad);
-        front.data[1] = std::sin(pitchRad);
-        front.data[2] = std::sin(yawRad) * std::cos(pitchRad);
+        front.x = std::cos(yawRad) * std::cos(pitchRad);
+        front.y = std::sin(pitchRad);
+        front.z = std::sin(yawRad) * std::cos(pitchRad);
 
         // Normalize Front
         float lenF = std::sqrt(front.dot(front));
