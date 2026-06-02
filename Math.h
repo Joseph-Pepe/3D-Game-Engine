@@ -489,6 +489,16 @@ struct Matrix4 {
         return mat;
     }
 
+    // ==========================================
+    // Vector3DScalar (NO SSE-Accelerated)
+    // ==========================================
+    /*
+        - Matrix generation requires sequential FPU (Floating Point Unit) math.
+        - When dealing with a single entity, packing data into 128 bit SSE registers actually hurts performance.
+        - CPU wastes clock cycles shuffling the data from the FPU, into the SSE registers for the cross product and then unpack it again for the Matrix.
+        - Best to use Vector3DScalar instead of Vector3DStack for camera.
+    */
+
     // Creates a View Matrix (LookAt)
     static Matrix4 LookAt(const Vector3DScalar& eye, const Vector3DScalar& target, const Vector3DScalar& upVec) {
 
