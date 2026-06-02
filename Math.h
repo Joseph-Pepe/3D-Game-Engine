@@ -306,7 +306,7 @@ struct alignas(32) ParticleBlock8 {
 };
 
 // ==================================================================================
-// 3. SSE / SCALAR VECTORS
+// 3. SSE Accelerated Vectors 
 // ==================================================================================
 
 // SSE Accelerated Stack Vector (Use for 99% of general game logic and bulk data processing).
@@ -431,6 +431,10 @@ public:
     }
 };
 
+// ==================================================================================
+// SCALAR VECTORS
+// ==================================================================================
+
 // Pure Scalar Fallback: Used for one-off calculations like the camera and compile time calculations.
 class Vector3DScalar {
 public:
@@ -442,6 +446,23 @@ public:
     // Traditional element-by-element addition
     FORCE_INLINE constexpr Vector3DScalar operator+(const Vector3DScalar& other) const {
         return Vector3DScalar(x + other.x, y + other.y, z + other.z);
+    }
+
+    // Subtraction: C = A - B
+    FORCE_INLINE constexpr Vector3DScalar operator-(const Vector3DScalar& other) const {
+        return Vector3DScalar(x - other.x, y - other.y, z - other.z);
+    }
+
+    // Scalar Multiplication: B = A * scalar
+    FORCE_INLINE constexpr Vector3DScalar operator*(float scalar) const {
+        return Vector3DScalar(x * scalar, y * scalar, z * scalar);
+    }
+
+    // In-place Scalar Multiplication: A *= scalar (constexpr in C++20 allows modifying member variables)
+    FORCE_INLINE constexpr void operator*=(float scalar) {
+        x *= scalar;
+        y *= scalar;
+        z *= scalar;
     }
 
     // Traditional dot product
