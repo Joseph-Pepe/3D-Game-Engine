@@ -13,10 +13,5 @@ struct EngineSettings {
     bool isLegacyCPU = false; 
 };
 
-// ==========================================================================
-// EXTERN: Tells every file that includes this header that 'g_EngineSettings' 
-// ==========================================================================
-// exists, but prevents them from allocating their own duplicate copy of it.
-
-// Global instance
+// EXTERN: Tells every file that includes this header that 'g_EngineSettings' exists, but prevents them from allocating their own duplicate copy of it.
 extern EngineSettings g_EngineSettings;
