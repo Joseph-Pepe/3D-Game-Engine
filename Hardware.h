@@ -1,6 +1,7 @@
 #pragma once
 
 #include <print>
+#include <immintrin.h> // Required for _xgetbv() and universal SIMD support
 
 // --- COMPILER INTRINSICS FOR CPUID ---
 #ifdef _MSC_VER
@@ -50,8 +51,28 @@ struct HardwareCapabilities {
 
             // OSXSAVE (Bit 27 in ECX): Does the OS know how to handle wide registers?
             bool osUsesXSAVE = (cpuInfo[2] & (1 << 27)) != 0;
-            caps.hasAVX = (cpuInfo[2] & (1 << 28)) != 0;
+
+            bool osSavesYMM = false;
+            bool osSavesZMM = false;
+
+            // Ask the OS if it is actually saving the registers
+            if (osUsesXSAVE) {
+                // Read the Extended Control Register (XCR0)
+                unsigned long long xcrFeatureMask = _xgetbv(0);
+                
+                // Bit 1 = XMM (128-bit), Bit 2 = YMM (256-bit)
+                osSavesYMM = (xcrFeatureMask & 0x6) == 0x6; 
+                
+                // Bits 5, 6, 7 = OPMASK and ZMM (512-bit)
+                osSavesZMM = (xcrFeatureMask & 0xE6) == 0xE6; 
+            }
+
+            // CPU supports AVX natively
+            bool cpuHasAVX = (cpuInfo[2] & (1 << 28)) != 0;
             caps.hasFMA = (cpuInfo[2] & (1 << 12)) != 0;
+
+            // Only enable AVX if BOTH the CPU and the OS support it
+            caps.hasAVX = cpuHasAVX && osSavesYMM;
 
             if (maxFunction >= 7) {
                 #ifdef _MSC_VER
@@ -60,19 +81,19 @@ struct HardwareCapabilities {
                     __cpuid_count(7, 0, cpuInfo[0], cpuInfo[1], cpuInfo[2], cpuInfo[3]);
                 #endif
 
-                caps.hasAVX2 = (cpuInfo[1] & (1 << 5)) != 0;
+                caps.hasAVX2 = (cpuInfo[1] & (1 << 5)) != 0 && osSavesYMM;
                 caps.hasBMI2 = (cpuInfo[1] & (1 << 8)) != 0;
 
-                // AVX-512 Checks
-                if (osUsesXSAVE) {
+                // Only enable AVX-512 if the OS saves ZMM state
+                if (osSavesZMM) {
                     caps.hasAVX512F  = (cpuInfo[1] & (1 << 16)) != 0;
                     caps.hasAVX512DQ = (cpuInfo[1] & (1 << 17)) != 0;
                     caps.hasAVX512VL = (cpuInfo[1] & (1 << 31)) != 0;
                 }
             }
 
-            // Your existing AMD Microcode check
-            if (isAMD) {
+            // AMD Microcode check for slow BMI2
+            if (isAMD && caps.hasBMI2) {
                 #ifdef _MSC_VER
                     __cpuid(cpuInfo, 1);
                 #else
@@ -128,7 +149,7 @@ inline bool detect_hardware_CPUID_BMI2() {
     #else
         __cpuid(1, cpuInfo[0], cpuInfo[1], cpuInfo[2], cpuInfo[3]);
     #endif
-    
+
     int baseFamily = (cpuInfo[0] >> 8) & 0xF;
     int extendedFamily = (cpuInfo[0] >> 20) & 0xFF;
     int family = baseFamily + (baseFamily == 0xF ? extendedFamily : 0);
