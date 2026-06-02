@@ -124,7 +124,7 @@ struct YieldToJobSystem {
     bool await_ready() const noexcept { return false; }
 
     // Called the exact microsecond the coroutine pauses.
-    void await_suspend(std::coroutine_handle<> handle) const;
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<> handle) const;
 
     // Called when the coroutine is picked back up.
     void await_resume() const noexcept {} 
@@ -688,6 +688,19 @@ inline JobSystem g_JobSystem; // C++17: 'inline' allows global variables in a he
 // ==================================================================================
 
 // Define the Awaiter's suspend logic after the JobSystem is fully defined
-inline void YieldToJobSystem::await_suspend(std::coroutine_handle<> handle) const {
-    g_JobSystem.Schedule(handle); // Put back in line!
+inline std::coroutine_handle<> YieldToJobSystem::await_suspend(std::coroutine_handle<> handle) const {
+    // 1. Put the current job back in line
+    g_JobSystem.Schedule(handle); 
+
+    // 2. Grab the next available job
+    std::coroutine_handle<> nextJob = g_JobSystem.queues[tl_workerIndex]->Pop();
+    
+    if (nextJob) {
+        // The C++ compiler converts this into an indirect tail-call jump.
+        // Zero stack growth. Zero return-to-loop overhead.
+        return nextJob; 
+    }
+
+    // 3. If the queue is empty, return noop to safely hand control back to the scheduler loop.
+    return std::noop_coroutine(); 
 }
