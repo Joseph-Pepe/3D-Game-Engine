@@ -1,6 +1,6 @@
 #pragma once
 
-// --- JAVA SYSTEM (CPU Control, Cache Locality, Dependency Management) ---
+// --- ENGINE SYSTEM (CPU Control, Cache Locality, Dependency Management) ---
 struct EngineSettings {
     int activeParticles = 100000;
     float tangentialSpeed = 8.0f;
