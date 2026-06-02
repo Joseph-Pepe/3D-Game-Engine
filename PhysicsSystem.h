@@ -1,3 +1,15 @@
+#pragma once
+
+#include <vector>
+#include <atomic>
+#include <immintrin.h> // For AVX2/AVX-512
+
+// Engine Dependencies
+#include "Memory.h"    // For AlignedVector
+#include "JobSystem.h" // For parallel dispatch and thread IDs
+#include "Math.h"      // For Morton codes and vector math
+#include "Hardware.h"  // For AVX availability checks
+
 class ParticlePhysicsSOA {
 public:
     // Component 1: Positions (Strictly 32-byte aligned!)
