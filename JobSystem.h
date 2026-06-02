@@ -15,7 +15,7 @@
 #include "Math.h"
 
 // ==================================================================================
-// COROUTINE MEMORY POOL (Zero-OS Allocation), GLOBAL JOB SYSTEM 
+// COROUTINE MEMORY POOL (Zero-OS Allocation), GLOBAL JOB SYSTEM QUEUE 
 // ==================================================================================
 
 // --- GLOBAL JOB SYSTEM QUEUE --- 
@@ -135,24 +135,21 @@ struct YieldToJobSystem {
 // ==================================================================================
 
 // --- THE UNIFIED SCHEDULER ---
-// A fixed-size, lock-free ring buffer (Must be a power of 2, e.g., 4096 or 8192)
-class alignas(64) WorkStealingQueue {
+// std::hardware_destructive_interference_size: asks the target hardware how large its cache is, so its dynamically scaling to the CPU architecture (Intel/AMD x86, M1/M2/M3 ARM: 128-byte cache).
+class alignas(std::hardware_destructive_interference_size) WorkStealingQueue {
 private:
-    alignas(64) std::atomic<int64_t> top{0};    // Thieves steal from this cache line
-    alignas(64) std::atomic<int64_t> bottom{0}; // The Owner pushes/pops from this cache line
+    alignas(std::hardware_destructive_interference_size) std::atomic<int64_t> top{0};    // Thieves steal from this cache line
+    alignas(std::hardware_destructive_interference_size) std::atomic<int64_t> bottom{0}; // The Owner pushes/pops from this cache line
     std::vector<std::coroutine_handle<>> jobs;
     int64_t mask;
-    std::vector<std::coroutine_handle<>> localOverflow; // Zero-lock local overflow buffer
 
 public:
+    // DEFAULT CAPACITY: 8192 (A fixed-size, lock-free ring buffer must be a power of 2, [4096] or [8192])
     // The work stealing mechanism can pass jobs to any thread, in any order, dynamically, without ever causing a memory overlap.
-    WorkStealingQueue(int64_t capacity = 4096) {
+    WorkStealingQueue(int64_t capacity = 8192) {
         assert(std::has_single_bit(static_cast<uint64_t>(capacity)) && "Capacity MUST be a power of 2!");
         jobs.resize(capacity);
         mask = capacity - 1; // Bitwise mask for hyper-fast wrapping
-
-        // Pre-reserve to prevent mid-frame allocations
-        localOverflow.reserve(1024);
     }
 
     // Returns the exact size of the lock-free ring buffer
@@ -167,10 +164,7 @@ public:
         int64_t t = top.load(std::memory_order_relaxed);
         
         // Calculate ring buffer occupancy (ensure we don't return negative if a steal is in progress)
-        int64_t count = (b > t) ? (b - t) : 0;
-        
-        // Add the local overflow size
-        return count + static_cast<int64_t>(localOverflow.size());
+        return (b > t) ? (b - t) : 0;
     }
 
     // ONLY the Owner Thread calls Push()
@@ -178,13 +172,9 @@ public:
         int64_t b = bottom.load(std::memory_order_relaxed);
         int64_t t = top.load(std::memory_order_acquire); // Read where the thieves are
 
-        // mask + 1 is our actual capacity
-        if (b - t >= (mask + 1)) {
-            // Queue is full! Push to the local overflow buffer safely 
-            // instead of risking a recursive stack-overflow via job.resume()
-            localOverflow.push_back(job);
-            return; 
-        }
+        // STRICT ASSERTION: Fail fast if we blow past the ring buffer size.
+        // This guarantees we never silently trigger a memory overwrite or OS allocation.
+        assert(b - t < (mask + 1) && "FATAL: Job queue overflow! Increase queue capacity.");
         
         jobs[b & mask] = job;
         
@@ -195,19 +185,11 @@ public:
 
     // ONLY the Owner Thread calls Pop()
     std::coroutine_handle<> Pop() {
-        // Prioritize draining the overflow buffer first!
-        if (!localOverflow.empty()) {
-            std::coroutine_handle<> job = localOverflow.back();
-            localOverflow.pop_back();
-            return job;
-        }
-
         int64_t b = bottom.load(std::memory_order_relaxed) - 1;
         bottom.store(b, std::memory_order_relaxed);
         
         // Prevent CPU out-of-order execution from reading 'top' before 'bottom' is saved
         std::atomic_thread_fence(std::memory_order_seq_cst); 
-        
         int64_t t = top.load(std::memory_order_relaxed);
 
         if (t <= b) {
@@ -266,23 +248,23 @@ private:
     std::vector<std::thread> workers;
 
     // Read constantly by every thread. Keep it on its own isolated island! Must keep wake and sleep away from terminate.
-    alignas(64) std::atomic<bool> terminate{false};
+    alignas(std::hardware_destructive_interference_size) std::atomic<bool> terminate{false};
 
     // C++20: Atomic Futex for lock-free sleeping
-    alignas(64) std::atomic<uint32_t> wakeSignal{0};
+    alignas(std::hardware_destructive_interference_size) std::atomic<uint32_t> wakeSignal{0};
     
     // ISOLATED: Written frequently as threads sleep/wake.
-    // We pad 64 bytes AFTER it (by ensuring the next variable is aligned) 
+    // We pad based on the target hardware (by ensuring the next variable is aligned) 
     // to guarantee it lives completely alone.
-    alignas(64) std::atomic<int> sleepingThreads{0};
+    alignas(std::hardware_destructive_interference_size) std::atomic<int> sleepingThreads{0};
     
 public:
     std::vector<std::unique_ptr<WorkStealingQueue>> queues;
     // ISOLATED: Read heavily by new threads.
-    alignas(64) std::atomic<uint32_t> nextWorkerId{0};
+    alignas(std::hardware_destructive_interference_size) std::atomic<uint32_t> nextWorkerId{0};
     uint32_t maxQueues;
 
-    struct alignas(64) ThreadMetrics {
+    struct alignas(std::hardware_destructive_interference_size) ThreadMetrics {
         std::atomic<double> utilization{0.0};
         std::atomic<uint64_t> jobsCompleted{0};
         std::atomic<uint64_t> totalFlops{0}; // Isolated math tracker!
@@ -535,9 +517,9 @@ public:
     void DispatchAndWait(uint32_t dataCount, uint32_t chunkSize, F task) {
         // alignas(64): forces compiler pad the memory.
         // Stack allocated. Fastest memory access possible.
-        // Force this atomic counter to sit on its own 64-byte chunk cache line (L1 cache line size).
+        // Force this atomic counter to sit on its own hardware-specific chunk cache line (L1 cache line size).
         // This prevents other local stack variables from getting caught in the crossfire of thread contention!
-        alignas(64) std::atomic<int> counter{0};
+        alignas(std::hardware_destructive_interference_size) std::atomic<int> counter{0};
 
         uint32_t chunksDispatched = 0; // Track exactly how much work we made
 
