@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <print>
 
+#include <numbers> // C++20/26 Standardized Math Constants
+
 #include "Math.h"
 
 // ==================================================================================
