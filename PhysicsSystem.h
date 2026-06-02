@@ -9,6 +9,7 @@
 #include "JobSystem.h" // For parallel dispatch and thread IDs
 #include "Math.h"      // For Morton codes and vector math
 #include "Hardware.h"  // For AVX availability checks
+#include "EngineSettings.h"
 
 class ParticlePhysicsSOA {
 public:
