@@ -127,24 +127,24 @@ inline constexpr std::array<uint32_t, 1024> g_MortonTableZ = GenerateMortonTable
 // inline std::vector<uint32_t> g_MortonTableZ(1024); // Physical Grid Coordinate Z, Global Memory
 
 // --- RUN-TIME MORTON LUT GENERATION ---
-void InitMortonLUT() {
-    // --- OLDER INTEL, AMD CPUs DON'T HAVE _pdep_u32 IMPLEMENTED IN THE HARDWARE (18-50 CLOCK CYCLES) ---
-    auto expandBits = [](uint32_t v) -> uint32_t {
-        v = (v | (v << 16)) & 0x030000FF;
-        v = (v | (v <<  8)) & 0x0300F00F;
-        v = (v | (v <<  4)) & 0x030C30C3;
-        v = (v | (v <<  2)) & 0x09249249;
-        return v;
-    };
+// void InitMortonLUT() {
+//     // --- OLDER INTEL, AMD CPUs DON'T HAVE _pdep_u32 IMPLEMENTED IN THE HARDWARE (18-50 CLOCK CYCLES) ---
+//     auto expandBits = [](uint32_t v) -> uint32_t {
+//         v = (v | (v << 16)) & 0x030000FF;
+//         v = (v | (v <<  8)) & 0x0300F00F;
+//         v = (v | (v <<  4)) & 0x030C30C3;
+//         v = (v | (v <<  2)) & 0x09249249;
+//         return v;
+//     };
 
-    // Solution: Bit shift version uses standard ALU instructions that can be used on every CPU Architecture.
-    for (uint32_t i = 0; i < 1024; ++i) {
-        uint32_t expanded = expandBits(i); 
-        g_MortonTableX[i] = expanded;        // Bits shifted for X (Standard)
-        g_MortonTableY[i] = expanded << 1;   // Bits shifted for Y
-        g_MortonTableZ[i] = expanded << 2;   // Bits shifted for Z
-    }
-}
+//     // Solution: Bit shift version uses standard ALU instructions that can be used on every CPU Architecture.
+//     for (uint32_t i = 0; i < 1024; ++i) {
+//         uint32_t expanded = expandBits(i); 
+//         g_MortonTableX[i] = expanded;        // Bits shifted for X (Standard)
+//         g_MortonTableY[i] = expanded << 1;   // Bits shifted for Y
+//         g_MortonTableZ[i] = expanded << 2;   // Bits shifted for Z
+//     }
+// }
 
 // The new blindingly fast scalar fallback
 FORCE_INLINE uint32_t getMortonCodeLUT(uint32_t x, uint32_t y, uint32_t z) {
@@ -213,7 +213,7 @@ FORCE_INLINE __m256i getMortonCode_AVX2(__m256i x, __m256i y, __m256i z) {
 // ==================================================================================
 
 // --- THE MATH LAYER (Intel-specific Intrinsics SIMD) ---
-// AVX-256: This represents 8 vectors. It doesn't own memory; it just processes it.
+// AVX-256: This represents 8 vectors. It doesn't own memory; it just processes it (used for bulk data processing).
 // This is a custom SIMD wrapper that bypasses standard C++ compilers to explicitly command the CPU's execution ports.
 struct SIMDVector8 {
     // --- AVX-256: 8-Wide Batch ---
@@ -308,7 +308,7 @@ struct alignas(32) ParticleBlock8 {
 // 3. SSE / SCALAR VECTORS
 // ==================================================================================
 
-// SSE Accelerated Stack Vector (Use for 99% of general game logic).
+// SSE Accelerated Stack Vector (Use for 99% of general game logic and bulk data processing).
 class Vector3DStack {
 public:
     // This tells the compiler: "Every instance of this class must start at a 16-byte boundary in memory."
@@ -430,7 +430,7 @@ public:
     }
 };
 
-// Pure Scalar Fallback
+// Pure Scalar Fallback: Used for one-off calculations like the camera.
 class Vector3DScalar {
 public:
     float x, y, z, w; // Same 16-byte memory footprint for fairness
@@ -475,8 +475,7 @@ struct Matrix4 {
     }
 
     // Creates a Perspective Projection Matrix
-    // C++26: std::tan is now constexpr, allowing static projection matrices
-    static constexpr Matrix4 Perspective(float fovY_degrees, float aspect, float nearZ, float farZ) {
+    static Matrix4 Perspective(float fovY_degrees, float aspect, float nearZ, float farZ) {
         Matrix4 mat;
         float fovY_rad = fovY_degrees * (3.14159265359f / 180.0f);
         float tanHalfFovY = std::tan(fovY_rad / 2.0f);
@@ -490,35 +489,26 @@ struct Matrix4 {
     }
 
     // Creates a View Matrix (LookAt)
-    // C++26: std::sqrt is now constexpr
-    static constexpr Matrix4 LookAt(const Vector3DScalar& eye, const Vector3DScalar& target, const Vector3DScalar& upVec) {
+    static Matrix4 LookAt(const Vector3DScalar& eye, const Vector3DScalar& target, const Vector3DScalar& upVec) {
 
         // 1. Forward Vector (Z)
         Vector3DScalar f = Vector3DScalar(target.x - eye.x, target.y - eye.y, target.z - eye.z);
-        // Vector3DStack f = target - eye;
         float fLen = std::sqrt(f.dot(f));
-        // f = f * (1.0f / fLen);
         f.x *= (1.0f / fLen); f.y *= (1.0f / fLen); f.z *= (1.0f / fLen);
 
         // 2. Right Vector (X)
         Vector3DScalar r = f.cross(upVec);
-        // Vector3DStack r = f.cross(upVec);
         float rLen = std::sqrt(r.dot(r));
-        // r = r * (1.0f / rLen);
         r.x *= (1.0f / rLen); r.y *= (1.0f / rLen); r.z *= (1.0f / rLen);
 
         // 3. Up Vector (Y)
         Vector3DScalar u = r.cross(f);
-        // Vector3DStack u = r.cross(f);
 
         // 4. Build Column-Major Matrix
         Matrix4 mat = Identity();
         mat.m[0] = r.x;  mat.m[4] = r.y;  mat.m[8] = r.z;
         mat.m[1] = u.x;  mat.m[5] = u.y;  mat.m[9] = u.z;
         mat.m[2] = -f.x; mat.m[6] = -f.y; mat.m[10] = -f.z;
-        // mat.m[0] = r.data[0];  mat.m[4] = r.data[1];  mat.m[8] = r.data[2];
-        // mat.m[1] = u.data[0];  mat.m[5] = u.data[1];  mat.m[9] = u.data[2];
-        // mat.m[2] = -f.data[0]; mat.m[6] = -f.data[1]; mat.m[10] = -f.data[2];
         
         // Translation offsets
         mat.m[12] = -r.dot(eye);
