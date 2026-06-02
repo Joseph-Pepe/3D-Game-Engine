@@ -215,6 +215,7 @@ FORCE_INLINE __m256i getMortonCode_AVX2(__m256i x, __m256i y, __m256i z) {
 // --- THE MATH LAYER (Intel-specific Intrinsics SIMD) ---
 // AVX-256: This represents 8 vectors. It doesn't own memory; it just processes it (used for bulk data processing).
 // This is a custom SIMD wrapper that bypasses standard C++ compilers to explicitly command the CPU's execution ports.
+// SIMD Intrinsics: Cannot be evaluated at compile-time, only run-time.
 struct SIMDVector8 {
     // --- AVX-256: 8-Wide Batch ---
     __m256 x, y, z;
@@ -430,7 +431,7 @@ public:
     }
 };
 
-// Pure Scalar Fallback: Used for one-off calculations like the camera.
+// Pure Scalar Fallback: Used for one-off calculations like the camera and compile time calculations.
 class Vector3DScalar {
 public:
     float x, y, z, w; // Same 16-byte memory footprint for fairness
