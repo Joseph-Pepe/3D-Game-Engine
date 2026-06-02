@@ -218,10 +218,7 @@ public:
 
     // ANY Thread can call Steal()
     std::coroutine_handle<> Steal() {
-        int64_t t = top.load(std::memory_order_acquire);
-        
-        std::atomic_thread_fence(std::memory_order_seq_cst);
-        
+        int64_t t = top.load(std::memory_order_acquire);        
         int64_t b = bottom.load(std::memory_order_acquire);
 
         if (t < b) {
@@ -229,6 +226,7 @@ public:
             std::coroutine_handle<> job = jobs[t & mask];
             
             // Attempt to steal it. If another thief grabs it first, CAS will fail.
+            // Success CAS requires seq_cst, failure can safely be relaxed
             if (top.compare_exchange_strong(t, t + 1, 
                                             std::memory_order_seq_cst, 
                                             std::memory_order_relaxed)) {
