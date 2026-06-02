@@ -1,9 +1,10 @@
 #pragma once
 
 #include <immintrin.h> // AVX, SSE (128-bit), MMX (64-bit).
-#include <cmath>       // Trigonometry
+#include <cmath>       // Trigonometry (C++26 constexpr supported)
 #include <print>       // Formatting
 #include <cstdint>
+#include <array>
 
 // --- COMPILER MACROS ---
 #ifndef FORCE_INLINE
@@ -97,13 +98,35 @@ FORCE_INLINE uint32_t MapToRange(uint32_t randomVal, uint32_t range) {
 // SPATIAL HASHING (MORTON CODES / Z-ORDER CURVE)
 // ====================================================
 
-// --- PHYSICAL COORDINATE GRID LOOKUP TABLE (LUT) ---
-// 1024 entries * 4 bytes = 4KB each. Easily fits in 32KB L1 Data Cache. 4KB arrays that will live permanently in the L1 CPU Cache
-// 'inline' prevents Multiple Definition linker errors in header files.
-inline std::vector<uint32_t> g_MortonTableX(1024); // Physical Grid Coordinate X, Global Memory
-inline std::vector<uint32_t> g_MortonTableY(1024); // Physical Grid Coordinate Y, Global Memory
-inline std::vector<uint32_t> g_MortonTableZ(1024); // Physical Grid Coordinate Z, Global Memory
+// --- C++26 COMPILE-TIME MORTON LUT GENERATION ---
+// This function executes entirely during compilation.
+consteval std::array<uint32_t, 1024> GenerateMortonTable(uint32_t shift) {
+    std::array<uint32_t, 1024> table{};
+    for (uint32_t i = 0; i < 1024; ++i) {
+        uint32_t v = i;
+        v = (v | (v << 16)) & 0x030000FF;
+        v = (v | (v <<  8)) & 0x0300F00F;
+        v = (v | (v <<  4)) & 0x030C30C3;
+        v = (v | (v <<  2)) & 0x09249249;
+        table[i] = v << shift;
+    }
+    return table;
+}
 
+// 12KB off data embedded natively into the Read-Only Data (.rodata) segment of the compiled binary.
+// Zero heap allocations. Zero runtime initialization, tightly packed in memory for hardware prefetcher to stream it into L1 cache instantly.
+inline constexpr std::array<uint32_t, 1024> g_MortonTableX = GenerateMortonTable(0);
+inline constexpr std::array<uint32_t, 1024> g_MortonTableY = GenerateMortonTable(1);
+inline constexpr std::array<uint32_t, 1024> g_MortonTableZ = GenerateMortonTable(2);
+
+// // --- PHYSICAL COORDINATE GRID LOOKUP TABLE (LUT) ---
+// // 1024 entries * 4 bytes = 4KB each. Easily fits in 32KB L1 Data Cache. 4KB arrays that will live permanently in the L1 CPU Cache
+// // 'inline' prevents Multiple Definition linker errors in header files.
+// inline std::vector<uint32_t> g_MortonTableX(1024); // Physical Grid Coordinate X, Global Memory
+// inline std::vector<uint32_t> g_MortonTableY(1024); // Physical Grid Coordinate Y, Global Memory
+// inline std::vector<uint32_t> g_MortonTableZ(1024); // Physical Grid Coordinate Z, Global Memory
+
+// --- RUN-TIME MORTON LUT GENERATION ---
 void InitMortonLUT() {
     // --- OLDER INTEL, AMD CPUs DON'T HAVE _pdep_u32 IMPLEMENTED IN THE HARDWARE (18-50 CLOCK CYCLES) ---
     auto expandBits = [](uint32_t v) -> uint32_t {
@@ -307,9 +330,8 @@ public:
         
         __m128 v1 = _mm_load_ps(this->data);
         __m128 v2 = _mm_load_ps(other.data);
-        __m128 res = _mm_add_ps(v1, v2);
-        
-        _mm_store_ps(result.data, res);
+        _mm_store_ps(result.data, _mm_add_ps(v1, v2));
+
         return result;
     }
 
@@ -319,9 +341,8 @@ public:
         
         __m128 v1 = _mm_load_ps(this->data);
         __m128 v2 = _mm_load_ps(other.data);
-        __m128 res = _mm_sub_ps(v1, v2);
-        
-        _mm_store_ps(result.data, res);
+        _mm_store_ps(result.data, _mm_sub_ps(v1, v2));
+
         return result;
     }
 
@@ -330,10 +351,9 @@ public:
         Vector3DStack result;
         
         __m128 v1 = _mm_load_ps(this->data);
-        __m128 s = _mm_set1_ps(scalar); // Broadcasts scalar to all 4 slots
-        __m128 res = _mm_mul_ps(v1, s);
-        
-        _mm_store_ps(result.data, res);
+        __m128 s = _mm_set1_ps(scalar); // Broadcasts scalar to all 4 slots        
+        _mm_store_ps(result.data, _mm_mul_ps(v1, s));
+
         return result;
     }
 
@@ -341,9 +361,7 @@ public:
     FORCE_INLINE void operator*=(float scalar) {
         __m128 v1 = _mm_load_ps(this->data);
         __m128 s = _mm_set1_ps(scalar);
-        
-        __m128 res = _mm_mul_ps(v1, s);
-        _mm_store_ps(this->data, res); // Store directly back into itself
+        _mm_store_ps(this->data, _mm_mul_ps(v1, s)); // Store directly back into itself
     }
 
     // Dot Product
@@ -351,12 +369,41 @@ public:
         __m128 v1 = _mm_load_ps(this->data);
         __m128 v2 = _mm_load_ps(other.data);
 
-        // 0x71 mask: calculates dots for first 3 elements, stores in first element
-        __m128 res = _mm_dp_ps(v1, v2, 0x71);
+        // ===================================
+        // DOT PRODUCT INSTRUCTION (_mm_dp_ps)
+        // ===================================
+        /*
+            - On modern Intel/AMD architectures, _mm_dp_ps is implemented in slow microcode (~9-14 clock cycles).
+            - It tries to do too many things (multiply, horizontal add, and mask) simultaneously.
+            - Hogs CPU execution ports because the silicilon has to internally decode it into a sequence of multiplies, adds, and bitwise masks.
+        */
 
-        float result;
-        _mm_store_ss(&result, res); 
-        return result;
+        // // 0x71 mask: calculates dots for first 3 elements, stores in first element
+        // __m128 res = _mm_dp_ps(v1, v2, 0x71);
+
+        // float result;
+        // _mm_store_ss(&result, res); 
+        // return result;
+
+        // ===================================
+        // DOT PRODUCT (MANUAL HORIZONTAL REDUCTION)
+        // ===================================
+        /*
+            - Operates on separate execution ports and can overlap these manual instructions.
+            - [_mm_mul_ps] ~4 cycles
+            - [_mm_movehl_ps, _mm_shuffle_ps] ~1 cycle
+            - [_mm_add_ps, _mm_add_ss] ~3-4 cycles
+        */
+        // Bypassing the _mm_dp_ps hardware trap using fast manual reduction (3-4 clock cycles, 2x performance improvement in dot product speed)
+        __m128 mul = _mm_mul_ps(v1, v2);
+
+        // Since constructor guarantees w = 0.0f, we can safely horizontal sum all 4 lanes
+        __m128 shuf = _mm_movehl_ps(mul, mul); 
+        mul = _mm_add_ps(mul, shuf);           
+        shuf = _mm_shuffle_ps(mul, mul, _MM_SHUFFLE(1, 1, 1, 1)); 
+        mul = _mm_add_ss(mul, shuf);           
+        
+        return _mm_cvtss_f32(mul);
     }
 
     // Cross Product
@@ -388,21 +435,21 @@ class Vector3DScalar {
 public:
     float x, y, z, w; // Same 16-byte memory footprint for fairness
 
-    Vector3DScalar(float x = 0.0f, float y = 0.0f, float z = 0.0f) 
+    constexpr Vector3DScalar(float x = 0.0f, float y = 0.0f, float z = 0.0f) 
         : x(x), y(y), z(z), w(0.0f) {}
 
     // Traditional element-by-element addition
-    FORCE_INLINE Vector3DScalar operator+(const Vector3DScalar& other) const {
+    FORCE_INLINE constexpr Vector3DScalar operator+(const Vector3DScalar& other) const {
         return Vector3DScalar(x + other.x, y + other.y, z + other.z);
     }
 
     // Traditional dot product
-    FORCE_INLINE float dot(const Vector3DScalar& other) const {
+    FORCE_INLINE constexpr float dot(const Vector3DScalar& other) const {
         return (x * other.x) + (y * other.y) + (z * other.z);
     }
 
     // Traditional cross product
-    FORCE_INLINE Vector3DScalar cross(const Vector3DScalar& other) const {
+    FORCE_INLINE constexpr Vector3DScalar cross(const Vector3DScalar& other) const {
         return Vector3DScalar(
             (y * other.z) - (z * other.y),
             (z * other.x) - (x * other.z),
@@ -421,14 +468,15 @@ struct Matrix4 {
     float m[16] = {0}; // Initializes to all zeros
 
     // Creates an Identity Matrix
-    static Matrix4 Identity() {
+    static constexpr Matrix4 Identity() {
         Matrix4 mat;
         mat.m[0] = 1.0f; mat.m[5] = 1.0f; mat.m[10] = 1.0f; mat.m[15] = 1.0f;
         return mat;
     }
 
     // Creates a Perspective Projection Matrix
-    static Matrix4 Perspective(float fovY_degrees, float aspect, float nearZ, float farZ) {
+    // C++26: std::tan is now constexpr, allowing static projection matrices
+    static constexpr Matrix4 Perspective(float fovY_degrees, float aspect, float nearZ, float farZ) {
         Matrix4 mat;
         float fovY_rad = fovY_degrees * (3.14159265359f / 180.0f);
         float tanHalfFovY = std::tan(fovY_rad / 2.0f);
@@ -442,27 +490,36 @@ struct Matrix4 {
     }
 
     // Creates a View Matrix (LookAt)
-    static Matrix4 LookAt(const Vector3DStack& eye, const Vector3DStack& target, const Vector3DStack& upVec) {
+    // C++26: std::sqrt is now constexpr
+    static constexpr Matrix4 LookAt(const Vector3DScalar& eye, const Vector3DScalar& target, const Vector3DScalar& upVec) {
 
         // 1. Forward Vector (Z)
-        Vector3DStack f = target - eye;
+        Vector3DScalar f = Vector3DScalar(target.x - eye.x, target.y - eye.y, target.z - eye.z);
+        // Vector3DStack f = target - eye;
         float fLen = std::sqrt(f.dot(f));
-        f = f * (1.0f / fLen);
+        // f = f * (1.0f / fLen);
+        f.x *= (1.0f / fLen); f.y *= (1.0f / fLen); f.z *= (1.0f / fLen);
 
         // 2. Right Vector (X)
-        Vector3DStack r = f.cross(upVec);
+        Vector3DScalar r = f.cross(upVec);
+        // Vector3DStack r = f.cross(upVec);
         float rLen = std::sqrt(r.dot(r));
-        r = r * (1.0f / rLen);
+        // r = r * (1.0f / rLen);
+        r.x *= (1.0f / rLen); r.y *= (1.0f / rLen); r.z *= (1.0f / rLen);
 
         // 3. Up Vector (Y)
-        Vector3DStack u = r.cross(f);
+        Vector3DScalar u = r.cross(f);
+        // Vector3DStack u = r.cross(f);
 
         // 4. Build Column-Major Matrix
         Matrix4 mat = Identity();
-        mat.m[0] = r.data[0];  mat.m[4] = r.data[1];  mat.m[8] = r.data[2];
-        mat.m[1] = u.data[0];  mat.m[5] = u.data[1];  mat.m[9] = u.data[2];
-        mat.m[2] = -f.data[0]; mat.m[6] = -f.data[1]; mat.m[10] = -f.data[2];
-
+        mat.m[0] = r.x;  mat.m[4] = r.y;  mat.m[8] = r.z;
+        mat.m[1] = u.x;  mat.m[5] = u.y;  mat.m[9] = u.z;
+        mat.m[2] = -f.x; mat.m[6] = -f.y; mat.m[10] = -f.z;
+        // mat.m[0] = r.data[0];  mat.m[4] = r.data[1];  mat.m[8] = r.data[2];
+        // mat.m[1] = u.data[0];  mat.m[5] = u.data[1];  mat.m[9] = u.data[2];
+        // mat.m[2] = -f.data[0]; mat.m[6] = -f.data[1]; mat.m[10] = -f.data[2];
+        
         // Translation offsets
         mat.m[12] = -r.dot(eye);
         mat.m[13] = -u.dot(eye);
