@@ -19,8 +19,20 @@ public:
     // Component 2: Velocities
     AlignedVector<float> vX, vY, vZ;
 
-    // Histogram per potential thread (maxQueues)
-    std::vector<std::vector<uint32_t>> threadLocalCounts;
+    // =============================================================
+    // CONTIGUOUS FLAT 1D ARRAY
+    // =============================================================
+    /*
+        - std::vector<std::vector<uint32_t>> threadLocalCounts is a list of pointers pointing to separate, fragmented allocations.
+        - An array of pointers pointing to random locations is bad for the CPU hardware prefetcher b/c it has to fetch random pages from RAM.
+
+        - std::vector<uint32_t> is a single contiguous array.
+        - All threads will write into the same massive block of memory.
+        - Its mathematically separated by offsets.
+    */
+
+    // Histogram per potential thread (maxQueues, Flat 1D Array for contiguous cache locality)
+    std::vector<uint32_t> threadLocalCounts;
 
     // Saves the destination indices (i.e., allows the prefetcher to predict where to go next)
     std::vector<uint32_t> temp_destIndices;
@@ -58,7 +70,8 @@ public:
     ParticlePhysicsSOA(size_t count) {
         size_t paddedCount = (count + 7uz) & ~7uz; // C++23: 'uz' is the size_t literal, Pad for AVX2, ensures array sizes are multiples of 8.
 
-        threadLocalCounts.resize(g_JobSystem.maxQueues, std::vector<uint32_t>(TOTAL_CELLS, 0));
+        // Allocate one massive, contiguous block of memory for all threads
+        threadLocalCounts.resize(g_JobSystem.maxQueues * TOTAL_CELLS, 0);
         
         pX.resize(paddedCount, 0.0f);
         pY.resize(paddedCount, 0.0f);
@@ -191,8 +204,6 @@ public:
                     uint32_t state = index * 747796405u + 2891336453u;
                     state = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
                     state = (state >> 22u) ^ state;
-                    
-                    // return (float)state / (float)UINT32_MAX; 
 
                     // OPTIMIZATION: Multiply by inverse (1.0 / 4294967295.0)
                     return static_cast<float>(state) * 2.3283064365386963e-10f;
@@ -258,13 +269,7 @@ public:
                     distSq = _mm256_fmadd_ps(py, py, distSq);
                     distSq = _mm256_fmadd_ps(pz, pz, distSq);
 
-                    // OLD: Calculate 1.0 / sqrt(distSq)
-                    // __m256 invDist = _mm256_rsqrt_ps(_mm256_add_ps(distSq, epsilon));
-
                     // Fast Hardware Approximation (Bypasses Newton-Raphson)
-                    // __m256 distSq_eps = _mm256_add_ps(distSq, epsilon);
-                    // __m256 invDist = _mm256_rsqrt_ps(distSq_eps);
-
                     // 1. Get the hardware's 12-bit guess
                      __m256 distSq_eps = _mm256_add_ps(distSq, epsilon);
                     __m256 rsqrt_approx = _mm256_rsqrt_ps(distSq_eps);
@@ -406,8 +411,8 @@ public:
                 // When the L1 buffer is full, flush it to the L3 Cache histogram in one big batch
                 if (bufferIdx == 256) {
                     for (uint32_t k = 0; k < 256; ++k) {
-                        // Histogram increment (Must be scalar).
-                        threadLocalCounts[workerId][hashBuffer[k]]++;
+                        // Flat array math: (Worker ID * Total Cells) + Hash
+                        threadLocalCounts[(workerId * TOTAL_CELLS) + hashBuffer[k]]++;
                     }
                     bufferIdx = 0; // Reset buffer
                 }
@@ -416,7 +421,7 @@ public:
 
             // Flush any remaining hashes in the buffer before moving to the scalar remainder!
             for (uint32_t k = 0; k < bufferIdx; ++k) {
-                threadLocalCounts[workerId][hashBuffer[k]]++;
+                threadLocalCounts[(workerId * TOTAL_CELLS) + hashBuffer[k]]++;
             }
 
             // ----------------------------------------------------
@@ -437,6 +442,7 @@ public:
                 // [15-20 clock cycles] to perform a single floating-point division, [4 clock cycles] to perform a single floating-point multiplication
                 // uint32_t gridX = (uint32_t)std::clamp((int)(shiftedX * INV_CELL_SIZE), 0, 1023);
                 // uint32_t gridY = (uint32_t)std::clamp((int)(shiftedY * INV_CELL_SIZE), 0, 1023);
+                // uint32_t gridZ = (uint32_t)std::clamp((int)(shiftedZ * INV_CELL_SIZE), 0, 1023);
 
                 // --- BRANCHLESS SSE CLAMP ---
                 /*
@@ -467,8 +473,6 @@ public:
                 else {
                     // True 3D Path: Morton Encoding
                     float shiftedZ = pZ[i] + (WORLD_SIZE * 0.5f);
-                    
-                    // uint32_t gridZ = (uint32_t)std::clamp((int)(shiftedZ * INV_CELL_SIZE), 0, 1023);
 
                     // Branchless Z-Clamp
                     __m128 vz = _mm_set_ss(shiftedZ * INV_CELL_SIZE);
@@ -491,7 +495,9 @@ public:
 
                 // Save the hash so we don't calculate it twice, and increment the histogram
                 particleCellIndices[i] = hash;
-                threadLocalCounts[workerId][hash]++; // Thread-local write! Zero false sharing, zero atomics.
+
+                // Flat Array Math: (Worker ID * Total Cells) + Hash (i.e., flat mapping)
+                threadLocalCounts[(workerId * TOTAL_CELLS) + hash]++; // Thread-local write! Zero false sharing, zero atomics.
             }
         });
 
@@ -524,12 +530,14 @@ public:
 
                 // Accumulate all threads' contributions for this specific cell
                 for (uint32_t t = 0; t < threadCount; ++t) {
+                    uint32_t flatIndex = (t * TOTAL_CELLS) + cell;
+
                     // 1. Read the data into the ALU
-                    cellCount += threadLocalCounts[t][cell];
+                    cellCount += threadLocalCounts[flatIndex];
 
                     // 2. ZERO-ON-READ: Zero the memory while it is still hot in the L1 Cache! This instantly prepares the buffer for the NEXT frame for free.
                     // Requires no Read-For-Ownership (RFO) penalty from the main RAM.
-                    threadLocalCounts[t][cell] = 0; 
+                    threadLocalCounts[flatIndex] = 0;
                 }
                 localRunningTotal += cellCount;
 
@@ -976,19 +984,12 @@ public:
                             __m256 masked_repulsion = _mm256_and_ps(vRepulsion, mask);
 
                             // 7. DEEPLY FOLDED NEWTON-RAPHSON & PUSH
+                            // Newton-Raphson Refinement (Restores 23-bit precision)
+                            // Formula: y = y * (1.5 - 0.5 * x * y^2)
                             // Get the hardware's 12-bit guess (~5-7 cycles)
                             __m256 rsqrt_approx = _mm256_rsqrt_ps(distSq); 
                             __m256 half_x = _mm256_mul_ps(distSq, half);
                             __m256 y_sq = _mm256_mul_ps(rsqrt_approx, rsqrt_approx);
-
-                            // Newton-Raphson Refinement (Restores 23-bit precision)
-                            // Formula: y = y * (1.5 - 0.5 * x * y^2)
-                            // __m256 half_x = _mm256_mul_ps(distSq_eps, half);
-                            // __m256 y_sq = _mm256_mul_ps(rsqrt_approx, rsqrt_approx);
-
-                            // _mm256_fnmadd_ps perfectly calculates: -(half_x * y_sq) + 1.5
-                            // __m256 term = _mm256_fnmadd_ps(half_x, y_sq, three_halves);
-                            // __m256 invDistApprox = _mm256_mul_ps(rsqrt_approx, term);
 
                             // Calculate Push Force
                             // __m256 push = _mm256_mul_ps(invDistApprox, vRepulsion);
@@ -1295,12 +1296,8 @@ public:
                 // ==========================================
                 // THE ACCUMULATOR DUMP (Split for 2D/3D)
                 // ==========================================
-                
-                // Dump the AVX2 accumulator registers using UNALIGNED stores
-                // _mm256_storeu_ps(tempX, accX);
-                // _mm256_storeu_ps(tempY, accY);
-
-                // Dump the AVX2 accumulator registers back to standard floats
+        
+                // Dump the AVX2 accumulator registers back to standard floats using ALIGNED stores
                 // _mm256_store_ps(tempX, accX);
                 // _mm256_store_ps(tempY, accY);
                 // _mm256_store_ps(tempZ, accZ);
@@ -1309,7 +1306,7 @@ public:
                 // for (int k = 0; k < 8; ++k) {
                 //     scalarForceX += tempX[k];
                 //     scalarForceY += tempY[k];
-                //     // scalarForceZ += tempZ[k];
+                //     scalarForceZ += tempZ[k];
                 // }
 
                 // X and Y are ALWAYS needed
@@ -1333,8 +1330,6 @@ public:
                     vZ[i] += scalarForceZ;
                 }
             }
-            // g_TotalMathOperations.fetch_add(localThreadOps, std::memory_order_relaxed); // At the very end of the thread's chunk, update the global atomic ONCE
-
             // Safely write to this specific thread's isolated cache line
             g_JobSystem.threadStats[tl_workerIndex]->totalFlops.fetch_add(localThreadOps, std::memory_order_relaxed);
         });
@@ -1413,9 +1408,6 @@ public:
                     distSq = _mm256_fmadd_ps(py, py, distSq);
 
                     // Fast Hardware Approximation (Bypasses Newton-Raphson)
-                    // __m256 distSq_eps = _mm256_add_ps(distSq, epsilon);
-                    // __m256 invDist = _mm256_rsqrt_ps(distSq_eps);
-
                     __m256 distSq_eps = _mm256_add_ps(distSq, epsilon);
 
                     // Newton-Raphson Refinement
@@ -1497,14 +1489,7 @@ public:
                     distSq = _mm256_fmadd_ps(py, py, distSq);
                     distSq = _mm256_fmadd_ps(pz, pz, distSq);
 
-                    // OLD: Calculate 1.0 / sqrt(distSq) - This is the "Normalization" factor
-                    // __m256 invDist = _mm256_rsqrt_ps(_mm256_add_ps(distSq, epsilon));
-
                     // Fast Hardware Approximation (Bypasses Newton-Raphson)
-                    // __m256 distSq_eps = _mm256_add_ps(distSq, epsilon);
-                    // __m256 invDist = _mm256_rsqrt_ps(distSq_eps);
-
-
                     // 1. Get the hardware's 12-bit guess
                     __m256 distSq_eps = _mm256_add_ps(distSq, epsilon);
                     __m256 rsqrt_approx = _mm256_rsqrt_ps(distSq_eps); // _mm256_rsqrt_ps is a lightning-fast hardware approximation of 1/sqrt(x)
