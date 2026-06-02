@@ -1,11 +1,14 @@
 #pragma once
 
 #include "Math.h"
+#include "Memory.h" // Ensure AlignedVector is included!
 
 // --- THE SYSTEM LAYER (8-Wide Alignment) Processes 8 vectors simultaneously ---
 class VectorManagerSOA_V2_AVX2 {
 public:
-    std::vector<float> xs, ys, zs;
+
+    // Use the custom 32-byte aligned allocator!
+    AlignedVector<float> xs, ys, zs;
 
     VectorManagerSOA_V2_AVX2(size_t count) {
         size_t paddedCount = (count + 7) & ~7;
@@ -20,7 +23,7 @@ public:
         __m256 sZ = _mm256_set1_ps(stepZ);
         __m256 smallVal = _mm256_set1_ps(0.00001f);
 
-        uint32_t dataCount = xs.size();
+        uint32_t dataCount = static_cast<uint32_t>(xs.size());
     
         // 1. Calculate a cache-friendly chunk size (target ~8192 to 32768 elements per job)
         uint32_t threadCount = g_JobSystem.nextWorkerId.load(std::memory_order_relaxed);
@@ -46,17 +49,16 @@ public:
                 // LOAD: Bring data into our math wrapper
                 SIMDVector8 batch = { 
                     // [_mm256_load_ps]: This demands that memory is 32-byte aligned (std::vector only guarantees 16-byte alignment).
-
-                    /* 
+                    // We are now guaranteed 32-byte alignment. 
+                    // We use _mm256_load_ps (Aligned) instead of _mm256_loadu_ps (Unaligned)
                     _mm256_load_ps(&xs[i]), 
                     _mm256_load_ps(&ys[i]), 
                     _mm256_load_ps(&zs[i]) 
-                    */
                     // [_mm256_loadu_ps]: The hardware is smart because using it on memory that happens to be aligned incurs zero performance penalty. 
                     // Is the safest way to write SIMD code eithout dealing with custom memory allocators (i.e., prevents any 32-byte memory alignment crashes). 
-                    _mm256_loadu_ps(&xs[i]), 
-                    _mm256_loadu_ps(&ys[i]), 
-                    _mm256_loadu_ps(&zs[i])
+                    // _mm256_loadu_ps(&xs[i]), 
+                    // _mm256_loadu_ps(&ys[i]), 
+                    // _mm256_loadu_ps(&zs[i])
                 };
 
                 // MATH: Using our clean functions
@@ -69,13 +71,14 @@ public:
                 batch.cross(sX, sY, sZ);
 
                 // STORE: Write back to main memory
-                _mm256_storeu_ps(&xs[i], batch.x);
-                _mm256_storeu_ps(&ys[i], batch.y);
-                _mm256_storeu_ps(&zs[i], batch.z);
+                // Aligned stores directly to the Write-Combine buffer
+                _mm256_store_ps(&xs[i], batch.x);
+                _mm256_store_ps(&ys[i], batch.y);
+                _mm256_store_ps(&zs[i], batch.z);
             }
 
             // Clean the worker CPU registers before handing the thread back to the scheduler
-            // _mm256_zeroupper(); // this must be the final instruction executed before returning whenever using bare-metal SIMD using _mm256 registers inside lambdas.
+            _mm256_zeroupper(); // this must be the final instruction executed before returning whenever using bare-metal SIMD using _mm256 registers inside lambdas.
         });
 
         // Clean the Caller Thread before returning to the SSE benchmark!
@@ -119,7 +122,7 @@ public:
         __m256 sZ = _mm256_set1_ps(stepZ);
         __m256 smallVal = _mm256_set1_ps(0.00001f);
 
-        uint32_t blockCount = blocks.size();
+        uint32_t blockCount = static_cast<uint32_t>(blocks.size());
 
         // 1. Thread Chunking (Chunks are now counted in BLOCKS, not single floats)
         uint32_t threadCount = g_JobSystem.nextWorkerId.load(std::memory_order_relaxed);
