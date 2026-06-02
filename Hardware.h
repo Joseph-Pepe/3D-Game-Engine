@@ -128,7 +128,6 @@ inline bool detect_hardware_CPUID_BMI2() {
     #else
         __cpuid(1, cpuInfo[0], cpuInfo[1], cpuInfo[2], cpuInfo[3]);
     #endif
-
     
     int baseFamily = (cpuInfo[0] >> 8) & 0xF;
     int extendedFamily = (cpuInfo[0] >> 20) & 0xFF;
