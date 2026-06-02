@@ -18,11 +18,26 @@
 */
 template <typename T, std::size_t Alignment = 32>
 struct AlignedAllocator {
+    // Standard STL Allocator Typedefs (MSVC template deduction)
     using value_type = T;
-    
+    using pointer = T*;
+    using const_pointer = const T*;
+    using size_type = std::size_t;
+    using difference_type = std::ptrdiff_t;
+
     // Modern C++ optimization: Tells vectors they can safely move memory pointers without deep-copying during swaps.
     using is_always_equal = std::true_type;
 
+    // =============================================================
+    // EXPLICIT REBIND 
+    // =============================================================
+    // Explicit rebind is mandatory because 'Alignment' is a non-type parameter.
+    // Explicitly tell the STL how to rebind this allocator
+    template <class U>
+    struct rebind {
+        using other = AlignedAllocator<U, Alignment>;
+    };
+    
     // constexpr for compile-time generation
     constexpr AlignedAllocator() noexcept = default;
 
