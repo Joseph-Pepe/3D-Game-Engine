@@ -252,8 +252,10 @@ public:
         VectorManagerSOA_Portable(size_t count) {
             constexpr size_t stride = native_simd::size();
             
-            // Dynamic padding: hardware-agnostic boundary alignment
+            // Dynamic padding: hardware-agnostic boundary alignment (i.e., for ANY hardware architecture)
             size_t remainder = count % stride;
+
+             // Safely pad to the nearest multiple of whatever 'stride' the hardware chose (i.e., engine automatically adapts its memory allocation, so it never crashes at the end of an array).
             size_t paddedCount = (remainder == 0) ? count : count + (stride - remainder);
             
             xs.resize(paddedCount, 1.0f);
@@ -262,6 +264,7 @@ public:
         }
 
         FORCE_INLINE void processBatch(float stepX, float stepY, float stepZ) {
+            // C++26 native_simd::size tells us exactly how many floats fit in one register
             constexpr size_t stride = native_simd::size();
             
             // Broadcast scalars directly into the portable SIMD types
@@ -270,7 +273,7 @@ public:
             native_simd sZ(stepZ);
             native_simd smallVal(0.00001f);
 
-            // 1. Extract raw pointers to prevent 'this' aliasing in the parallel loop
+            // 1. Extract raw pointers to guarantee contiguous memory
             float* ptrX = xs.data();
             float* ptrY = ys.data();
             float* ptrZ = zs.data();
