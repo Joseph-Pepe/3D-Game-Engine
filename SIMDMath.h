@@ -8,7 +8,7 @@ class VectorManagerSOA_V2_AVX2 {
 public:
 
     // Use the custom 32-byte aligned allocator!
-    AlignedVector<float> xs, ys, zs;
+    AlignedVector32<float> xs, ys, zs;
 
     VectorManagerSOA_V2_AVX2(size_t count) {
         size_t paddedCount = (count + 7) & ~7;
@@ -101,7 +101,7 @@ public:
 class VectorManagerAoSoA_AVX2 {
 public:
     // Uses your custom allocator to guarantee the entire heap array starts on a 32-byte boundary!
-    AlignedVector<ParticleBlock8> blocks;
+    AlignedVector32<ParticleBlock8> blocks;
 
     VectorManagerAoSoA_AVX2(size_t particleCount) {
         // Divide by 8, rounding up to get total blocks
