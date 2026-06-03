@@ -9,6 +9,20 @@
 #include <algorithm>
 #include <immintrin.h>
 
+// ======================================================================
+// COMPILER PROBING: Check if C++26 SIMD is available
+// ======================================================================
+
+// Check if the header exists AND if the compiler is running in C++26 (or newer) mode
+#if __has_include(<simd>) && (defined(__cplusplus) && __cplusplus > 202302L || defined(_MSVC_LANG) && _MSVC_LANG > 202302L)
+    // C++26 features are unlocked
+    #include <simd>
+    #define ENGINE_HAS_CXX26_SIMD 1
+#else
+    // Fallback for C++23 and older
+    #define ENGINE_HAS_CXX26_SIMD 0
+#endif
+
 // A "Manager" class for a large collection of vectors (processes 4 vectors simultaneously).
 class VectorManagerSOA {
 public:
@@ -228,75 +242,77 @@ public:
 // C++26: SIMD for MSVC build v14.51 and newer.
 // ======================================================================
 
-// // --- THE SYSTEM LAYER (Portable Vector Manager, Portable SIMD, Any Hardware) ---
-// class VectorManagerSOA_Portable {
-// public:
-//     // Memory is perfectly aligned for the target hardware!
-//     NativeAlignedVector<float> xs, ys, zs;
+#if ENGINE_HAS_CXX26_SIMD
+    // --- THE SYSTEM LAYER (Portable Vector Manager, Portable SIMD, Any Hardware) ---
+    class VectorManagerSOA_Portable {
+    public:
+        // Memory is perfectly aligned for the target hardware!
+        NativeAlignedVector<float> xs, ys, zs;
 
-//     VectorManagerSOA_Portable(size_t count) {
-//         constexpr size_t stride = native_simd::size();
-        
-//         // Dynamic padding: hardware-agnostic boundary alignment
-//         size_t remainder = count % stride;
-//         size_t paddedCount = (remainder == 0) ? count : count + (stride - remainder);
-        
-//         xs.resize(paddedCount, 1.0f);
-//         ys.resize(paddedCount, 2.0f);
-//         zs.resize(paddedCount, 3.0f);
-//     }
-
-//     FORCE_INLINE void processBatch(float stepX, float stepY, float stepZ) {
-//         constexpr size_t stride = native_simd::size();
-        
-//         // Broadcast scalars directly into the portable SIMD types
-//         native_simd sX(stepX);
-//         native_simd sY(stepY);
-//         native_simd sZ(stepZ);
-//         native_simd smallVal(0.00001f);
-
-//         // 1. Extract raw pointers to prevent 'this' aliasing in the parallel loop
-//         float* ptrX = xs.data();
-//         float* ptrY = ys.data();
-//         float* ptrZ = zs.data();
-
-//         // Use a standard algorithm with the par_unseq policy
-//         // In C++26, the compiler is significantly better at "auto-vectorizing" standard containers when using the execution policies.
-//         auto indices = std::views::iota(0uz, xs.size() / stride);
-
-//         // 2. Safely capture raw pointers by value [=]
-//         std::for_each(std::execution::par_unseq, indices.begin(), indices.end(), [=](size_t chunkIdx) {
-//             size_t i = chunkIdx * stride;
-
-//             // LOAD: Vector_aligned portable loads! This emits the fastest possible assembly.
-//             SIMDVectorP batch = { 
-//                 native_simd(ptrX + i, simd::vector_aligned), 
-//                 native_simd(ptrY + i, simd::vector_aligned), 
-//                 native_simd(ptrZ + i, simd::vector_aligned) 
-//             };
-
-//             // MATH
-//             batch.add(sX, sY, sZ);
-//             native_simd d = batch.dot_fma(sX, sY, sZ);
+        VectorManagerSOA_Portable(size_t count) {
+            constexpr size_t stride = native_simd::size();
             
-//             // The old _mm512_add_ps(x, _mm512_mul_ps(d, smallVal)) collapses into standard C++ syntax while maintaining identical silicon execution.
-//             batch.x += d * smallVal;
-//             batch.cross(sX, sY, sZ);
+            // Dynamic padding: hardware-agnostic boundary alignment
+            size_t remainder = count % stride;
+            size_t paddedCount = (remainder == 0) ? count : count + (stride - remainder);
+            
+            xs.resize(paddedCount, 1.0f);
+            ys.resize(paddedCount, 2.0f);
+            zs.resize(paddedCount, 3.0f);
+        }
 
-//             // STORE: Vector_aligned stores write directly to the hardware's Write-Combine buffer.
-//             batch.x.copy_to(ptrX + i, simd::vector_aligned);
-//             batch.y.copy_to(ptrY + i, simd::vector_aligned);
-//             batch.z.copy_to(ptrZ + i, simd::vector_aligned);
-//         });
-//     }
-// };
+        FORCE_INLINE void processBatch(float stepX, float stepY, float stepZ) {
+            constexpr size_t stride = native_simd::size();
+            
+            // Broadcast scalars directly into the portable SIMD types
+            native_simd sX(stepX);
+            native_simd sY(stepY);
+            native_simd sZ(stepZ);
+            native_simd smallVal(0.00001f);
 
-// // This block perfectly sizes itself to the hardware cache lines.
-// struct PortableParticleBlock {
-//     native_simd x, y, z, w; // w used as padding to hit power-of-2 cache sizes
-// };
+            // 1. Extract raw pointers to prevent 'this' aliasing in the parallel loop
+            float* ptrX = xs.data();
+            float* ptrY = ys.data();
+            float* ptrZ = zs.data();
 
-// using PortableAoSoAVector = std::vector<PortableParticleBlock, DynamicAlignedAllocator<PortableParticleBlock, NATIVE_ALIGN>>;
+            // Use a standard algorithm with the par_unseq policy
+            // In C++26, the compiler is significantly better at "auto-vectorizing" standard containers when using the execution policies.
+            auto indices = std::views::iota(0uz, xs.size() / stride);
+
+            // 2. Safely capture raw pointers by value [=]
+            std::for_each(std::execution::par_unseq, indices.begin(), indices.end(), [=](size_t chunkIdx) {
+                size_t i = chunkIdx * stride;
+
+                // LOAD: Vector_aligned portable loads! This emits the fastest possible assembly.
+                SIMDVectorP batch = { 
+                    native_simd(ptrX + i, simd::vector_aligned), 
+                    native_simd(ptrY + i, simd::vector_aligned), 
+                    native_simd(ptrZ + i, simd::vector_aligned) 
+                };
+
+                // MATH
+                batch.add(sX, sY, sZ);
+                native_simd d = batch.dot_fma(sX, sY, sZ);
+                
+                // The old _mm512_add_ps(x, _mm512_mul_ps(d, smallVal)) collapses into standard C++ syntax while maintaining identical silicon execution.
+                batch.x += d * smallVal;
+                batch.cross(sX, sY, sZ);
+
+                // STORE: Vector_aligned stores write directly to the hardware's Write-Combine buffer.
+                batch.x.copy_to(ptrX + i, simd::vector_aligned);
+                batch.y.copy_to(ptrY + i, simd::vector_aligned);
+                batch.z.copy_to(ptrZ + i, simd::vector_aligned);
+            });
+        }
+    };
+
+    // This block perfectly sizes itself to the hardware cache lines.
+    struct PortableParticleBlock {
+        native_simd x, y, z, w; // w used as padding to hit power-of-2 cache sizes
+    };
+
+    using PortableAoSoAVector = std::vector<PortableParticleBlock, DynamicAlignedAllocator<PortableParticleBlock, NATIVE_ALIGN>>;
+#endif
 
 // ======================================================================================
 // ARRAY OF STRUCTS OF ARRAYS (AOSOA)
