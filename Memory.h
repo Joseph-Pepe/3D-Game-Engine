@@ -5,11 +5,11 @@
 #include <limits>
 #include <memory> // Required for std::allocator in consteval
 
-// (Optional) Include <simd> if you want the portable vector typedefs defined here.
-// If you want to keep SIMD logic isolated, you can move the C++26 block to a Math/SIMD header.
-#if __cplusplus > 202302L || defined(_MSVC_LANG) && _MSVC_LANG > 202302L
-    #include <simd> 
-#endif
+// // (Optional) Include <simd> if you want the portable vector typedefs defined here.
+// // If you want to keep SIMD logic isolated, you can move the C++26 block to a Math/SIMD header.
+// #if __cplusplus > 202302L || defined(_MSVC_LANG) && _MSVC_LANG > 202302L
+//     #include <simd> 
+// #endif
 
 // ==================================================================================
 // MEMORY ALLOCATION (HARDWARE ALIGNMENT)
@@ -106,13 +106,14 @@ using AlignedVector64 = std::vector<T, AlignedAllocator<T, 64>>; // AVX-512 (64-
 // C++26 DYNAMIC HARDWARE ALIGNMENT (Portable SIMD)
 // ==================================================================================
 
-#if __cplusplus > 202302L || defined(_MSVC_LANG) && _MSVC_LANG > 202302L
+// #if __cplusplus > 202302L || defined(_MSVC_LANG) && _MSVC_LANG > 202302L
 
-    // 1. Detect the hardware's preferred alignment at compile time
-    constexpr std::size_t NATIVE_SIMD_ALIGN = std::experimental::memory_alignment_v<std::experimental::native_simd<float>>;
+//     // 1. Detect the hardware's preferred alignment at compile time
+//     // Ask the C++26 standard exactly how many bytes the current hardware needs
+//     constexpr std::size_t NATIVE_SIMD_ALIGN = std::experimental::memory_alignment_v<std::experimental::native_simd<float>>;
 
-    // 2. Define a vector that automatically aligns to the current machine's architecture
-    template <typename T>
-    using NativeAlignedVector = std::vector<T, AlignedAllocator<T, NATIVE_SIMD_ALIGN>>;
+//     // 2. Define a vector that automatically aligns to the current machine's architecture
+//     template <typename T>
+//     using NativeAlignedVector = std::vector<T, AlignedAllocator<T, NATIVE_SIMD_ALIGN>>;
 
-#endif
+// #endif
