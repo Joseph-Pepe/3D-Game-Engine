@@ -16,6 +16,7 @@
     - Ensures AVX reads will not straddle two different 64-byte cache chunk lines.
     - Now every array will start on a 32-byte boundary. Since our loops iterate in multiple of 8 we can use aligned load.
 */
+// A standard-compliant allocator that guarantees strict memory alignment
 template <typename T, std::size_t Alignment = 32>
 struct AlignedAllocator {
     // Standard STL Allocator Typedefs (MSVC template deduction)
@@ -74,4 +75,8 @@ struct AlignedAllocator {
 
 // Typedef for clean architecture
 template <typename T>
-using AlignedVector = std::vector<T, AlignedAllocator<T, 32>>;
+using AlignedVector32 = std::vector<T, AlignedAllocator<T, 32>>;
+
+// Typedef for your 64-byte aligned vector (Perfect for AVX-512)
+template <typename T>
+using AlignedVector64 = std::vector<T, AlignedAllocator<T, 64>>;
