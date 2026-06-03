@@ -23,6 +23,16 @@
     #define ENGINE_HAS_CXX26_SIMD 0
 #endif
 
+// ===================================
+// SIMD Intrinsics & Memory Alignment
+// ===================================
+
+/*
+    - SIMD: Single Instruction, Multiple Data
+    - SIMD and aligned memory is a great way to squeeze performance out of modern CPUs.
+    - Intrinsics: Allows us to perform operations on all components (x, y, z) simultaneoulsy in a single CPU cycle.
+*/
+
 // A "Manager" class for a large collection of vectors (processes 4 vectors simultaneously).
 class VectorManagerSOA {
 public:
