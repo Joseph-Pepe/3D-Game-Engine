@@ -132,7 +132,7 @@ public:
             uint32_t alignedStart = start & ~15;
             uint32_t alignedEnd = (end + 15) & ~15;
 
-            uint32_t i = alignedStart; i < alignedEnd; i += 16) {
+            for(uint32_t i = alignedStart; i < alignedEnd; i += 16) {
                 // ALIGNED LOAD: We are guaranteed 64-byte alignment (512-bit memory)
                 // Custom Allocator: We can now safely use the faster aligned loads (_mm512_load_ps) and stores!
                 SIMDVector16 batch = { 
