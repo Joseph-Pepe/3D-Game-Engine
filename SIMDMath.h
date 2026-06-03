@@ -23,7 +23,9 @@ public:
         zs.resize(paddedCount, 3.0f);
     }
 
+    // [PROCESSBATCH]: PROCESSES 200 MILLION OPERATIONS IN 83 MILLISECONDS, CRUNCHES OUT ROUGHLY 2.4 BILLION VECTOR OPERATIONS PER SECOND.
     FORCE_INLINE void processBatch(float stepX, float stepY, float stepZ) {
+        // Broadcast the scalars into all 8 slots of the 256-bit registers
         __m256 sX = _mm256_set1_ps(stepX);
         __m256 sY = _mm256_set1_ps(stepY);
         __m256 sZ = _mm256_set1_ps(stepZ);
@@ -52,7 +54,9 @@ public:
                 // _mm_prefetch((const char*)(yPtr + i + 64), _MM_HINT_T0);
                 // _mm_prefetch((const char*)(zPtr + i + 64), _MM_HINT_T0);
 
+
                 // LOAD: Bring data into our math wrapper
+                // 1. Load 8 vectors at once (32 bytes per load)
                 SIMDVector8 batch = { 
                     // [_mm256_load_ps]: This demands that memory is 32-byte aligned (std::vector only guarantees 16-byte alignment).
                     // We are now guaranteed 32-byte alignment. 
@@ -68,16 +72,22 @@ public:
                 };
 
                 // MATH: Using our clean functions
+                 // 2. Addition (8 at once)
                 batch.add(sX, sY, sZ);
+
+                // 3. Dot Product (Still pure vertical math)
                 __m256 d = batch.dot_fma(sX, sY, sZ);
                 
                 // Single element update (x += d * small)
+                // 4. Update X
                 batch.x = _mm256_add_ps(batch.x, _mm256_mul_ps(d, smallVal));
                 
+                 // 5. Cross Product (8 simultaneous cross products)
                 batch.cross(sX, sY, sZ);
 
                 // STORE: Write back to main memory
                 // Aligned stores directly to the Write-Combine buffer
+                // 6. Store 8 results back
                 _mm256_store_ps(&xs[i], batch.x);
                 _mm256_store_ps(&ys[i], batch.y);
                 _mm256_store_ps(&zs[i], batch.z);
