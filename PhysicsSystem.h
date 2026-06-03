@@ -1473,7 +1473,33 @@ public:
                 // ==========================================
                 // PURE 3D LOOP: Full X/Y/Z loads and stores
                 // ==========================================
+                // #pragma omp parallel for
                 for (int i = alignedStart; i < alignedEnd; i += 8) {
+                    // ==========================================
+                    // OBJECT-ORIENTED SIMD 
+                    // ==========================================
+                    /*
+                        - Wrapping SIMD intrinsics in objects can sometimes force the compiler to spill registers to the stack.
+                        - Reframe from using custom structs with intrinsics.
+
+                          // 1. LOAD: Fetch Positions (Unaligned for safety)
+                          SIMDVector8 pos = { 
+                              _mm256_loadu_ps(&pX[i]), 
+                              _mm256_loadu_ps(&pY[i]), 
+                              _mm256_loadu_ps(&pZ[i]) 
+                          };
+                          // 2. LOAD: Fetch Velocities
+                          SIMDVector8 vel = { 
+                              _mm256_loadu_ps(&vX[i]), 
+                              _mm256_loadu_ps(&vY[i]), 
+                              _mm256_loadu_ps(&vZ[i]) 
+                          };
+                          // 3. MATH: Calculate movement for this frame (vel * dt)
+                          vel.mul(dt);
+                          // 4. MATH: Apply movement to position (pos + movement)
+                          pos.add(vel.x, vel.y, vel.z);
+                    */
+
                     // 1. LOAD: Positions and Velocities from RAM into L1 cache.
                     __m256 px = _mm256_load_ps(&pX[i]);
                     __m256 py = _mm256_load_ps(&pY[i]);
@@ -1489,20 +1515,18 @@ public:
                     distSq = _mm256_fmadd_ps(py, py, distSq);
                     distSq = _mm256_fmadd_ps(pz, pz, distSq);
 
-                    // Fast Hardware Approximation (Bypasses Newton-Raphson)
-                    // 1. Get the hardware's 12-bit guess
+                    // 3. Fast Hardware Approximation (Before Newton-Raphson) Get the hardware's 12-bit guess ("Normalization" factor)
                     __m256 distSq_eps = _mm256_add_ps(distSq, epsilon);
                     __m256 rsqrt_approx = _mm256_rsqrt_ps(distSq_eps); // _mm256_rsqrt_ps is a lightning-fast hardware approximation of 1/sqrt(x)
 
-                    // 2. Newton-Raphson Refinement (Restores 23-bit precision)
+                    // 4. Newton-Raphson Refinement (Restores 23-bit precision)
                     // Formula: y = y * (1.5 - 0.5 * x * y * y)
                     __m256 half_x = _mm256_mul_ps(distSq_eps, _mm256_set1_ps(0.5f));
                     __m256 y_sq = _mm256_mul_ps(rsqrt_approx, rsqrt_approx);
                     __m256 term = _mm256_fnmadd_ps(half_x, y_sq, three_halves);
                     __m256 invDist = _mm256_mul_ps(rsqrt_approx, term);
 
-                    // 3. GRAVITY CALCULATION
-                    // Normalize the vector (multiply by 1/dist) and scale by gravity strength
+                    // 5. GRAVITY CALCULATION: Normalize the vector (multiply by 1/dist) and scale by gravity strength
                     __m256 pull = _mm256_mul_ps(invDist, gravityStrength);
 
                     // --- MOUSE REPULSION (AVX2) ---
@@ -1531,7 +1555,7 @@ public:
                     vy = _mm256_fnmadd_ps(py, pull, vy);
                     vz = _mm256_fnmadd_ps(pz, pull, vz);
 
-                    // 4. UPDATE POSITION & APPLY DAMPING (Friction)
+                    // 6. UPDATE POSITION & APPLY DAMPING (Friction)
                     vx = _mm256_mul_ps(vx, damping);
                     vy = _mm256_mul_ps(vy, damping);
                     vz = _mm256_mul_ps(vz, damping);
@@ -1545,7 +1569,7 @@ public:
                     // vx = _mm256_max_ps(vMinSpeed, _mm256_min_ps(vx, vMaxSpeed));
                     // vy = _mm256_max_ps(vMinSpeed, _mm256_min_ps(vy, vMaxSpeed));
 
-                    // 5. UPDATE POSITION: p = p + v * dt
+                    // 7. UPDATE POSITION: p = p + v * dt
                     px = _mm256_fmadd_ps(vx, dt, px);
                     py = _mm256_fmadd_ps(vy, dt, py);
                     pz = _mm256_fmadd_ps(vz, dt, pz);
@@ -1560,7 +1584,7 @@ public:
                         - Then use bitmask to cleanly blend the bounced velocity with the original velocity, keeping the new trajectory only for the particles that actually touched the wall.
                     */
 
-                    // 5. AVX2 BOUNDING WALLS
+                    // 8. AVX2 BOUNDING WALLS
                     // A. Detect who crossed the lines (Creates a register of 0xFFFFFFFF or 0x00000000 bitmasks)
                     __m256 maskX = _mm256_or_ps(
                         _mm256_cmp_ps(px, vMaxBound, _CMP_GT_OQ),  // Greater Than
@@ -1592,7 +1616,7 @@ public:
                     vy = _mm256_blendv_ps(vy, bouncedVy, maskY);
                     vz = _mm256_blendv_ps(vz, bouncedVz, maskZ);
 
-                    // 6. STORE: Save results
+                    // 8. STORE: Save results of the new positions and velocities back into RAM.
                     _mm256_store_ps(&pX[i], px);
                     _mm256_store_ps(&pY[i], py);
                     _mm256_store_ps(&pZ[i], pz);
@@ -1614,12 +1638,13 @@ public:
         _mm256_zeroupper();
 
         // --- TELEMETRY ADJUSTMENT ---
-        // Spatial Hash Math Estimate: 
-        // ~45 FLOPs for the Newton-Raphson/Position Update. Newton-Raphson: ~45 FLOPs (floating-point operations) per particle per frame, excludes collision.
+        // Spatial Hash Math Estimate: ~45 FLOPs for the Newton-Raphson/Position Update. Newton-Raphson: ~45 FLOPs (floating-point operations) per particle per frame, excludes collision.
         // uint64_t opsThisFrame = (uint64_t)activeCount * 45ULL;
+
         // + ~15 FLOPs per neighbor checked in the 9 cells.
         // Assuming average density of ~25 neighbors checked per particle: 45 + (15 * 25) = ~420 FLOPs, includes collision.
         // uint64_t opsThisFrame = (uint64_t)activeCount * 420ULL; 
+
         // g_TotalMathOperations.fetch_add(opsThisFrame, std::memory_order_relaxed);
     }
 };
