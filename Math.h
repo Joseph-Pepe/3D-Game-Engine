@@ -389,6 +389,82 @@ struct alignas(32) ParticleBlock8 {
 // 3. SSE Accelerated Vectors 
 // ==================================================================================
 
+// [Vector3D]: Use this version if your creating a very large, persistent buffer where you don't want to blow out the stack. 
+// alignas(16) guarantees that whenever this struct is created, it starts on a 16-byte boundary. No malloc required!
+alignas(16) class Vector3D {
+public:
+    /*
+         - Using a float array of 4 to align with 128-bit SSE registers.
+         - x, y, z, and a padding/w element.
+         - Aligning the pointer itself is good practice.
+         - But the actual memory it points to is aligned by std::aligned_alloc.
+
+           // This dynamically allocates the memory on the heap, perfectly aligned.
+           // There is zero pointer-chasing. The CPU prefetcher will chew through this instantly.
+           std::vector<Vector3D> largePersistentBuffer(1'000'000); 
+
+           // Usage is clean and readable:
+           Vector3D a(1.0f, 0.0f, 0.0f);
+           Vector3D b(0.0f, 1.0f, 0.0f);
+           Vector3D c = a + (b * 5.0f); // Completely optimized into registers by the compiler
+    */
+    // Anonymous union allows you to access data via names (x,y,z) OR directly as an SSE register (__m128), OR as a float array.
+    union {
+        __m128 reg;
+        struct { float x, y, z, w; };
+        float data[4];
+    };
+
+    // Default constructor (Zero initialization)
+    FORCE_INLINE Vector3D() : reg(_mm_setzero_ps()) {}
+
+    // Constructor from floats
+    FORCE_INLINE Vector3D(float _x, float _y, float _z, float _w = 0.0f) 
+        : reg(_mm_set_ps(_w, _z, _y, _x)) { 
+        // Note: _mm_set_ps takes arguments in reverse order (w, z, y, x)
+    }
+
+    // Constructor directly from SSE register (Crucial for fast operators)
+    FORCE_INLINE Vector3D(__m128 m) : reg(m) {}
+
+    // --- MATHEMATICAL OPERATORS ---
+    // By returning by value, the compiler uses Return Value Optimization (RVO).
+    // The data never touches the stack; it stays perfectly inside the CPU registers.
+
+    // Addition: result = this + other
+    FORCE_INLINE Vector3D operator+(const Vector3D& other) const {
+        return Vector3D(_mm_add_ps(reg, other.reg));
+    }
+
+    FORCE_INLINE Vector3D operator-(const Vector3D& other) const {
+        return Vector3D(_mm_sub_ps(reg, other.reg));
+    }
+
+    // Scales the current vector in place
+    FORCE_INLINE Vector3D operator*(float scalar) const {
+        return Vector3D(_mm_mul_ps(reg, _mm_set1_ps(scalar)));
+    }
+
+    // --- DOT & CROSS PRODUCT ---
+
+    // Dot Product: returns (x1*x2 + y1*y2 + z1*z2)
+    FORCE_INLINE float dot(const Vector3D& other) const {
+        // 0x7F mask: 0111 (read first 3) | 1111 (write to all 4 for safety, or 0001 for just lowest)
+        __m128 res = _mm_dp_ps(reg, other.reg, 0x71); 
+        return _mm_cvtss_f32(res); // Faster than _mm_store_ss to a stack variable
+    }
+
+    // SHUFFLE: Rearranges the (x, y, z) values inside the register, so we can multiply them all at once.
+    FORCE_INLINE Vector3D cross(const Vector3D& other) const {
+        __m128 tmp0 = _mm_shuffle_ps(reg, reg, _MM_SHUFFLE(3, 0, 2, 1));
+        __m128 tmp1 = _mm_shuffle_ps(other.reg, other.reg, _MM_SHUFFLE(3, 1, 0, 2));
+        __m128 tmp2 = _mm_shuffle_ps(reg, reg, _MM_SHUFFLE(3, 1, 0, 2));
+        __m128 tmp3 = _mm_shuffle_ps(other.reg, other.reg, _MM_SHUFFLE(3, 0, 2, 1));
+
+        return Vector3D(_mm_sub_ps(_mm_mul_ps(tmp0, tmp1), _mm_mul_ps(tmp2, tmp3)));
+    }
+};
+
 // SSE Accelerated Stack Vector (Use for 99% of general game logic and bulk data processing).
 class Vector3DStack {
 public:
@@ -512,7 +588,7 @@ public:
 };
 
 // ==================================================================================
-// SCALAR VECTORS
+// SCALAR VECTORS (NON-SIMD)
 // ==================================================================================
 
 // Pure Scalar Fallback: Used for one-off calculations like the camera and compile time calculations.
