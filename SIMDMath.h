@@ -112,32 +112,49 @@ public:
         __m512 sZ = _mm512_set1_ps(stepZ);
         __m512 smallVal = _mm512_set1_ps(0.00001f);
 
-        size_t batchCount = xs.size() / 16;
-        auto batches = std::views::iota(size_t(0), batchCount);
+        uint32_t dataCount = static_cast<uint32_t>(xs.size());
 
-        // C++ Standard Parallelism
-        std::for_each(std::execution::par_unseq, batches.begin(), batches.end(), [&](size_t b) {
-            size_t i = b * 16;
+        // 1. Calculate a cache-friendly chunk size
+        uint32_t threadCount = g_JobSystem.nextWorkerId.load(std::memory_order_relaxed);
+        uint32_t targetChunksPerThread = 16;
+        uint32_t CHUNK_SIZE = dataCount / (threadCount * targetChunksPerThread);
+        
+        // Clamp to L1/L2 friendly sizes
+        CHUNK_SIZE = std::clamp(CHUNK_SIZE, 8192u, 32768u);
+        
+        // CRITICAL: Ensure AVX-512 16-float (64-byte) alignment
+        CHUNK_SIZE = (CHUNK_SIZE + 15) & ~15;
 
-            // 512-bit memory strictly prefers 64-byte alignment. Standard std::vector only guarantees 16/32-byte alignment. 
-            // Custom Allocator: We can now safely use the faster aligned loads (_mm512_load_ps) and stores!
-            SIMDVector16 batch = { 
-                _mm512_load_ps(&xs[i]), 
-                _mm512_load_ps(&ys[i]), 
-                _mm512_load_ps(&zs[i]) 
-            };
+        // 2. Dispatch to the Coroutine Work-Stealing Queue
+        g_JobSystem.DispatchAndWait(dataCount, CHUNK_SIZE, [&](uint32_t start, uint32_t end) {
 
-            batch.add(sX, sY, sZ);
-            __m512 d = batch.dot_fma(sX, sY, sZ);
-            
-            batch.x = _mm512_add_ps(batch.x, _mm512_mul_ps(d, smallVal));
-            
-            batch.cross(sX, sY, sZ);
+            // Ensure boundaries are strictly aligned to prevent AVX-512 load crashes
+            uint32_t alignedStart = start & ~15;
+            uint32_t alignedEnd = (end + 15) & ~15;
 
-            _mm512_store_ps(&xs[i], batch.x);
-            _mm512_store_ps(&ys[i], batch.y);
-            _mm512_store_ps(&zs[i], batch.z);
+            uint32_t i = alignedStart; i < alignedEnd; i += 16) {
+                // ALIGNED LOAD: We are guaranteed 64-byte alignment (512-bit memory)
+                // Custom Allocator: We can now safely use the faster aligned loads (_mm512_load_ps) and stores!
+                SIMDVector16 batch = { 
+                    _mm512_load_ps(&xs[i]), 
+                    _mm512_load_ps(&ys[i]), 
+                    _mm512_load_ps(&zs[i]) 
+                };
 
+                // MATH
+                batch.add(sX, sY, sZ);
+                __m512 d = batch.dot_fma(sX, sY, sZ);
+                batch.x = _mm512_add_ps(batch.x, _mm512_mul_ps(d, smallVal));
+                batch.cross(sX, sY, sZ);
+
+                // ALIGNED STORE: Direct write-back
+                _mm512_store_ps(&xs[i], batch.x);
+                _mm512_store_ps(&ys[i], batch.y);
+                _mm512_store_ps(&zs[i], batch.z);
+            }
+
+            // Clean the CPU registers before handing the thread back to the scheduler
+            _mm256_zeroupper();
         });
     }
 };
