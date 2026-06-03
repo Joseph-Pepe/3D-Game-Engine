@@ -156,6 +156,8 @@ public:
             // Clean the CPU registers before handing the thread back to the scheduler
             _mm256_zeroupper();
         });
+        // Clean the Caller Thread before returning
+        _mm256_zeroupper();
     }
 };
 
