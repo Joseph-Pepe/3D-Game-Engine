@@ -3,6 +3,12 @@
 #include "Math.h"
 #include "Memory.h" // Ensure AlignedVector is included!
 
+#include <vector>
+#include <execution>
+#include <ranges>
+#include <algorithm>
+#include <immintrin.h>
+
 // --- THE SYSTEM LAYER (8-Wide Alignment) Processes 8 vectors simultaneously ---
 class VectorManagerSOA_V2_AVX2 {
 public:
@@ -83,6 +89,56 @@ public:
 
         // Clean the Caller Thread before returning to the SSE benchmark!
         _mm256_zeroupper();
+    }
+};
+
+// --- 2. THE SYSTEM LAYER (16-Wide Alignment) ---
+class VectorManagerSOA_V3_AVX512 {
+public:
+    // Using our 64-byte aligned vectors
+    AlignedVector64<float> xs, ys, zs;
+
+    VectorManagerSOA_V3_AVX512(size_t count) {
+        // Pad to nearest multiple of 16 for AVX-512 boundaries
+        size_t paddedCount = (count + 15) & ~15;
+        xs.resize(paddedCount, 1.0f);
+        ys.resize(paddedCount, 2.0f);
+        zs.resize(paddedCount, 3.0f);
+    }
+
+    FORCE_INLINE void processBatch(float stepX, float stepY, float stepZ) {
+        __m512 sX = _mm512_set1_ps(stepX);
+        __m512 sY = _mm512_set1_ps(stepY);
+        __m512 sZ = _mm512_set1_ps(stepZ);
+        __m512 smallVal = _mm512_set1_ps(0.00001f);
+
+        size_t batchCount = xs.size() / 16;
+        auto batches = std::views::iota(size_t(0), batchCount);
+
+        // C++ Standard Parallelism
+        std::for_each(std::execution::par_unseq, batches.begin(), batches.end(), [&](size_t b) {
+            size_t i = b * 16;
+
+            // 512-bit memory strictly prefers 64-byte alignment. Standard std::vector only guarantees 16/32-byte alignment. 
+            // Custom Allocator: We can now safely use the faster aligned loads (_mm512_load_ps) and stores!
+            SIMDVector16 batch = { 
+                _mm512_load_ps(&xs[i]), 
+                _mm512_load_ps(&ys[i]), 
+                _mm512_load_ps(&zs[i]) 
+            };
+
+            batch.add(sX, sY, sZ);
+            __m512 d = batch.dot_fma(sX, sY, sZ);
+            
+            batch.x = _mm512_add_ps(batch.x, _mm512_mul_ps(d, smallVal));
+            
+            batch.cross(sX, sY, sZ);
+
+            _mm512_store_ps(&xs[i], batch.x);
+            _mm512_store_ps(&ys[i], batch.y);
+            _mm512_store_ps(&zs[i], batch.z);
+
+        });
     }
 };
 
