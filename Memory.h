@@ -5,17 +5,23 @@
 #include <limits>
 #include <memory> // Required for std::allocator in consteval
 
+// (Optional) Include <simd> if you want the portable vector typedefs defined here.
+// If you want to keep SIMD logic isolated, you can move the C++26 block to a Math/SIMD header.
+#if __cplusplus > 202302L || defined(_MSVC_LANG) && _MSVC_LANG > 202302L
+    #include <simd> 
+#endif
+
 // ==================================================================================
-// MEMORY ALLOCATION (AVX2 ALIGNMENT)
+// MEMORY ALLOCATION (HARDWARE ALIGNMENT)
 // ==================================================================================
-// --- 32-BYTE ALIGNED ALLOCATOR FOR AVX2 ---
 /*
-    - __m256 demands exactly 32 bytes of data.
-    - std::vector allocators don't guarantee this, they only guarantee 8-byte or 16-byte alignment.
-    - AlignedAllocator is a custom allocator for std::vector that forces the OS to give us memory that strictly aligns to 32-byte boundaries.
+    - std::vector allocators only guarantee 8-byte or 16-byte alignment.
+    - AlignedAllocator is a custom allocator for std::vector that forces the OS to give us memory that strictly aligns to 16, 32, 64-byte boundaries.
+
+    - AVX-2: Now every array will start on a 32-byte boundary. Since our loops iterate in multiple of 8 we can use aligned load.
     - Ensures AVX reads will not straddle two different 64-byte cache chunk lines.
-    - Now every array will start on a 32-byte boundary. Since our loops iterate in multiple of 8 we can use aligned load.
 */
+
 // A standard-compliant allocator that guarantees strict memory alignment
 template <typename T, std::size_t Alignment = 32>
 struct AlignedAllocator {
@@ -73,10 +79,40 @@ struct AlignedAllocator {
     }
 };
 
-// Typedef for clean architecture
-template <typename T>
-using AlignedVector32 = std::vector<T, AlignedAllocator<T, 32>>;
+// ==================================================================================
+// EXPLICIT HARDWARE ALIGNMENTS (Explicit Control)
+// ==================================================================================
+/*
+    - Typedef for clean architecture
 
-// Typedef for your 64-byte aligned vector (Perfect for AVX-512)
+    - SSE     [__m128] demands exactly 16 bytes of data.
+    - AVX-2   [__m256] demands exactly 32 bytes of data.
+    - AVX-512 [__m512] demands exactly 64 bytes of data.
+*/
+
+// --- 16-BYTE ALIGNED ALLOCATOR FOR SSE ALIGNMENT ---
+template <typename T> 
+using AlignedVector16 = std::vector<T, AlignedAllocator<T, 16>>; // SSE     (16-byte aligned vector)
+
+// --- 32-BYTE ALIGNED ALLOCATOR FOR AVX2 ALIGNMENT ---
 template <typename T>
-using AlignedVector64 = std::vector<T, AlignedAllocator<T, 64>>;
+using AlignedVector32 = std::vector<T, AlignedAllocator<T, 32>>; // AVX2    (32-byte aligned vector)
+
+// --- 64-BYTE ALIGNED ALLOCATOR FOR AVX-512 ALIGNMENT ---
+template <typename T>
+using AlignedVector64 = std::vector<T, AlignedAllocator<T, 64>>; // AVX-512 (64-byte aligned vector)
+
+// ==================================================================================
+// C++26 DYNAMIC HARDWARE ALIGNMENT (Portable SIMD)
+// ==================================================================================
+
+#if __cplusplus > 202302L || defined(_MSVC_LANG) && _MSVC_LANG > 202302L
+
+    // 1. Detect the hardware's preferred alignment at compile time
+    constexpr std::size_t NATIVE_SIMD_ALIGN = std::experimental::memory_alignment_v<std::experimental::native_simd<float>>;
+
+    // 2. Define a vector that automatically aligns to the current machine's architecture
+    template <typename T>
+    using NativeAlignedVector = std::vector<T, AlignedAllocator<T, NATIVE_SIMD_ALIGN>>;
+
+#endif
