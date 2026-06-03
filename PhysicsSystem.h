@@ -14,10 +14,10 @@
 class ParticlePhysicsSOA {
 public:
     // Component 1: Positions (Strictly 32-byte aligned!)
-    AlignedVector<float> pX, pY, pZ;
+    AlignedVector32<float> pX, pY, pZ;
     
     // Component 2: Velocities
-    AlignedVector<float> vX, vY, vZ;
+    AlignedVector32<float> vX, vY, vZ;
 
     // =============================================================
     // CONTIGUOUS FLAT 1D ARRAY
@@ -63,8 +63,8 @@ public:
     std::vector<uint32_t> currentInsertPos; // We create a working copy of the offsets to increment as we place particles into the temp buffers
 
     // --- TEMPORARY SOA BUFFERS (For the Counting Sort) ---
-    AlignedVector<float> temp_pX, temp_pY, temp_pZ;
-    AlignedVector<float> temp_vX, temp_vY, temp_vZ;
+    AlignedVector32<float> temp_pX, temp_pY, temp_pZ;
+    AlignedVector32<float> temp_vX, temp_vY, temp_vZ;
     std::vector<uint32_t> temp_cellIndices;
 
     ParticlePhysicsSOA(size_t count) {
