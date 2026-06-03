@@ -406,7 +406,7 @@ struct alignas(32) ParticleBlock8 {
 
 // [Vector3D]: Use this version if your creating a very large, persistent buffer where you don't want to blow out the stack. 
 // alignas(16) guarantees that whenever this struct is created, it starts on a 16-byte boundary. No malloc required!
-alignas(16) class Vector3D {
+class alignas(16) Vector3D {
 public:
     /*
          - Using a float array of 4 to align with 128-bit SSE registers.
