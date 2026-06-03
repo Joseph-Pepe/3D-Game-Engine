@@ -291,6 +291,13 @@ public:
     }
 };
 
+// This block perfectly sizes itself to the hardware cache lines.
+struct PortableParticleBlock {
+    native_simd x, y, z, w; // w used as padding to hit power-of-2 cache sizes
+};
+
+using PortableAoSoAVector = std::vector<PortableParticleBlock, DynamicAlignedAllocator<PortableParticleBlock, NATIVE_ALIGN>>;
+
 // ======================================================================================
 // ARRAY OF STRUCTS OF ARRAYS (AOSOA)
 // ======================================================================================
