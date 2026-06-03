@@ -125,9 +125,9 @@ consteval std::array<uint32_t, 1024> GenerateMortonTable(uint32_t shift) {
 
 // 12KB off data embedded natively into the Read-Only Data (.rodata) segment of the compiled binary.
 // Zero heap allocations. Zero runtime initialization, tightly packed in memory for hardware prefetcher to stream it into L1 cache instantly.
-inline constexpr std::array<uint32_t, 1024> g_MortonTableX = GenerateMortonTable(0);
-inline constexpr std::array<uint32_t, 1024> g_MortonTableY = GenerateMortonTable(1);
-inline constexpr std::array<uint32_t, 1024> g_MortonTableZ = GenerateMortonTable(2);
+alignas(64) inline constexpr std::array<uint32_t, 1024> g_MortonTableX = GenerateMortonTable(0);
+alignas(64) inline constexpr std::array<uint32_t, 1024> g_MortonTableY = GenerateMortonTable(1);
+alignas(64) inline constexpr std::array<uint32_t, 1024> g_MortonTableZ = GenerateMortonTable(2);
 
 // // --- PHYSICAL COORDINATE GRID LOOKUP TABLE (LUT) ---
 // // 1024 entries * 4 bytes = 4KB each. Easily fits in 32KB L1 Data Cache. 4KB arrays that will live permanently in the L1 CPU Cache
@@ -158,7 +158,18 @@ inline constexpr std::array<uint32_t, 1024> g_MortonTableZ = GenerateMortonTable
 
 // The new blindingly fast scalar fallback
 FORCE_INLINE uint32_t getMortonCodeLUT(uint32_t x, uint32_t y, uint32_t z) {
-    // We reduce 45 ALU operations down to just 3 memory fetches and 2 bitwise ORs!
+
+    // 1. Bitwise mask to strictly enforce the [0, 1023] limit (0x3FF is 1023 in hex).
+    // This executes in a fraction of a cycle and prevents catastrophic engine crashes.
+    x &= 0x3FF; 
+    y &= 0x3FF; 
+    z &= 0x3FF;
+
+    // 2. C++26 [[assume]] attribute.
+    // Tells the compiler "I guarantee these are under 1024, do not generate bounds-checking assembly."
+    [[assume(x < 1024 && y < 1024 && z < 1024)]];
+
+    // 3 memory fetches and 2 bitwise ORs!
     return g_MortonTableX[x] | g_MortonTableY[y] | g_MortonTableZ[z];
 }
 
