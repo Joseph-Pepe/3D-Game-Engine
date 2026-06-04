@@ -432,72 +432,86 @@ public:
             __m128 vMinGrid128 = _mm_setzero_ps();
             __m128 vMaxGrid128 = _mm_set_ss(1023.0f);
 
-            // Clean up the remaining 1 to 7 particles using ultra-fast L1 cache table
-            for (uint32_t i = alignedEnd; i < end; ++i) {
-                // Shift coordinates from (-1000, 1000) to (0, 2000) so grid math is positive
-                float shiftedX = pX[i] + (WORLD_SIZE * 0.5f);
-                float shiftedY = pY[i] + (WORLD_SIZE * 0.5f);
+            // --- C++20 TEMPLATED LAMBDA DISPATCHER ---
+            auto processScalarRemainder = [&]<bool Is2D, bool IsLegacy>() {
+                // Clean up the remaining 1 to 7 particles using ultra-fast L1 cache table
+                for (uint32_t i = alignedEnd; i < end; ++i) {
+                    // Shift coordinates from (-1000, 1000) to (0, 2000) so grid math is positive
+                    float shiftedX = pX[i] + (WORLD_SIZE * 0.5f);
+                    float shiftedY = pY[i] + (WORLD_SIZE * 0.5f);
 
-                // std::clamp: Guarantees the index never exceeds our 1024 LUT bounds to prevent segfaults (i.e., particles won't crash the engine if they wander slightly off-grid)
-                // [15-20 clock cycles] to perform a single floating-point division, [4 clock cycles] to perform a single floating-point multiplication
-                // uint32_t gridX = (uint32_t)std::clamp((int)(shiftedX * INV_CELL_SIZE), 0, 1023);
-                // uint32_t gridY = (uint32_t)std::clamp((int)(shiftedY * INV_CELL_SIZE), 0, 1023);
-                // uint32_t gridZ = (uint32_t)std::clamp((int)(shiftedZ * INV_CELL_SIZE), 0, 1023);
+                    // std::clamp: Guarantees the index never exceeds our 1024 LUT bounds to prevent segfaults (i.e., particles won't crash the engine if they wander slightly off-grid)
+                    // [15-20 clock cycles] to perform a single floating-point division, [4 clock cycles] to perform a single floating-point multiplication
+                    // uint32_t gridX = (uint32_t)std::clamp((int)(shiftedX * INV_CELL_SIZE), 0, 1023);
+                    // uint32_t gridY = (uint32_t)std::clamp((int)(shiftedY * INV_CELL_SIZE), 0, 1023);
+                    // uint32_t gridZ = (uint32_t)std::clamp((int)(shiftedZ * INV_CELL_SIZE), 0, 1023);
 
-                // --- BRANCHLESS SSE CLAMP ---
-                /*
-                    - Executes directly on the Vector ALU ports.
-                    - Takes ~3-4 clock cycles to complete, every single time.
-                    - Truncates the scalar float in the SSE register directly into 32-bit integer in one step.
-                */
-                // 1. Multiply by inverse cell size directly inside the SSE register
-                __m128 vx = _mm_set_ss(shiftedX * INV_CELL_SIZE);
-                __m128 vy = _mm_set_ss(shiftedY * INV_CELL_SIZE);
-
-                // 2. Hardware Min/Max (0 branches, pure silicon math)
-                vx = _mm_max_ss(vMinGrid128, _mm_min_ss(vx, vMaxGrid128));
-                vy = _mm_max_ss(vMinGrid128, _mm_min_ss(vy, vMaxGrid128));
-
-                // 3. Hardware truncation from float to integer
-                uint32_t gridX = static_cast<uint32_t>(_mm_cvttss_si32(vx));
-                uint32_t gridY = static_cast<uint32_t>(_mm_cvttss_si32(vy));
-
-                // Hash to map 3D space into a fixed-size 1D array.
-                uint32_t hash;
-
-                 // [Hot loop]: using global toggles is safe in hot loops b/c its static ([false] for 1 million cycles or [true] for 1 million cycles).
-                if (localIs2D) {
-                    // Fast 2D Path: Morton Encoding (pass 0 for Z)
-                    hash = getMortonCode(gridX, gridY, 0, localIsLegacy) & HASH_MASK;
-                } 
-                else {
-                    // True 3D Path: Morton Encoding
-                    float shiftedZ = pZ[i] + (WORLD_SIZE * 0.5f);
-
-                    // Branchless Z-Clamp
-                    __m128 vz = _mm_set_ss(shiftedZ * INV_CELL_SIZE);
-                    vz = _mm_max_ss(vMinGrid128, _mm_min_ss(vz, vMaxGrid128));
-                    uint32_t gridZ = static_cast<uint32_t>(_mm_cvttss_si32(vz));
-
-                    /* [ALU Bitwise Operator (&)]
-                        - The modulo (%) operator compiles to a slow integer division instruction (idiv on x86) that costs 15-20 clock cycles.
-                        - hash = getMortonCode(gridX, gridY, gridZ) % TOTAL_CELLS;
-                        - It cannot be easily pipelined. 
-                        - Doing this 9 times (2D) or 27 times (3D) per particle, for 100,000 particles, means you are burning over 40 million clock cycles per frame.
-
-                        - The bitwise AND (&) operator executes in 1 clock cycle (15-20x faster).
-                        - By forcing TOTAL_CELLS to be a strict power of 2 (e.g., 264,144 instead of 250,001) this allow us to replace modulo (%) with the AND (&) bitwise operator to boost performance.
-                        - This adjustment alone to use (&) can improve frame rates by 5-7fps compared to modulo (%).
-                        - The bitwise XOR (^) prevents diagonal symmetry bugs
+                    // --- BRANCHLESS SSE CLAMP ---
+                    /*
+                        - Executes directly on the Vector ALU ports.
+                        - Takes ~3-4 clock cycles to complete, every single time.
+                        - Truncates the scalar float in the SSE register directly into 32-bit integer in one step.
                     */
-                    hash = getMortonCode(gridX, gridY, gridZ, localIsLegacy) & HASH_MASK;
+                    // 1. Multiply by inverse cell size directly inside the SSE register
+                    __m128 vx = _mm_set_ss(shiftedX * INV_CELL_SIZE);
+                    __m128 vy = _mm_set_ss(shiftedY * INV_CELL_SIZE);
+
+                    // 2. Hardware Min/Max (0 branches, pure silicon math)
+                    vx = _mm_max_ss(vMinGrid128, _mm_min_ss(vx, vMaxGrid128));
+                    vy = _mm_max_ss(vMinGrid128, _mm_min_ss(vy, vMaxGrid128));
+
+                    // 3. Hardware truncation from float to integer
+                    uint32_t gridX = static_cast<uint32_t>(_mm_cvttss_si32(vx));
+                    uint32_t gridY = static_cast<uint32_t>(_mm_cvttss_si32(vy));
+
+                    // Hash to map 3D space into a fixed-size 1D array.
+                    uint32_t hash;
+
+                    // [Hot loop]: using global toggles is safe in hot loops b/c its static ([false] for 1 million cycles or [true] for 1 million cycles).
+                    // Compile-time branch: Z-math is entirely deleted from the 2D binary path
+                    if constexpr (Is2D) {
+                        // Fast 2D Path: Morton Encoding (pass 0 for Z)
+                        hash = getMortonCode<IsLegacy>(gridX, gridY, 0) & HASH_MASK;
+                    } 
+                    else {
+                        // True 3D Path: Morton Encoding
+                        float shiftedZ = pZ[i] + (WORLD_SIZE * 0.5f);
+
+                        // Branchless Z-Clamp
+                        __m128 vz = _mm_set_ss(shiftedZ * INV_CELL_SIZE);
+                        vz = _mm_max_ss(vMinGrid128, _mm_min_ss(vz, vMaxGrid128));
+                        uint32_t gridZ = static_cast<uint32_t>(_mm_cvttss_si32(vz));
+
+                        /* [ALU Bitwise Operator (&)]
+                            - The modulo (%) operator compiles to a slow integer division instruction (idiv on x86) that costs 15-20 clock cycles.
+                            - hash = getMortonCode(gridX, gridY, gridZ) % TOTAL_CELLS;
+                            - It cannot be easily pipelined. 
+                            - Doing this 9 times (2D) or 27 times (3D) per particle, for 100,000 particles, means you are burning over 40 million clock cycles per frame.
+
+                            - The bitwise AND (&) operator executes in 1 clock cycle (15-20x faster).
+                            - By forcing TOTAL_CELLS to be a strict power of 2 (e.g., 264,144 instead of 250,001) this allow us to replace modulo (%) with the AND (&) bitwise operator to boost performance.
+                            - This adjustment alone to use (&) can improve frame rates by 5-7fps compared to modulo (%).
+                            - The bitwise XOR (^) prevents diagonal symmetry bugs
+                        */
+                        hash = getMortonCode<IsLegacy>(gridX, gridY, gridZ) & HASH_MASK;
+                    }
+
+                    // Save the hash so we don't calculate it twice, and increment the histogram
+                    particleCellIndices[i] = hash;
+
+                    // Flat Array Math: (Worker ID * Total Cells) + Hash (i.e., flat mapping)
+                    threadLocalCounts[(workerId * TOTAL_CELLS) + hash]++; // Thread-local write! Zero false sharing, zero atomics.
                 }
+            };
 
-                // Save the hash so we don't calculate it twice, and increment the histogram
-                particleCellIndices[i] = hash;
-
-                // Flat Array Math: (Worker ID * Total Cells) + Hash (i.e., flat mapping)
-                threadLocalCounts[(workerId * TOTAL_CELLS) + hash]++; // Thread-local write! Zero false sharing, zero atomics.
+            // --- DISPATCH THE KERNEL ---
+            // Evaluates the runtime global booleans exactly once, jumping to the pure assembly path.
+            if (localIs2D) {
+                if (localIsLegacy) processScalarRemainder.template operator()<true, true>();
+                else               processScalarRemainder.template operator()<true, false>();
+            } else {
+                if (localIsLegacy) processScalarRemainder.template operator()<false, true>();
+                else               processScalarRemainder.template operator()<false, false>();
             }
         });
 
@@ -693,645 +707,659 @@ public:
         const bool localIsLegacy = g_EngineSettings.isLegacyCPU;
 
         g_JobSystem.DispatchAndWait(activeCount, CHUNK_SIZE, [&](uint32_t start, uint32_t end) {
+
+            // --- C++20 TEMPLATED KERNEL DISPATCHER ---
+            // By templating this entire block, the compiler generates 4 distinct, branchless versions of your physics engine!
+            auto collisionKernel = [&]<bool Is2D, bool IsLegacy>() {
             
-            // --- COLLISION CONSTANTS ---
-            const float RADIUS = CELL_SIZE; // Distance at which they collide
-            const float RADIUS_SQ = RADIUS * RADIUS;
-            const float REPULSION_STRENGTH = 5.0f;
+                // --- COLLISION CONSTANTS ---
+                const float RADIUS = CELL_SIZE; // Distance at which they collide
+                const float RADIUS_SQ = RADIUS * RADIUS;
+                const float REPULSION_STRENGTH = 5.0f;
 
-            __m256 vRadiusSq = _mm256_set1_ps(RADIUS_SQ);
-            __m256 vRepulsion = _mm256_set1_ps(REPULSION_STRENGTH);
-            __m256 vEpsilon = _mm256_set1_ps(0.0001f); // Prevents divide by zero and self-collision
+                __m256 vRadiusSq = _mm256_set1_ps(RADIUS_SQ);
+                __m256 vRepulsion = _mm256_set1_ps(REPULSION_STRENGTH);
+                __m256 vEpsilon = _mm256_set1_ps(0.0001f); // Prevents divide by zero and self-collision
 
-            __m256 half = _mm256_set1_ps(0.5f);
-            __m256 three_halves = _mm256_set1_ps(1.5f);
+                __m256 half = _mm256_set1_ps(0.5f);
+                __m256 three_halves = _mm256_set1_ps(1.5f);
 
-            // Temporary arrays to extract AVX2 registers back to scalar
-            // float tempX[8], tempY[8], tempZ[8];
+                // Temporary arrays to extract AVX2 registers back to scalar
+                // float tempX[8], tempY[8], tempZ[8];
 
-            // Counts the exact number of neighbor checks a worker performs.
-            uint64_t localThreadOps = 0;
+                // Counts the exact number of neighbor checks a worker performs.
+                uint64_t localThreadOps = 0;
 
-            // =========================================================
-            // L1 NEIGHBOR CACHE (Eliminates redundant broad-phase lookups) 
-            // =========================================================
-            uint32_t lastHash = 0xFFFFFFFF; // Set to invalid hash to force initial load
-            
-            struct NeighborRange {
-                uint32_t startIdx;
-                uint32_t endIdx;
-            };
-            // 27 max neighbors in 3D. Lives permanently in hot L1 cache!
-            NeighborRange neighborCache[27]; 
-            int validNeighbors = 0;
-
-            for (uint32_t i = start; i < end; ++i) {
-                // Keep telemetry perfectly accurate!
-                // localThreadOps += 45; // Base Newton-Raphson + Integration cost
-                localThreadOps += localIs2D ? 35 : 45;
-
-                // Broadcast Particle 'i' to all 8 slots in the SIMD register
-                __m256 p_i_x = _mm256_set1_ps(pX[i]);
-                __m256 p_i_y = _mm256_set1_ps(pY[i]);
-                __m256 p_i_z = _mm256_set1_ps(pZ[i]);
-
-                // Accumulators: We will accumulate forces in these registers
-                __m256 accX = _mm256_setzero_ps();
-                __m256 accY = _mm256_setzero_ps();
-                __m256 accZ = _mm256_setzero_ps();
-
-                float scalarForceX = 0.0f, scalarForceY = 0.0f, scalarForceZ = 0.0f;
-
-                // Check if we moved to a new spatial cell
-                uint32_t myHash = particleCellIndices[i];
-
-                // Calculates the neighbor offsets once and stores them in ultra-fast L1 cache, and resuses that list for every subsequent particle 
-                // that shares that cell which will reduce the bounds checking, integer math, and unpredictable branching by 90% in this hot loop.
-                // Dramatically increases performance when increasing the number of particles on screen.  
-                if (myHash != lastHash) {
-                    // We crossed a cell boundary! Recompute the neighbor list exactly once.
-                    lastHash = myHash;
-                    validNeighbors = 0;
-                    // =========================================================
-                    // RE-CALCULATE GRID COORDS
-                    // =========================================================
-                    float shiftedX = pX[i] + (WORLD_SIZE * 0.5f);
-                    float shiftedY = pY[i] + (WORLD_SIZE * 0.5f);
-                    
-                    int gx = (int)(shiftedX * INV_CELL_SIZE);
-                    int gy = (int)(shiftedY * INV_CELL_SIZE);
-                    int gz = 0; // Default for 2D
-                    
-                    if (!localIs2D) {
-                        float shiftedZ = pZ[i] + (WORLD_SIZE * 0.5f);
-                        gz = (int)(shiftedZ * INV_CELL_SIZE);
-                    }
-
-                    // =========================================================
-                    // THE BROAD PHASE: CHECK 9 (2D) OR 27 (3D) NEIGHBORING CELLS
-                    // =========================================================
-                    // By setting the Z loop bounds dynamically outside the loop, 
-                    // we avoid putting 'if' statements inside the hot loop!
-                    int zStart = localIs2D ? 0 : -1;
-                    int zEnd   = localIs2D ? 0 : 1;
+                // =========================================================
+                // L1 NEIGHBOR CACHE (Eliminates redundant broad-phase lookups) 
+                // =========================================================
+                uint32_t lastHash = 0xFFFFFFFF; // Set to invalid hash to force initial load
                 
-                    // --- THE BROAD PHASE (Check neighboring cells) ---
-                    for (int dz = zStart; dz <= zEnd; ++dz) {
-                        for (int dy = -1; dy <= 1; ++dy) {
-                            for (int dx = -1; dx <= 1; ++dx) {
-                                int nx = gx + dx;
-                                int ny = gy + dy;
-                                int nz = gz + dz;
+                struct NeighborRange {
+                    uint32_t startIdx;
+                    uint32_t endIdx;
+                };
+                // 27 max neighbors in 3D. Lives permanently in hot L1 cache!
+                NeighborRange neighborCache[27]; 
+                int validNeighbors = 0;
 
-                                // STRICT BOUNDS CHECK: This perfectly protects our 1024-size LUT!
-                                // If it passes this check, nx, ny, and nz are guaranteed to be between 0 and 501.
-                                // X/Y/Z Bounds check (prevents looking outside our spatial array limits)
-                                if (nx < 0 || nx >= GRID_WIDTH || 
-                                    ny < 0 || ny >= GRID_HEIGHT || 
-                                    (!localIs2D && (nz < 0 || nz >= GRID_HEIGHT))) continue;
+                for (uint32_t i = start; i < end; ++i) {
+                    // Keep telemetry perfectly accurate!
+                    // localThreadOps += 45; // Base Newton-Raphson + Integration cost
+                    localThreadOps += Is2D ? 35 : 45;
 
-                                uint32_t nHash;
+                    // Broadcast Particle 'i' to all 8 slots in the SIMD register
+                    __m256 p_i_x = _mm256_set1_ps(pX[i]);
+                    __m256 p_i_y = _mm256_set1_ps(pY[i]);
+                    __m256 p_i_z = _mm256_set1_ps(pZ[i]);
 
-                                if (localIs2D) {
-                                    // 2D Grid Hash
-                                    nHash = getMortonCode((uint32_t)nx, (uint32_t)ny, 0, localIsLegacy) & HASH_MASK;
-                                } 
-                                else {
-                                    // 3D Grid Hash
-                                    nHash = getMortonCode((uint32_t)nx, (uint32_t)ny, (uint32_t)nz, localIsLegacy) & HASH_MASK;
-                                }
+                    // Accumulators: We will accumulate forces in these registers
+                    __m256 accX = _mm256_setzero_ps();
+                    __m256 accY = _mm256_setzero_ps();
+                    __m256 accZ = _mm256_setzero_ps();
 
-                                // ==========================================
-                                // NEW: THE L1 CACHE BROAD-PHASE CULL
-                                // ==========================================
-                                // Check if the 64-bit integer has a 1 at this exact bit position.
-                                // If it evaluates to 0, the cell is mathematically guaranteed to be empty.
-                                if ((cellOccupancyMask[nHash >> 6] & (1ULL << (nHash & 63))) == 0) {
-                                    continue; 
-                                }
+                    float scalarForceX = 0.0f, scalarForceY = 0.0f, scalarForceZ = 0.0f;
 
-                                // Only fetch from the 1MB L3 cache if the cell is actually occupied!
-                                uint32_t startIdx = cellStartOffset[nHash];
-                                uint32_t endIdx = (nHash + 1 < TOTAL_CELLS) ? cellStartOffset[nHash + 1] : activeCount;
+                    // Check if we moved to a new spatial cell
+                    uint32_t myHash = particleCellIndices[i];
 
-                                // Only add to our local cache if the cell actually has particles
-                                if (startIdx < endIdx) {
-                                    neighborCache[validNeighbors].startIdx = startIdx;
-                                    // Cap neighbors to prevent processing dense singularities 
-                                    neighborCache[validNeighbors].endIdx = std::min(endIdx, startIdx + 16u);
-                                    validNeighbors++;
+                    // Calculates the neighbor offsets once and stores them in ultra-fast L1 cache, and resuses that list for every subsequent particle 
+                    // that shares that cell which will reduce the bounds checking, integer math, and unpredictable branching by 90% in this hot loop.
+                    // Dramatically increases performance when increasing the number of particles on screen.  
+                    if (myHash != lastHash) {
+                        // We crossed a cell boundary! Recompute the neighbor list exactly once.
+                        lastHash = myHash;
+                        validNeighbors = 0;
+                        // =========================================================
+                        // RE-CALCULATE GRID COORDS
+                        // =========================================================
+                        float shiftedX = pX[i] + (WORLD_SIZE * 0.5f);
+                        float shiftedY = pY[i] + (WORLD_SIZE * 0.5f);
+                        
+                        int gx = (int)(shiftedX * INV_CELL_SIZE);
+                        int gy = (int)(shiftedY * INV_CELL_SIZE);
+                        int gz = 0; // Default for 2D
+                        
+                        if constexpr (!Is2D) {
+                            float shiftedZ = pZ[i] + (WORLD_SIZE * 0.5f);
+                            gz = (int)(shiftedZ * INV_CELL_SIZE);
+                        }
+
+                        // =========================================================
+                        // THE BROAD PHASE: CHECK 9 (2D) OR 27 (3D) NEIGHBORING CELLS
+                        // =========================================================
+                        // By setting the Z loop bounds dynamically outside the loop, 
+                        // we avoid putting 'if' statements inside the hot loop!
+                        int zStart = Is2D ? 0 : -1;
+                        int zEnd   = Is2D ? 0 : 1;
+                    
+                        // --- THE BROAD PHASE (Check neighboring cells) ---
+                        for (int dz = zStart; dz <= zEnd; ++dz) {
+                            for (int dy = -1; dy <= 1; ++dy) {
+                                for (int dx = -1; dx <= 1; ++dx) {
+                                    int nx = gx + dx;
+                                    int ny = gy + dy;
+                                    int nz = gz + dz;
+
+                                    // STRICT BOUNDS CHECK: This perfectly protects our 1024-size LUT!
+                                    // If it passes this check, nx, ny, and nz are guaranteed to be between 0 and 501.
+                                    // X/Y/Z Bounds check (prevents looking outside our spatial array limits)
+                                    if (nx < 0 || nx >= GRID_WIDTH || 
+                                        ny < 0 || ny >= GRID_HEIGHT || 
+                                        (!Is2D && (nz < 0 || nz >= GRID_HEIGHT))) continue;
+
+                                    uint32_t nHash;
+
+                                    if constexpr (Is2D) {
+                                        // 2D Grid Hash
+                                        nHash = getMortonCode<IsLegacy>((uint32_t)nx, (uint32_t)ny, 0) & HASH_MASK;
+                                    } 
+                                    else {
+                                        // 3D Grid Hash
+                                        nHash = getMortonCode<IsLegacy>((uint32_t)nx, (uint32_t)ny, (uint32_t)nz) & HASH_MASK;
+                                    }
+
+                                    // ==========================================
+                                    // NEW: THE L1 CACHE BROAD-PHASE CULL
+                                    // ==========================================
+                                    // Check if the 64-bit integer has a 1 at this exact bit position.
+                                    // If it evaluates to 0, the cell is mathematically guaranteed to be empty.
+                                    if ((cellOccupancyMask[nHash >> 6] & (1ULL << (nHash & 63))) == 0) {
+                                        continue; 
+                                    }
+
+                                    // Only fetch from the 1MB L3 cache if the cell is actually occupied!
+                                    uint32_t startIdx = cellStartOffset[nHash];
+                                    uint32_t endIdx = (nHash + 1 < TOTAL_CELLS) ? cellStartOffset[nHash + 1] : activeCount;
+
+                                    // Only add to our local cache if the cell actually has particles
+                                    if (startIdx < endIdx) {
+                                        neighborCache[validNeighbors].startIdx = startIdx;
+                                        // Cap neighbors to prevent processing dense singularities 
+                                        neighborCache[validNeighbors].endIdx = std::min(endIdx, startIdx + 16u);
+                                        validNeighbors++;
+                                    }
                                 }
                             }
                         }
-                    }
-                } // End of Neighbor Cache Builder
+                    } // End of Neighbor Cache Builder
 
-                // =========================================================
-                // THE NARROW PHASE: Loop over our cached neighbors
-                // HOISTED BRANCH: Predictor hits 100%. L1i Cache perfectly dense.
-                // =========================================================
-                if (localIs2D) {
-                    for (int n = 0; n < validNeighbors; ++n) {
-                        int j = neighborCache[n].startIdx;
-                        int maxNeighborsToCheck = neighborCache[n].endIdx;
+                    // =========================================================
+                    // THE NARROW PHASE: Loop over our cached neighbors
+                    // HOISTED BRANCH: Predictor hits 100%. L1i Cache perfectly dense.
+                    // =========================================================
+                    if constexpr (Is2D) {
+                        for (int n = 0; n < validNeighbors; ++n) {
+                            int j = neighborCache[n].startIdx;
+                            int maxNeighborsToCheck = neighborCache[n].endIdx;
 
-                        /* [CPU Execution Ports]
-                            - A single CPU core contains multiple execution units.
-                            - Instructions route to lanes or ports (Port 0, Port 1, etc..).
-                            - These execution ports are pipelined (like an assembly line).
-                            - Instruction level parallelism means two instruction in a single cycle put on port 0 and port 1.
-                        */
-
-                        // --- 16-WIDE UNROLLED ZERO-SPILL 2D NARROW PHASE ---
-                        // Process 16 particles simultaneously to hide FMA latency
-                        // for (; j <= maxNeighborsToCheck - 16; j += 16) {
-                        //     localThreadOps += 24; // 12 FLOPs * 2 batches
-
-                        //     // 2. INTERLEAVED LOADS (No Z-Cull needed)
-                        //     // __m256 p_j_x_A = _mm256_loadu_ps(&pX[j]);
-                        //     // __m256 p_j_x_B = _mm256_loadu_ps(&pX[j + 8]);
-                            
-                        //     // __m256 p_j_y_A = _mm256_loadu_ps(&pY[j]);
-                        //     // __m256 p_j_y_B = _mm256_loadu_ps(&pY[j + 8]);
-
-                        //     // 3. INTERLEAVED DISTANCES
-                        //     // __m256 diffX_A = _mm256_sub_ps(p_i_x, p_j_x_A);
-                        //     // __m256 diffX_B = _mm256_sub_ps(p_i_x, p_j_x_B);
-                            
-                        //     // __m256 diffY_A = _mm256_sub_ps(p_i_y, p_j_y_A);
-                        //     // __m256 diffY_B = _mm256_sub_ps(p_i_y, p_j_y_B);
-
-                        //     // 2. FOLDED MATH
-                        //     __m256 diffX_A = _mm256_sub_ps(p_i_x, _mm256_loadu_ps(&pX[j]));
-                        //     __m256 diffX_B = _mm256_sub_ps(p_i_x, _mm256_loadu_ps(&pX[j + 8]));
-                        //     __m256 diffY_A = _mm256_sub_ps(p_i_y, _mm256_loadu_ps(&pY[j]));
-                        //     __m256 diffY_B = _mm256_sub_ps(p_i_y, _mm256_loadu_ps(&pY[j + 8]));
-
-                        //     __m256 distSq_A = _mm256_fmadd_ps(diffY_A, diffY_A, _mm256_mul_ps(diffX_A, diffX_A));
-                        //     __m256 distSq_B = _mm256_fmadd_ps(diffY_B, diffY_B, _mm256_mul_ps(diffX_B, diffX_B));
-
-                        //     // 4. CHECK COLLISION MASKS
-                        //     __m256 mask_A = _mm256_and_ps(
-                        //         _mm256_cmp_ps(distSq_A, vRadiusSq, _CMP_LT_OQ),
-                        //         _mm256_cmp_ps(distSq_A, vEpsilon, _CMP_GT_OQ)
-                        //     );
-                        //     __m256 mask_B = _mm256_and_ps(
-                        //         _mm256_cmp_ps(distSq_B, vRadiusSq, _CMP_LT_OQ),
-                        //         _mm256_cmp_ps(distSq_B, vEpsilon, _CMP_GT_OQ)
-                        //     );
-
-                        //     // 5. COMBINED CULL
-                        //     // If NO particles in BOTH 8-wide batches collided, skip the heavy math entirely!
-                        //     __m256 combinedMask = _mm256_or_ps(mask_A, mask_B);
-                        //     if (_mm256_testz_ps(combinedMask, combinedMask)) continue;
-
-                        //     // 6. INTERLEAVED NEWTON-RAPHSON
-                        //     // __m256 distSq_eps_A = _mm256_add_ps(distSq_A, vEpsilon);
-                        //     // __m256 distSq_eps_B = _mm256_add_ps(distSq_B, vEpsilon);
-
-                        //     // 3. VARIABLE RECYCLING
-                        //     distSq_A = _mm256_add_ps(distSq_A, vEpsilon);
-                        //     distSq_B = _mm256_add_ps(distSq_B, vEpsilon);
-
-                        //     // Hardware 12-bit guess
-                        //     // __m256 rsqrt_approx_A = _mm256_rsqrt_ps(distSq_eps_A);
-                        //     // __m256 rsqrt_approx_B = _mm256_rsqrt_ps(distSq_eps_B);
-
-                        //     __m256 rsqrt_A = _mm256_rsqrt_ps(distSq_A);
-                        //     __m256 rsqrt_B = _mm256_rsqrt_ps(distSq_B);
-
-                        //     // __m256 half_x_A = _mm256_mul_ps(distSq_eps_A, half);
-                        //     // __m256 half_x_B = _mm256_mul_ps(distSq_eps_B, half);
-
-                        //     // __m256 y_sq_A = _mm256_mul_ps(rsqrt_approx_A, rsqrt_approx_A);
-                        //     // __m256 y_sq_B = _mm256_mul_ps(rsqrt_approx_B, rsqrt_approx_B);
-
-                        //     // __m256 term_A = _mm256_fnmadd_ps(half_x_A, y_sq_A, three_halves);
-                        //     // __m256 term_B = _mm256_fnmadd_ps(half_x_B, y_sq_B, three_halves);
-
-                        //     // __m256 invDistApprox_A = _mm256_mul_ps(rsqrt_approx_A, term_A);
-                        //     // __m256 invDistApprox_B = _mm256_mul_ps(rsqrt_approx_B, term_B);
-
-                        //     // 7. INTERLEAVED FORCE ACCUMULATION
-                        //     // __m256 push_A = _mm256_and_ps(_mm256_mul_ps(invDistApprox_A, vRepulsion), mask_A);
-                        //     // __m256 push_B = _mm256_and_ps(_mm256_mul_ps(invDistApprox_B, vRepulsion), mask_B);
-
-                        //     // 4. DEEPLY FOLDED NEWTON-RAPHSON & PUSH
-                        //     __m256 push_A = _mm256_and_ps(
-                        //         _mm256_mul_ps(_mm256_mul_ps(rsqrt_A, _mm256_fnmadd_ps(_mm256_mul_ps(distSq_A, half), _mm256_mul_ps(rsqrt_A, rsqrt_A), three_halves)), vRepulsion), 
-                        //         mask_A
-                        //     );
-                        //     __m256 push_B = _mm256_and_ps(
-                        //         _mm256_mul_ps(_mm256_mul_ps(rsqrt_B, _mm256_fnmadd_ps(_mm256_mul_ps(distSq_B, half), _mm256_mul_ps(rsqrt_B, rsqrt_B), three_halves)), vRepulsion), 
-                        //         mask_B
-                        //     );
-
-                        //     accX = _mm256_fmadd_ps(diffX_A, push_A, accX);
-                        //     accX = _mm256_fmadd_ps(diffX_B, push_B, accX);
-
-                        //     accY = _mm256_fmadd_ps(diffY_A, push_A, accY);
-                        //     accY = _mm256_fmadd_ps(diffY_B, push_B, accY);
-                        // }
-
-                        // --- 2D NARROW PHASE ZERO-SPILL (8-wide, Max Speed, No Z-Math, Pure 2D AVX2 Fast Path) ---
-                        for (; j <= maxNeighborsToCheck - 8; j += 8) {
-                            localThreadOps += 12; // 2D FLOP count
-
-                            /* [EXPLICIT PREFETCHING]
-                                - CPUs memory controller races ahead of the math.
-                                - Sends the neighbors coordinates from L3 cache to L1 cache.
-                                - Its in L1 cache by the time you need the next neighbor's coordinates.
+                            /* [CPU Execution Ports]
+                                - A single CPU core contains multiple execution units.
+                                - Instructions route to lanes or ports (Port 0, Port 1, etc..).
+                                - These execution ports are pipelined (like an assembly line).
+                                - Instruction level parallelism means two instruction in a single cycle put on port 0 and port 1.
                             */
 
-                            // 1. LOAD X & Y IMMEDIATELY (No Z-Cull)
-                            // __m256 p_j_x = _mm256_loadu_ps(&pX[j]);
-                            // __m256 p_j_y = _mm256_loadu_ps(&pY[j]);
+                            // --- 16-WIDE UNROLLED ZERO-SPILL 2D NARROW PHASE ---
+                            // Process 16 particles simultaneously to hide FMA latency
+                            // for (; j <= maxNeighborsToCheck - 16; j += 16) {
+                            //     localThreadOps += 24; // 12 FLOPs * 2 batches
 
-                            // 2. CALCULATE 2D DISTANCES
-                            // __m256 diffX = _mm256_sub_ps(p_i_x, p_j_x);
-                            // __m256 diffY = _mm256_sub_ps(p_i_y, p_j_y);
+                            //     // 2. INTERLEAVED LOADS (No Z-Cull needed)
+                            //     // __m256 p_j_x_A = _mm256_loadu_ps(&pX[j]);
+                            //     // __m256 p_j_x_B = _mm256_loadu_ps(&pX[j + 8]);
+                                
+                            //     // __m256 p_j_y_A = _mm256_loadu_ps(&pY[j]);
+                            //     // __m256 p_j_y_B = _mm256_loadu_ps(&pY[j + 8]);
 
-                            // 2. FOLDED X & Y MATH (Saves 2 Registers)
-                            // The load is nested directly inside the subtraction!
-                            // The CPU reads straight from the L1 Cache into the ALU execution port.
-                            __m256 diffX = _mm256_sub_ps(p_i_x, _mm256_loadu_ps(&pX[j]));
-                            __m256 diffY = _mm256_sub_ps(p_i_y, _mm256_loadu_ps(&pY[j]));
+                            //     // 3. INTERLEAVED DISTANCES
+                            //     // __m256 diffX_A = _mm256_sub_ps(p_i_x, p_j_x_A);
+                            //     // __m256 diffX_B = _mm256_sub_ps(p_i_x, p_j_x_B);
+                                
+                            //     // __m256 diffY_A = _mm256_sub_ps(p_i_y, p_j_y_A);
+                            //     // __m256 diffY_B = _mm256_sub_ps(p_i_y, p_j_y_B);
 
-                            // 3. DISTANCE SQUARED (distSq = dx*dx + dy*dy)
-                            __m256 distSq = _mm256_fmadd_ps(diffY, diffY, _mm256_mul_ps(diffX, diffX));
-                            
-                            // 4. CHECK COLLISION MASK
-                            // (distSq < RadiusSq AND distSq > 0.0001)
-                            __m256 mask = _mm256_and_ps(
-                                _mm256_cmp_ps(distSq, vRadiusSq, _CMP_LT_OQ),
-                                _mm256_cmp_ps(distSq, vEpsilon, _CMP_GT_OQ)
-                            );
+                            //     // 2. FOLDED MATH
+                            //     __m256 diffX_A = _mm256_sub_ps(p_i_x, _mm256_loadu_ps(&pX[j]));
+                            //     __m256 diffX_B = _mm256_sub_ps(p_i_x, _mm256_loadu_ps(&pX[j + 8]));
+                            //     __m256 diffY_A = _mm256_sub_ps(p_i_y, _mm256_loadu_ps(&pY[j]));
+                            //     __m256 diffY_B = _mm256_sub_ps(p_i_y, _mm256_loadu_ps(&pY[j + 8]));
 
-                            // 5. CULL: If no particles in this 8-wide batch collided, skip the heavy math!
-                            if (_mm256_testz_ps(mask, mask)) continue;
+                            //     __m256 distSq_A = _mm256_fmadd_ps(diffY_A, diffY_A, _mm256_mul_ps(diffX_A, diffX_A));
+                            //     __m256 distSq_B = _mm256_fmadd_ps(diffY_B, diffY_B, _mm256_mul_ps(diffX_B, diffX_B));
 
-                            // 6. THE HEAVY MATH (Newton-Raphson approximation)
-                            // __m256 invDistApprox = _mm256_rsqrt_ps(distSq);
+                            //     // 4. CHECK COLLISION MASKS
+                            //     __m256 mask_A = _mm256_and_ps(
+                            //         _mm256_cmp_ps(distSq_A, vRadiusSq, _CMP_LT_OQ),
+                            //         _mm256_cmp_ps(distSq_A, vEpsilon, _CMP_GT_OQ)
+                            //     );
+                            //     __m256 mask_B = _mm256_and_ps(
+                            //         _mm256_cmp_ps(distSq_B, vRadiusSq, _CMP_LT_OQ),
+                            //         _mm256_cmp_ps(distSq_B, vEpsilon, _CMP_GT_OQ)
+                            //     );
 
-                            // __m256 distSq_eps = _mm256_add_ps(distSq, vEpsilon);
+                            //     // 5. COMBINED CULL
+                            //     // If NO particles in BOTH 8-wide batches collided, skip the heavy math entirely!
+                            //     __m256 combinedMask = _mm256_or_ps(mask_A, mask_B);
+                            //     if (_mm256_testz_ps(combinedMask, combinedMask)) continue;
 
-                            // 6. VARIABLE RECYCLING & MASK PRE-CALCULATION
-                            // Overwrite distSq with the epsilon-padded version to save register space
-                            distSq = _mm256_add_ps(distSq, vEpsilon);
+                            //     // 6. INTERLEAVED NEWTON-RAPHSON
+                            //     // __m256 distSq_eps_A = _mm256_add_ps(distSq_A, vEpsilon);
+                            //     // __m256 distSq_eps_B = _mm256_add_ps(distSq_B, vEpsilon);
 
-                            // [LATENCY HIDING]: Calculate masked repulsion early! (1 cycle)
-                            // We do this now so the ALU port isn't idle while the rsqrt begins.
-                            __m256 masked_repulsion = _mm256_and_ps(vRepulsion, mask);
+                            //     // 3. VARIABLE RECYCLING
+                            //     distSq_A = _mm256_add_ps(distSq_A, vEpsilon);
+                            //     distSq_B = _mm256_add_ps(distSq_B, vEpsilon);
 
-                            // 7. DEEPLY FOLDED NEWTON-RAPHSON & PUSH
-                            // Newton-Raphson Refinement (Restores 23-bit precision)
-                            // Formula: y = y * (1.5 - 0.5 * x * y^2)
-                            // Get the hardware's 12-bit guess (~5-7 cycles)
-                            __m256 rsqrt_approx = _mm256_rsqrt_ps(distSq); 
-                            __m256 half_x = _mm256_mul_ps(distSq, half);
-                            __m256 y_sq = _mm256_mul_ps(rsqrt_approx, rsqrt_approx);
+                            //     // Hardware 12-bit guess
+                            //     // __m256 rsqrt_approx_A = _mm256_rsqrt_ps(distSq_eps_A);
+                            //     // __m256 rsqrt_approx_B = _mm256_rsqrt_ps(distSq_eps_B);
 
-                            // Calculate Push Force
-                            // __m256 push = _mm256_mul_ps(invDistApprox, vRepulsion);
-                            // push = _mm256_and_ps(push, mask); // Zero out forces for particles that didn't collide
+                            //     __m256 rsqrt_A = _mm256_rsqrt_ps(distSq_A);
+                            //     __m256 rsqrt_B = _mm256_rsqrt_ps(distSq_B);
 
-                            /// [LATENCY HIDING]: Multiply the masked repulsion by the hardware guess!
-                            // This executes perfectly in parallel while the 'term' below computes.
-                            __m256 rsqrt_repul = _mm256_mul_ps(rsqrt_approx, masked_repulsion);
+                            //     // __m256 half_x_A = _mm256_mul_ps(distSq_eps_A, half);
+                            //     // __m256 half_x_B = _mm256_mul_ps(distSq_eps_B, half);
 
-                            // _mm256_fnmadd_ps perfectly calculates: -(half_x * y_sq) + 1.5 (~4-5 cycles)
-                            __m256 term = _mm256_fnmadd_ps(half_x, y_sq, three_halves);
+                            //     // __m256 y_sq_A = _mm256_mul_ps(rsqrt_approx_A, rsqrt_approx_A);
+                            //     // __m256 y_sq_B = _mm256_mul_ps(rsqrt_approx_B, rsqrt_approx_B);
 
-                            // Calculate final push force
-                            // We already applied the mask and the repulsion, so this is just one final rapid multiply.
-                            __m256 push = _mm256_mul_ps(rsqrt_repul, term);
+                            //     // __m256 term_A = _mm256_fnmadd_ps(half_x_A, y_sq_A, three_halves);
+                            //     // __m256 term_B = _mm256_fnmadd_ps(half_x_B, y_sq_B, three_halves);
 
-                            // 7. ACCUMULATE 2D FORCES
-                            accX = _mm256_fmadd_ps(diffX, push, accX);
-                            accY = _mm256_fmadd_ps(diffY, push, accY);
+                            //     // __m256 invDistApprox_A = _mm256_mul_ps(rsqrt_approx_A, term_A);
+                            //     // __m256 invDistApprox_B = _mm256_mul_ps(rsqrt_approx_B, term_B);
+
+                            //     // 7. INTERLEAVED FORCE ACCUMULATION
+                            //     // __m256 push_A = _mm256_and_ps(_mm256_mul_ps(invDistApprox_A, vRepulsion), mask_A);
+                            //     // __m256 push_B = _mm256_and_ps(_mm256_mul_ps(invDistApprox_B, vRepulsion), mask_B);
+
+                            //     // 4. DEEPLY FOLDED NEWTON-RAPHSON & PUSH
+                            //     __m256 push_A = _mm256_and_ps(
+                            //         _mm256_mul_ps(_mm256_mul_ps(rsqrt_A, _mm256_fnmadd_ps(_mm256_mul_ps(distSq_A, half), _mm256_mul_ps(rsqrt_A, rsqrt_A), three_halves)), vRepulsion), 
+                            //         mask_A
+                            //     );
+                            //     __m256 push_B = _mm256_and_ps(
+                            //         _mm256_mul_ps(_mm256_mul_ps(rsqrt_B, _mm256_fnmadd_ps(_mm256_mul_ps(distSq_B, half), _mm256_mul_ps(rsqrt_B, rsqrt_B), three_halves)), vRepulsion), 
+                            //         mask_B
+                            //     );
+
+                            //     accX = _mm256_fmadd_ps(diffX_A, push_A, accX);
+                            //     accX = _mm256_fmadd_ps(diffX_B, push_B, accX);
+
+                            //     accY = _mm256_fmadd_ps(diffY_A, push_A, accY);
+                            //     accY = _mm256_fmadd_ps(diffY_B, push_B, accY);
+                            // }
+
+                            // --- 2D NARROW PHASE ZERO-SPILL (8-wide, Max Speed, No Z-Math, Pure 2D AVX2 Fast Path) ---
+                            for (; j <= maxNeighborsToCheck - 8; j += 8) {
+                                localThreadOps += 12; // 2D FLOP count
+
+                                /* [EXPLICIT PREFETCHING]
+                                    - CPUs memory controller races ahead of the math.
+                                    - Sends the neighbors coordinates from L3 cache to L1 cache.
+                                    - Its in L1 cache by the time you need the next neighbor's coordinates.
+                                */
+
+                                // 1. LOAD X & Y IMMEDIATELY (No Z-Cull)
+                                // __m256 p_j_x = _mm256_loadu_ps(&pX[j]);
+                                // __m256 p_j_y = _mm256_loadu_ps(&pY[j]);
+
+                                // 2. CALCULATE 2D DISTANCES
+                                // __m256 diffX = _mm256_sub_ps(p_i_x, p_j_x);
+                                // __m256 diffY = _mm256_sub_ps(p_i_y, p_j_y);
+
+                                // 2. FOLDED X & Y MATH (Saves 2 Registers)
+                                // The load is nested directly inside the subtraction!
+                                // The CPU reads straight from the L1 Cache into the ALU execution port.
+                                __m256 diffX = _mm256_sub_ps(p_i_x, _mm256_loadu_ps(&pX[j]));
+                                __m256 diffY = _mm256_sub_ps(p_i_y, _mm256_loadu_ps(&pY[j]));
+
+                                // 3. DISTANCE SQUARED (distSq = dx*dx + dy*dy)
+                                __m256 distSq = _mm256_fmadd_ps(diffY, diffY, _mm256_mul_ps(diffX, diffX));
+                                
+                                // 4. CHECK COLLISION MASK
+                                // (distSq < RadiusSq AND distSq > 0.0001)
+                                __m256 mask = _mm256_and_ps(
+                                    _mm256_cmp_ps(distSq, vRadiusSq, _CMP_LT_OQ),
+                                    _mm256_cmp_ps(distSq, vEpsilon, _CMP_GT_OQ)
+                                );
+
+                                // 5. CULL: If no particles in this 8-wide batch collided, skip the heavy math!
+                                if (_mm256_testz_ps(mask, mask)) continue;
+
+                                // 6. THE HEAVY MATH (Newton-Raphson approximation)
+                                // __m256 invDistApprox = _mm256_rsqrt_ps(distSq);
+
+                                // __m256 distSq_eps = _mm256_add_ps(distSq, vEpsilon);
+
+                                // 6. VARIABLE RECYCLING & MASK PRE-CALCULATION
+                                // Overwrite distSq with the epsilon-padded version to save register space
+                                distSq = _mm256_add_ps(distSq, vEpsilon);
+
+                                // [LATENCY HIDING]: Calculate masked repulsion early! (1 cycle)
+                                // We do this now so the ALU port isn't idle while the rsqrt begins.
+                                __m256 masked_repulsion = _mm256_and_ps(vRepulsion, mask);
+
+                                // 7. DEEPLY FOLDED NEWTON-RAPHSON & PUSH
+                                // Newton-Raphson Refinement (Restores 23-bit precision)
+                                // Formula: y = y * (1.5 - 0.5 * x * y^2)
+                                // Get the hardware's 12-bit guess (~5-7 cycles)
+                                __m256 rsqrt_approx = _mm256_rsqrt_ps(distSq); 
+                                __m256 half_x = _mm256_mul_ps(distSq, half);
+                                __m256 y_sq = _mm256_mul_ps(rsqrt_approx, rsqrt_approx);
+
+                                // Calculate Push Force
+                                // __m256 push = _mm256_mul_ps(invDistApprox, vRepulsion);
+                                // push = _mm256_and_ps(push, mask); // Zero out forces for particles that didn't collide
+
+                                /// [LATENCY HIDING]: Multiply the masked repulsion by the hardware guess!
+                                // This executes perfectly in parallel while the 'term' below computes.
+                                __m256 rsqrt_repul = _mm256_mul_ps(rsqrt_approx, masked_repulsion);
+
+                                // _mm256_fnmadd_ps perfectly calculates: -(half_x * y_sq) + 1.5 (~4-5 cycles)
+                                __m256 term = _mm256_fnmadd_ps(half_x, y_sq, three_halves);
+
+                                // Calculate final push force
+                                // We already applied the mask and the repulsion, so this is just one final rapid multiply.
+                                __m256 push = _mm256_mul_ps(rsqrt_repul, term);
+
+                                // 7. ACCUMULATE 2D FORCES
+                                accX = _mm256_fmadd_ps(diffX, push, accX);
+                                accY = _mm256_fmadd_ps(diffY, push, accY);
+                            }
+
+                            // --- 2D SCALAR REMAINDER  ---
+                            for (; j < maxNeighborsToCheck; ++j) {
+                                float diffX = pX[i] - pX[j];
+                                float diffY = pY[i] - pY[j];
+                                float distSq = diffX*diffX + diffY*diffY;
+                                if (distSq > 0.0001f && distSq < RADIUS_SQ) {
+                                    // 1. Hardware 12-bit approximation (~4 clock cycles)
+                                    float approx = _mm_cvtss_f32(_mm_rsqrt_ss(_mm_set_ss(distSq + 0.0001f)));
+
+                                    // 2. Newton-Raphson Refinement to 23-bit precision (Mapped 1:1 with your AVX2 logic)
+                                    float invDist = approx * (1.5f - (0.5f * (distSq + 0.0001f) * approx * approx));
+                                    // float invDist = 1.0f / std::sqrt(distSq);
+
+                                    float push = REPULSION_STRENGTH * invDist;
+                                    scalarForceX += diffX * push;
+                                    scalarForceY += diffY * push;
+                                }
+                            }
                         }
+                    } 
+                    else {     
+                        for (int n = 0; n < validNeighbors; ++n) {
+                            int j = neighborCache[n].startIdx;
+                            int maxNeighborsToCheck = neighborCache[n].endIdx;
 
-                        // --- 2D SCALAR REMAINDER  ---
-                        for (; j < maxNeighborsToCheck; ++j) {
-                            float diffX = pX[i] - pX[j];
-                            float diffY = pY[i] - pY[j];
-                            float distSq = diffX*diffX + diffY*diffY;
-                            if (distSq > 0.0001f && distSq < RADIUS_SQ) {
-                                // 1. Hardware 12-bit approximation (~4 clock cycles)
-                                float approx = _mm_cvtss_f32(_mm_rsqrt_ss(_mm_set_ss(distSq + 0.0001f)));
+                            // --- 16-WIDE ZERO-SPILL 3D NARROW PHASE ---
+                            // for (; j <= maxNeighborsToCheck - 16; j += 16) {
+                            //     localThreadOps += 30; // 15 FLOPs * 2 batches
 
-                                // 2. Newton-Raphson Refinement to 23-bit precision (Mapped 1:1 with your AVX2 logic)
-                                float invDist = approx * (1.5f - (0.5f * (distSq + 0.0001f) * approx * approx));
-                                // float invDist = 1.0f / std::sqrt(distSq);
+                            //     // 1. EXPLICIT PREFETCHING (Look 16 floats ahead instead of 8)
+                            //     // Tell the memory controller to pull the NEXT 16 floats into the L1 cache as the execution ports crunch the current 16 floats.
+                            //     // _mm_prefetch((const char*)&pZ[j + 16], _MM_HINT_T0);
+                            //     // _mm_prefetch((const char*)&pX[j + 16], _MM_HINT_T0);
+                            //     // _mm_prefetch((const char*)&pY[j + 16], _MM_HINT_T0);
 
-                                float push = REPULSION_STRENGTH * invDist;
-                                scalarForceX += diffX * push;
-                                scalarForceY += diffY * push;
+                            //     // 2. INTERLEAVED Z-STACK CULL
+                            //     // __m256 p_j_z_A = _mm256_loadu_ps(&pZ[j]);
+                            //     // __m256 p_j_z_B = _mm256_loadu_ps(&pZ[j + 8]);
+
+                            //     // __m256 diffZ_A = _mm256_sub_ps(p_i_z, p_j_z_A);
+                            //     // __m256 diffZ_B = _mm256_sub_ps(p_i_z, p_j_z_B);
+
+                            //     // 2. FOLDED Z-CULL (Loads directly into subtraction)
+                            //     __m256 diffZ_A = _mm256_sub_ps(p_i_z, _mm256_loadu_ps(&pZ[j]));
+                            //     __m256 diffZ_B = _mm256_sub_ps(p_i_z, _mm256_loadu_ps(&pZ[j + 8]));
+
+                            //     __m256 zDistSq_A = _mm256_mul_ps(diffZ_A, diffZ_A);
+                            //     __m256 zDistSq_B = _mm256_mul_ps(diffZ_B, diffZ_B);
+
+                            //     // __m256 zMask_A = _mm256_cmp_ps(zDistSq_A, vRadiusSq, _CMP_LT_OQ);
+                            //     // __m256 zMask_B = _mm256_cmp_ps(zDistSq_B, vRadiusSq, _CMP_LT_OQ);
+
+                            //     // Combine masks: If ALL 16 particles fail the Z-cull, skip the heavy math!
+                            //     __m256 combinedZMask = _mm256_or_ps(
+                            //         _mm256_cmp_ps(zDistSq_A, vRadiusSq, _CMP_LT_OQ),
+                            //         _mm256_cmp_ps(zDistSq_B, vRadiusSq, _CMP_LT_OQ)
+                            //     );
+
+                            //     // __m256 combinedZMask = _mm256_or_ps(zMask_A, zMask_B);
+
+                            //     if (_mm256_testz_ps(combinedZMask, combinedZMask)) continue;
+
+                            //     // 3. INTERLEAVED SURVIVOR MATH (X and Y loads)
+                            //     // __m256 p_j_x_A = _mm256_loadu_ps(&pX[j]);
+                            //     // __m256 p_j_x_B = _mm256_loadu_ps(&pX[j + 8]);
+                            //     // __m256 p_j_y_A = _mm256_loadu_ps(&pY[j]);
+                            //     // __m256 p_j_y_B = _mm256_loadu_ps(&pY[j + 8]);
+
+                            //     // __m256 diffX_A = _mm256_sub_ps(p_i_x, p_j_x_A);
+                            //     // __m256 diffX_B = _mm256_sub_ps(p_i_x, p_j_x_B);
+                            //     // __m256 diffY_A = _mm256_sub_ps(p_i_y, p_j_y_A);
+                            //     // __m256 diffY_B = _mm256_sub_ps(p_i_y, p_j_y_B);
+
+                            //     // 3. FOLDED SURVIVOR MATH
+                            //     __m256 diffX_A = _mm256_sub_ps(p_i_x, _mm256_loadu_ps(&pX[j]));
+                            //     __m256 diffX_B = _mm256_sub_ps(p_i_x, _mm256_loadu_ps(&pX[j + 8]));
+                            //     __m256 diffY_A = _mm256_sub_ps(p_i_y, _mm256_loadu_ps(&pY[j]));
+                            //     __m256 diffY_B = _mm256_sub_ps(p_i_y, _mm256_loadu_ps(&pY[j + 8]));
+
+                            //     // Interleaved Distance Squared
+                            //     __m256 distSq_A = _mm256_fmadd_ps(diffY_A, diffY_A, _mm256_fmadd_ps(diffX_A, diffX_A, zDistSq_A));
+                            //     __m256 distSq_B = _mm256_fmadd_ps(diffY_B, diffY_B, _mm256_fmadd_ps(diffX_B, diffX_B, zDistSq_B));
+
+                            //     __m256 mask_A = _mm256_and_ps(_mm256_cmp_ps(distSq_A, vRadiusSq, _CMP_LT_OQ), _mm256_cmp_ps(distSq_A, vEpsilon, _CMP_GT_OQ));
+                            //     __m256 mask_B = _mm256_and_ps(_mm256_cmp_ps(distSq_B, vRadiusSq, _CMP_LT_OQ), _mm256_cmp_ps(distSq_B, vEpsilon, _CMP_GT_OQ));
+
+                            //     // Combine final 3D masks
+                            //     __m256 combinedMask = _mm256_or_ps(mask_A, mask_B);
+                            //     if (_mm256_testz_ps(combinedMask, combinedMask)) continue;
+
+                            //     // 4. INTERLEAVED NEWTON-RAPHSON
+                            //     // __m256 distSq_eps_A = _mm256_add_ps(distSq_A, vEpsilon);
+                            //     // __m256 distSq_eps_B = _mm256_add_ps(distSq_B, vEpsilon);
+
+                            //     // 4. VARIABLE RECYCLING
+                            //     distSq_A = _mm256_add_ps(distSq_A, vEpsilon);
+                            //     distSq_B = _mm256_add_ps(distSq_B, vEpsilon);
+
+                            //     // __m256 rsqrt_approx_A = _mm256_rsqrt_ps(distSq_eps_A);
+                            //     // __m256 rsqrt_approx_B = _mm256_rsqrt_ps(distSq_eps_B);
+
+                            //     __m256 rsqrt_A = _mm256_rsqrt_ps(distSq_A);
+                            //     __m256 rsqrt_B = _mm256_rsqrt_ps(distSq_B);
+
+                            //     // __m256 half_x_A = _mm256_mul_ps(distSq_eps_A, half);
+                            //     // __m256 half_x_B = _mm256_mul_ps(distSq_eps_B, half);
+
+                            //     // __m256 y_sq_A = _mm256_mul_ps(rsqrt_approx_A, rsqrt_approx_A);
+                            //     // __m256 y_sq_B = _mm256_mul_ps(rsqrt_approx_B, rsqrt_approx_B);
+
+                            //     // __m256 term_A = _mm256_fnmadd_ps(half_x_A, y_sq_A, three_halves);
+                            //     // __m256 term_B = _mm256_fnmadd_ps(half_x_B, y_sq_B, three_halves);
+
+                            //     // __m256 invDistApprox_A = _mm256_mul_ps(rsqrt_approx_A, term_A);
+                            //     // __m256 invDistApprox_B = _mm256_mul_ps(rsqrt_approx_B, term_B);
+
+                            //     // 5. INTERLEAVED FORCE ACCUMULATION
+                            //     // __m256 push_A = _mm256_and_ps(_mm256_mul_ps(invDistApprox_A, vRepulsion), mask_A);
+                            //     // __m256 push_B = _mm256_and_ps(_mm256_mul_ps(invDistApprox_B, vRepulsion), mask_B);
+
+                            //     // 5. DEEPLY FOLDED NEWTON-RAPHSON & PUSH
+                            //     __m256 push_A = _mm256_and_ps(
+                            //         _mm256_mul_ps(_mm256_mul_ps(rsqrt_A, _mm256_fnmadd_ps(_mm256_mul_ps(distSq_A, half), _mm256_mul_ps(rsqrt_A, rsqrt_A), three_halves)), vRepulsion), 
+                            //         mask_A
+                            //     );
+                            //     __m256 push_B = _mm256_and_ps(
+                            //         _mm256_mul_ps(_mm256_mul_ps(rsqrt_B, _mm256_fnmadd_ps(_mm256_mul_ps(distSq_B, half), _mm256_mul_ps(rsqrt_B, rsqrt_B), three_halves)), vRepulsion), 
+                            //         mask_B
+                            //     );
+
+                            //     accX = _mm256_fmadd_ps(diffX_A, push_A, accX);
+                            //     accX = _mm256_fmadd_ps(diffX_B, push_B, accX);
+
+                            //     accY = _mm256_fmadd_ps(diffY_A, push_A, accY);
+                            //     accY = _mm256_fmadd_ps(diffY_B, push_B, accY);
+
+                            //     accZ = _mm256_fmadd_ps(diffZ_A, push_A, accZ);
+                            //     accZ = _mm256_fmadd_ps(diffZ_B, push_B, accZ);
+                            // }
+
+                            // --- 3D NARROW PHASE (8-Wide AVX2 Full Z-Stack Cull) ---
+                            // Process neighbors 8 at a time, bounded to our new capped limit (maxNeighborsToCheck).
+                            for (; j <= maxNeighborsToCheck - 8; j += 8) {
+                                localThreadOps += 15; // Exact cost of processing 8 neighbors! 3D FLOP Count
+
+                                // EXPLICIT PREFETCHING (Z first, because of Z-cull)
+                                // _mm_prefetch((const char*)&pZ[j + 8], _MM_HINT_T0);
+                                // _mm_prefetch((const char*)&pX[j + 8], _MM_HINT_T0);
+                                // _mm_prefetch((const char*)&pY[j + 8], _MM_HINT_T0);
+
+                                // 1. THE Z-STACK CULL: Load Z-axis data FIRST
+                                // __m256 p_j_z = _mm256_loadu_ps(&pZ[j]);
+
+                                // 1. FOLDED Z-CULL (Saves 1 Register)
+                                // We inline the load directly into the subtraction. 
+                                // The compiler emits: vsubps ymm0, ymm1, YMMWORD PTR [mem]
+                                __m256 diffZ = _mm256_sub_ps(p_i_z, _mm256_loadu_ps(&pZ[j]));
+
+                                // Calculate just the Z distance squared
+                                __m256 zDistSq = _mm256_mul_ps(diffZ, diffZ);
+
+                                // Did ANY of these 8 particles pass the vertical threshold? (zDistSq < RadiusSq)
+                                __m256 zMask = _mm256_cmp_ps(zDistSq, vRadiusSq, _CMP_LT_OQ);
+
+                                // Z-Cull: Only triggers if depth is actually being used
+                                // HUGE OPTIMIZATION: If all 8 particles are too far away vertically,
+                                // testz returns 1 (true). We skip loading X, Y, and the heavy math!
+                                if (_mm256_testz_ps(zMask, zMask)) continue;
+
+                                // =======================================================
+                                // 2. SURVIVED CULL: Now we load the rest of the data
+                                // =======================================================
+
+                                // Load 8 neighbors simultaneously (Thanks to our SoA Sort, this is L1 Cache perfectly linear!)
+                                // __m256 p_j_x = _mm256_loadu_ps(&pX[j]);
+                                // __m256 p_j_y = _mm256_loadu_ps(&pY[j]);
+
+                                // Calculate distances: dx, dy, dz
+                                // 2. FOLDED X & Y SURVIVOR MATH (Saves 2 Registers)
+                                __m256 diffX = _mm256_sub_ps(p_i_x, _mm256_loadu_ps(&pX[j]));
+                                __m256 diffY = _mm256_sub_ps(p_i_y, _mm256_loadu_ps(&pY[j]));
+
+                                
+                                // 3. FULL DISTANCE SQUARED
+                                // Notice we reuse 'zDistSq' here so we don't calculate it twice!
+                                __m256 distSq = _mm256_fmadd_ps(diffY, diffY, _mm256_fmadd_ps(diffX, diffX, zDistSq));
+
+                                // Did any of these 8 particles actually collide in 3D space?
+                                // (distSq < RadiusSq AND distSq > 0.0001)
+                                __m256 mask = _mm256_and_ps(
+                                    _mm256_cmp_ps(distSq, vRadiusSq, _CMP_LT_OQ),
+                                    _mm256_cmp_ps(distSq, vEpsilon, _CMP_GT_OQ)
+                                );
+
+                                // HUGE OPTIMIZATION: If all 8 bits are zero (no collisions), skip the heavy math entirely!
+                                // Secondary check: Even if they passed the Z-cull, they might have failed the X/Y cull.
+                                if (_mm256_testz_ps(mask, mask)) continue;
+
+                                /* [Newton-Raphson approximation] 
+                                    - Refines the hardware's approximation of 1/sqrt(distSq)
+                                    - This instruction provides a maximum relative error of 1.5x10^-4.
+                                    - If the true distance is 1000, the hardware approximation will give you 1000.15
+                                    - That 0.015% margin of error is invisible to the human eye, but the computational cost is massive.
+                                    - 50 million ALU operations every second = 4 execution ports per particle * 100,0000 particles * 120fps
+                                */ 
+                                // THE HEAVY MATH (Newton-Raphson approximation)
+                                // __m256 invDistApprox = _mm256_rsqrt_ps(distSq);
+
+                                // __m256 distSq_eps = _mm256_add_ps(distSq, vEpsilon);
+
+                                // 4. VARIABLE RECYCLING & MASK PRE-CALCULATION
+                                distSq = _mm256_add_ps(distSq, vEpsilon);
+
+                                // [LATENCY HIDING]: Calculate the masked repulsion early!
+                                // This executes in 1 clock cycle on a generic ALU port while the heavier math below is starting up.
+                                __m256 masked_repulsion = _mm256_and_ps(vRepulsion, mask);
+
+                                // 5. NEWTON-RAPHSON (The Deep Chain)
+                                // Hardware guess takes ~5-7 cycles
+                                // Get the hardware's 12-bit guess
+                                // Notice how tight this is. The CPU can now hold accX, accY, accZ, 
+                                // diffX, diffY, diffZ, and all these temporaries perfectly in 16 registers.
+                                __m256 rsqrt_approx = _mm256_rsqrt_ps(distSq); 
+
+                                // Newton-Raphson Refinement (Restores 23-bit precision)
+                                // Formula: y = y * (1.5 - 0.5 * x * y^2)
+                                __m256 half_x = _mm256_mul_ps(distSq, half);
+
+                                // Wait for rsqrt_approx (~4 cycles)
+                                __m256 y_sq = _mm256_mul_ps(rsqrt_approx, rsqrt_approx);
+
+                                // [LATENCY HIDING]: Multiply repulsion by our rsqrt guess right now!
+                                // We do this concurrently while waiting for the 'term' below to finish calculating.
+                                __m256 rsqrt_repul = _mm256_mul_ps(rsqrt_approx, masked_repulsion);
+
+                                // _mm256_fnmadd_ps perfectly calculates: -(half_x * y_sq) + 1.5
+                                __m256 term = _mm256_fnmadd_ps(half_x, y_sq, three_halves);
+                                
+                                // __m256 invDistApprox = _mm256_mul_ps(rsqrt_approx, term);
+                                
+                                // Calculate Push Force
+                                // We fold the mask ANDing directly into the push multiplier! (Saves 1 Register)
+                                // __m256 push = _mm256_mul_ps(invDistApprox, vRepulsion);
+                                // push = _mm256_and_ps(push, mask); // Zero out forces for particles that didn't collide
+
+                                // 6. FOLDED PUSH
+                                // We already applied the mask and the repulsion, so this is just one final rapid multiply.
+                                __m256 push = _mm256_mul_ps(rsqrt_repul, term);
+
+                                // 7. Accumulate Force Vector
+                                accX = _mm256_fmadd_ps(diffX, push, accX);
+                                accY = _mm256_fmadd_ps(diffY, push, accY);
+                                accZ = _mm256_fmadd_ps(diffZ, push, accZ);
+                            }
+
+                            // --- 3D SCALAR REMAINDER ---
+                            // Handle the remaining 1 to 7 particles that didn't cleanly fit into an 8-wide AVX register
+                            for (; j < maxNeighborsToCheck; ++j) {
+                                float diffX = pX[i] - pX[j];
+                                float diffY = pY[i] - pY[j];
+                                float diffZ = pZ[i] - pZ[j];
+                                
+                                float distSq = diffX*diffX + diffY*diffY + diffZ*diffZ;
+                                
+                                // Epsilon check inherently prevents particle 'i' from violently colliding with itself
+                                if (distSq > 0.0001f && distSq < RADIUS_SQ) {
+                                    // 1. Hardware 12-bit approximation (~4 clock cycles)
+                                    float approx = _mm_cvtss_f32(_mm_rsqrt_ss(_mm_set_ss(distSq + 0.0001f)));
+
+                                    // 2. Newton-Raphson Refinement to 23-bit precision (Mapped 1:1 with your AVX2 logic)
+                                    float invDist = approx * (1.5f - (0.5f * (distSq + 0.0001f) * approx * approx));
+                                    // float invDist = 1.0f / std::sqrt(distSq);
+
+                                    float push = REPULSION_STRENGTH * invDist;
+                                    scalarForceX += diffX * push;
+                                    scalarForceY += diffY * push;
+                                    scalarForceZ += diffZ * push;
+                                }
                             }
                         }
                     }
-                } 
-                else {     
-                    for (int n = 0; n < validNeighbors; ++n) {
-                        int j = neighborCache[n].startIdx;
-                        int maxNeighborsToCheck = neighborCache[n].endIdx;
 
-                        // --- 16-WIDE ZERO-SPILL 3D NARROW PHASE ---
-                        // for (; j <= maxNeighborsToCheck - 16; j += 16) {
-                        //     localThreadOps += 30; // 15 FLOPs * 2 batches
-
-                        //     // 1. EXPLICIT PREFETCHING (Look 16 floats ahead instead of 8)
-                        //     // Tell the memory controller to pull the NEXT 16 floats into the L1 cache as the execution ports crunch the current 16 floats.
-                        //     // _mm_prefetch((const char*)&pZ[j + 16], _MM_HINT_T0);
-                        //     // _mm_prefetch((const char*)&pX[j + 16], _MM_HINT_T0);
-                        //     // _mm_prefetch((const char*)&pY[j + 16], _MM_HINT_T0);
-
-                        //     // 2. INTERLEAVED Z-STACK CULL
-                        //     // __m256 p_j_z_A = _mm256_loadu_ps(&pZ[j]);
-                        //     // __m256 p_j_z_B = _mm256_loadu_ps(&pZ[j + 8]);
-
-                        //     // __m256 diffZ_A = _mm256_sub_ps(p_i_z, p_j_z_A);
-                        //     // __m256 diffZ_B = _mm256_sub_ps(p_i_z, p_j_z_B);
-
-                        //     // 2. FOLDED Z-CULL (Loads directly into subtraction)
-                        //     __m256 diffZ_A = _mm256_sub_ps(p_i_z, _mm256_loadu_ps(&pZ[j]));
-                        //     __m256 diffZ_B = _mm256_sub_ps(p_i_z, _mm256_loadu_ps(&pZ[j + 8]));
-
-                        //     __m256 zDistSq_A = _mm256_mul_ps(diffZ_A, diffZ_A);
-                        //     __m256 zDistSq_B = _mm256_mul_ps(diffZ_B, diffZ_B);
-
-                        //     // __m256 zMask_A = _mm256_cmp_ps(zDistSq_A, vRadiusSq, _CMP_LT_OQ);
-                        //     // __m256 zMask_B = _mm256_cmp_ps(zDistSq_B, vRadiusSq, _CMP_LT_OQ);
-
-                        //     // Combine masks: If ALL 16 particles fail the Z-cull, skip the heavy math!
-                        //     __m256 combinedZMask = _mm256_or_ps(
-                        //         _mm256_cmp_ps(zDistSq_A, vRadiusSq, _CMP_LT_OQ),
-                        //         _mm256_cmp_ps(zDistSq_B, vRadiusSq, _CMP_LT_OQ)
-                        //     );
-
-                        //     // __m256 combinedZMask = _mm256_or_ps(zMask_A, zMask_B);
-
-                        //     if (_mm256_testz_ps(combinedZMask, combinedZMask)) continue;
-
-                        //     // 3. INTERLEAVED SURVIVOR MATH (X and Y loads)
-                        //     // __m256 p_j_x_A = _mm256_loadu_ps(&pX[j]);
-                        //     // __m256 p_j_x_B = _mm256_loadu_ps(&pX[j + 8]);
-                        //     // __m256 p_j_y_A = _mm256_loadu_ps(&pY[j]);
-                        //     // __m256 p_j_y_B = _mm256_loadu_ps(&pY[j + 8]);
-
-                        //     // __m256 diffX_A = _mm256_sub_ps(p_i_x, p_j_x_A);
-                        //     // __m256 diffX_B = _mm256_sub_ps(p_i_x, p_j_x_B);
-                        //     // __m256 diffY_A = _mm256_sub_ps(p_i_y, p_j_y_A);
-                        //     // __m256 diffY_B = _mm256_sub_ps(p_i_y, p_j_y_B);
-
-                        //     // 3. FOLDED SURVIVOR MATH
-                        //     __m256 diffX_A = _mm256_sub_ps(p_i_x, _mm256_loadu_ps(&pX[j]));
-                        //     __m256 diffX_B = _mm256_sub_ps(p_i_x, _mm256_loadu_ps(&pX[j + 8]));
-                        //     __m256 diffY_A = _mm256_sub_ps(p_i_y, _mm256_loadu_ps(&pY[j]));
-                        //     __m256 diffY_B = _mm256_sub_ps(p_i_y, _mm256_loadu_ps(&pY[j + 8]));
-
-                        //     // Interleaved Distance Squared
-                        //     __m256 distSq_A = _mm256_fmadd_ps(diffY_A, diffY_A, _mm256_fmadd_ps(diffX_A, diffX_A, zDistSq_A));
-                        //     __m256 distSq_B = _mm256_fmadd_ps(diffY_B, diffY_B, _mm256_fmadd_ps(diffX_B, diffX_B, zDistSq_B));
-
-                        //     __m256 mask_A = _mm256_and_ps(_mm256_cmp_ps(distSq_A, vRadiusSq, _CMP_LT_OQ), _mm256_cmp_ps(distSq_A, vEpsilon, _CMP_GT_OQ));
-                        //     __m256 mask_B = _mm256_and_ps(_mm256_cmp_ps(distSq_B, vRadiusSq, _CMP_LT_OQ), _mm256_cmp_ps(distSq_B, vEpsilon, _CMP_GT_OQ));
-
-                        //     // Combine final 3D masks
-                        //     __m256 combinedMask = _mm256_or_ps(mask_A, mask_B);
-                        //     if (_mm256_testz_ps(combinedMask, combinedMask)) continue;
-
-                        //     // 4. INTERLEAVED NEWTON-RAPHSON
-                        //     // __m256 distSq_eps_A = _mm256_add_ps(distSq_A, vEpsilon);
-                        //     // __m256 distSq_eps_B = _mm256_add_ps(distSq_B, vEpsilon);
-
-                        //     // 4. VARIABLE RECYCLING
-                        //     distSq_A = _mm256_add_ps(distSq_A, vEpsilon);
-                        //     distSq_B = _mm256_add_ps(distSq_B, vEpsilon);
-
-                        //     // __m256 rsqrt_approx_A = _mm256_rsqrt_ps(distSq_eps_A);
-                        //     // __m256 rsqrt_approx_B = _mm256_rsqrt_ps(distSq_eps_B);
-
-                        //     __m256 rsqrt_A = _mm256_rsqrt_ps(distSq_A);
-                        //     __m256 rsqrt_B = _mm256_rsqrt_ps(distSq_B);
-
-                        //     // __m256 half_x_A = _mm256_mul_ps(distSq_eps_A, half);
-                        //     // __m256 half_x_B = _mm256_mul_ps(distSq_eps_B, half);
-
-                        //     // __m256 y_sq_A = _mm256_mul_ps(rsqrt_approx_A, rsqrt_approx_A);
-                        //     // __m256 y_sq_B = _mm256_mul_ps(rsqrt_approx_B, rsqrt_approx_B);
-
-                        //     // __m256 term_A = _mm256_fnmadd_ps(half_x_A, y_sq_A, three_halves);
-                        //     // __m256 term_B = _mm256_fnmadd_ps(half_x_B, y_sq_B, three_halves);
-
-                        //     // __m256 invDistApprox_A = _mm256_mul_ps(rsqrt_approx_A, term_A);
-                        //     // __m256 invDistApprox_B = _mm256_mul_ps(rsqrt_approx_B, term_B);
-
-                        //     // 5. INTERLEAVED FORCE ACCUMULATION
-                        //     // __m256 push_A = _mm256_and_ps(_mm256_mul_ps(invDistApprox_A, vRepulsion), mask_A);
-                        //     // __m256 push_B = _mm256_and_ps(_mm256_mul_ps(invDistApprox_B, vRepulsion), mask_B);
-
-                        //     // 5. DEEPLY FOLDED NEWTON-RAPHSON & PUSH
-                        //     __m256 push_A = _mm256_and_ps(
-                        //         _mm256_mul_ps(_mm256_mul_ps(rsqrt_A, _mm256_fnmadd_ps(_mm256_mul_ps(distSq_A, half), _mm256_mul_ps(rsqrt_A, rsqrt_A), three_halves)), vRepulsion), 
-                        //         mask_A
-                        //     );
-                        //     __m256 push_B = _mm256_and_ps(
-                        //         _mm256_mul_ps(_mm256_mul_ps(rsqrt_B, _mm256_fnmadd_ps(_mm256_mul_ps(distSq_B, half), _mm256_mul_ps(rsqrt_B, rsqrt_B), three_halves)), vRepulsion), 
-                        //         mask_B
-                        //     );
-
-                        //     accX = _mm256_fmadd_ps(diffX_A, push_A, accX);
-                        //     accX = _mm256_fmadd_ps(diffX_B, push_B, accX);
-
-                        //     accY = _mm256_fmadd_ps(diffY_A, push_A, accY);
-                        //     accY = _mm256_fmadd_ps(diffY_B, push_B, accY);
-
-                        //     accZ = _mm256_fmadd_ps(diffZ_A, push_A, accZ);
-                        //     accZ = _mm256_fmadd_ps(diffZ_B, push_B, accZ);
-                        // }
-
-                        // --- 3D NARROW PHASE (AVX2 Full Z-Stack Cull) ---
-                        // Process neighbors 8 at a time, bounded to our new capped limit (maxNeighborsToCheck).
-                        for (; j <= maxNeighborsToCheck - 8; j += 8) {
-                            localThreadOps += 15; // Exact cost of processing 8 neighbors! 3D FLOP Count
-
-                            // EXPLICIT PREFETCHING (Z first, because of Z-cull)
-                            // _mm_prefetch((const char*)&pZ[j + 8], _MM_HINT_T0);
-                            // _mm_prefetch((const char*)&pX[j + 8], _MM_HINT_T0);
-                            // _mm_prefetch((const char*)&pY[j + 8], _MM_HINT_T0);
-
-                            // 1. THE Z-STACK CULL: Load Z-axis data FIRST
-                            // __m256 p_j_z = _mm256_loadu_ps(&pZ[j]);
-
-                            // 1. FOLDED Z-CULL (Saves 1 Register)
-                            // We inline the load directly into the subtraction. 
-                            // The compiler emits: vsubps ymm0, ymm1, YMMWORD PTR [mem]
-                            __m256 diffZ = _mm256_sub_ps(p_i_z, _mm256_loadu_ps(&pZ[j]));
-
-                            // Calculate just the Z distance squared
-                            __m256 zDistSq = _mm256_mul_ps(diffZ, diffZ);
-
-                            // Did ANY of these 8 particles pass the vertical threshold? (zDistSq < RadiusSq)
-                            __m256 zMask = _mm256_cmp_ps(zDistSq, vRadiusSq, _CMP_LT_OQ);
-
-                            // Z-Cull: Only triggers if depth is actually being used
-                            // HUGE OPTIMIZATION: If all 8 particles are too far away vertically,
-                            // testz returns 1 (true). We skip loading X, Y, and the heavy math!
-                            if (_mm256_testz_ps(zMask, zMask)) continue;
-
-                            // =======================================================
-                            // 2. SURVIVED CULL: Now we load the rest of the data
-                            // =======================================================
-
-                            // Load 8 neighbors simultaneously (Thanks to our SoA Sort, this is L1 Cache perfectly linear!)
-                            // __m256 p_j_x = _mm256_loadu_ps(&pX[j]);
-                            // __m256 p_j_y = _mm256_loadu_ps(&pY[j]);
-
-                            // Calculate distances: dx, dy, dz
-                            // 2. FOLDED X & Y SURVIVOR MATH (Saves 2 Registers)
-                            __m256 diffX = _mm256_sub_ps(p_i_x, _mm256_loadu_ps(&pX[j]));
-                            __m256 diffY = _mm256_sub_ps(p_i_y, _mm256_loadu_ps(&pY[j]));
-
-                            
-                            // 3. FULL DISTANCE SQUARED
-                            // Notice we reuse 'zDistSq' here so we don't calculate it twice!
-                            __m256 distSq = _mm256_fmadd_ps(diffY, diffY, _mm256_fmadd_ps(diffX, diffX, zDistSq));
-
-                            // Did any of these 8 particles actually collide in 3D space?
-                            // (distSq < RadiusSq AND distSq > 0.0001)
-                            __m256 mask = _mm256_and_ps(
-                                _mm256_cmp_ps(distSq, vRadiusSq, _CMP_LT_OQ),
-                                _mm256_cmp_ps(distSq, vEpsilon, _CMP_GT_OQ)
-                            );
-
-                            // HUGE OPTIMIZATION: If all 8 bits are zero (no collisions), skip the heavy math entirely!
-                            // Secondary check: Even if they passed the Z-cull, they might have failed the X/Y cull.
-                            if (_mm256_testz_ps(mask, mask)) continue;
-
-                            /* [Newton-Raphson approximation] 
-                                - Refines the hardware's approximation of 1/sqrt(distSq)
-                                - This instruction provides a maximum relative error of 1.5x10^-4.
-                                - If the true distance is 1000, the hardware approximation will give you 1000.15
-                                - That 0.015% margin of error is invisible to the human eye, but the computational cost is massive.
-                                - 50 million ALU operations every second = 4 execution ports per particle * 100,0000 particles * 120fps
-                            */ 
-                            // THE HEAVY MATH (Newton-Raphson approximation)
-                            // __m256 invDistApprox = _mm256_rsqrt_ps(distSq);
-
-                            // __m256 distSq_eps = _mm256_add_ps(distSq, vEpsilon);
-
-                            // 4. VARIABLE RECYCLING & MASK PRE-CALCULATION
-                            distSq = _mm256_add_ps(distSq, vEpsilon);
-
-                            // [LATENCY HIDING]: Calculate the masked repulsion early!
-                            // This executes in 1 clock cycle on a generic ALU port while the heavier math below is starting up.
-                            __m256 masked_repulsion = _mm256_and_ps(vRepulsion, mask);
-
-                            // 5. NEWTON-RAPHSON (The Deep Chain)
-                            // Hardware guess takes ~5-7 cycles
-                            // Get the hardware's 12-bit guess
-                            // Notice how tight this is. The CPU can now hold accX, accY, accZ, 
-                            // diffX, diffY, diffZ, and all these temporaries perfectly in 16 registers.
-                            __m256 rsqrt_approx = _mm256_rsqrt_ps(distSq); 
-
-                            // Newton-Raphson Refinement (Restores 23-bit precision)
-                            // Formula: y = y * (1.5 - 0.5 * x * y^2)
-                            __m256 half_x = _mm256_mul_ps(distSq, half);
-
-                            // Wait for rsqrt_approx (~4 cycles)
-                            __m256 y_sq = _mm256_mul_ps(rsqrt_approx, rsqrt_approx);
-
-                            // [LATENCY HIDING]: Multiply repulsion by our rsqrt guess right now!
-                            // We do this concurrently while waiting for the 'term' below to finish calculating.
-                            __m256 rsqrt_repul = _mm256_mul_ps(rsqrt_approx, masked_repulsion);
-
-                            // _mm256_fnmadd_ps perfectly calculates: -(half_x * y_sq) + 1.5
-                            __m256 term = _mm256_fnmadd_ps(half_x, y_sq, three_halves);
-                            
-                            // __m256 invDistApprox = _mm256_mul_ps(rsqrt_approx, term);
-                            
-                            // Calculate Push Force
-                            // We fold the mask ANDing directly into the push multiplier! (Saves 1 Register)
-                            // __m256 push = _mm256_mul_ps(invDistApprox, vRepulsion);
-                            // push = _mm256_and_ps(push, mask); // Zero out forces for particles that didn't collide
-
-                            // 6. FOLDED PUSH
-                            // We already applied the mask and the repulsion, so this is just one final rapid multiply.
-                            __m256 push = _mm256_mul_ps(rsqrt_repul, term);
-
-                            // 7. Accumulate Force Vector
-                            accX = _mm256_fmadd_ps(diffX, push, accX);
-                            accY = _mm256_fmadd_ps(diffY, push, accY);
-                            accZ = _mm256_fmadd_ps(diffZ, push, accZ);
-                        }
-
-                        // --- 3D SCALAR REMAINDER ---
-                        // Handle the remaining 1 to 7 particles that didn't cleanly fit into an 8-wide AVX register
-                        for (; j < maxNeighborsToCheck; ++j) {
-                            float diffX = pX[i] - pX[j];
-                            float diffY = pY[i] - pY[j];
-                            float diffZ = pZ[i] - pZ[j];
-                            
-                            float distSq = diffX*diffX + diffY*diffY + diffZ*diffZ;
-                            
-                            // Epsilon check inherently prevents particle 'i' from violently colliding with itself
-                            if (distSq > 0.0001f && distSq < RADIUS_SQ) {
-                                // 1. Hardware 12-bit approximation (~4 clock cycles)
-                                float approx = _mm_cvtss_f32(_mm_rsqrt_ss(_mm_set_ss(distSq + 0.0001f)));
-
-                                // 2. Newton-Raphson Refinement to 23-bit precision (Mapped 1:1 with your AVX2 logic)
-                                float invDist = approx * (1.5f - (0.5f * (distSq + 0.0001f) * approx * approx));
-                                // float invDist = 1.0f / std::sqrt(distSq);
-
-                                float push = REPULSION_STRENGTH * invDist;
-                                scalarForceX += diffX * push;
-                                scalarForceY += diffY * push;
-                                scalarForceZ += diffZ * push;
-                            }
-                        }
-                    }
-                }
-
-                // ==========================================
-                // THE ACCUMULATOR DUMP (Split for 2D/3D)
-                // ==========================================
-        
-                // Dump the AVX2 accumulator registers back to standard floats using ALIGNED stores
-                // _mm256_store_ps(tempX, accX);
-                // _mm256_store_ps(tempY, accY);
-                // _mm256_store_ps(tempZ, accZ);
-
-                // Add up all the vectors
-                // for (int k = 0; k < 8; ++k) {
-                //     scalarForceX += tempX[k];
-                //     scalarForceY += tempY[k];
-                //     scalarForceZ += tempZ[k];
-                // }
-
-                // X and Y are ALWAYS needed
-                // Instantly collapse the AVX2 accumulator registers using pure silicon math
-                scalarForceX += hsum_avx2(accX);
-                scalarForceY += hsum_avx2(accY);
-
-                // Apply the final accumulated push force directly to Particle i's velocity
-                vX[i] += scalarForceX;
-                vY[i] += scalarForceY;
-                // vZ[i] += scalarForceZ;
-
-                // Only dump Z and modify velocity if we are actually in 3D
-                if (!localIs2D) {
-                    // _mm256_storeu_ps(tempZ, accZ); // Unaligned store
+                    // ==========================================
+                    // THE ACCUMULATOR DUMP (Split for 2D/3D)
+                    // ==========================================
+            
+                    // Dump the AVX2 accumulator registers back to standard floats using ALIGNED stores
+                    // _mm256_store_ps(tempX, accX);
+                    // _mm256_store_ps(tempY, accY);
                     // _mm256_store_ps(tempZ, accZ);
+
+                    // Add up all the vectors
                     // for (int k = 0; k < 8; ++k) {
+                    //     scalarForceX += tempX[k];
+                    //     scalarForceY += tempY[k];
                     //     scalarForceZ += tempZ[k];
                     // }
-                    scalarForceZ += hsum_avx2(accZ);
-                    vZ[i] += scalarForceZ;
+
+                    // X and Y are ALWAYS needed
+                    // Instantly collapse the AVX2 accumulator registers using pure silicon math
+                    scalarForceX += hsum_avx2(accX);
+                    scalarForceY += hsum_avx2(accY);
+
+                    // Apply the final accumulated push force directly to Particle i's velocity
+                    vX[i] += scalarForceX;
+                    vY[i] += scalarForceY;
+                    // vZ[i] += scalarForceZ;
+
+                    // Only dump Z and modify velocity if we are actually in 3D
+                    if constexpr (!Is2D) {
+                        // _mm256_storeu_ps(tempZ, accZ); // Unaligned store
+                        // _mm256_store_ps(tempZ, accZ);
+                        // for (int k = 0; k < 8; ++k) {
+                        //     scalarForceZ += tempZ[k];
+                        // }
+                        scalarForceZ += hsum_avx2(accZ);
+                        vZ[i] += scalarForceZ;
+                    }
                 }
+                // Safely write to this specific thread's isolated cache line
+                g_JobSystem.threadStats[tl_workerIndex]->totalFlops.fetch_add(localThreadOps, std::memory_order_relaxed);
+            };
+
+            // --- DISPATCH THE KERNEL ---
+            if (localIs2D) {
+                if (localIsLegacy) collisionKernel.template operator()<true, true>();
+                else               collisionKernel.template operator()<true, false>();
+            } else {
+                if (localIsLegacy) collisionKernel.template operator()<false, true>();
+                else               collisionKernel.template operator()<false, false>();
             }
-            // Safely write to this specific thread's isolated cache line
-            g_JobSystem.threadStats[tl_workerIndex]->totalFlops.fetch_add(localThreadOps, std::memory_order_relaxed);
         });
     }
 
