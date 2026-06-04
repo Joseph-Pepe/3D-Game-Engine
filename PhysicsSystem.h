@@ -4,12 +4,25 @@
 #include <atomic>
 #include <immintrin.h> // For AVX2/AVX-512
 
+#include <span>       // REQUIRED for std::span
+#include <algorithm>  // REQUIRED for std::fill, std::clamp, std::max, std::min
+#include <cmath>      // REQUIRED for std::cos, std::sin
+
 // Engine Dependencies
 #include "Memory.h"    // For AlignedVector
 #include "JobSystem.h" // For parallel dispatch and thread IDs
 #include "Math.h"      // For Morton codes and vector math
 #include "Hardware.h"  // For AVX availability checks
 #include "EngineSettings.h"
+
+// Cross-platform restrict macro for pointer aliasing guarantees
+#if defined(_MSC_VER)
+    #define ENGINE_RESTRICT __restrict
+#elif defined(__clang__) || defined(__GNUC__)
+    #define ENGINE_RESTRICT __restrict__
+#else
+    #define ENGINE_RESTRICT
+#endif
 
 class ParticlePhysicsSOA {
 public:
@@ -82,8 +95,8 @@ public:
         cellCounts = std::span<uint32_t>(g_EngineArena.Allocate<uint32_t, 64>(TOTAL_CELLS), TOTAL_CELLS);
         currentInsertPos = std::span<uint32_t>(g_EngineArena.Allocate<uint32_t, 64>(TOTAL_CELLS), TOTAL_CELLS);
 
-        // ALLOCATE DIRECTLY FROM THE ARENA IN O(1) TIME!
-        // We pass '32' as the second argument to strictly enforce AVX2 32-byte alignment.
+        
+        // --- // ALLOCATE DIRECTLY FROM THE ARENA IN O(1) TIME! --- AVX2 32-byte alignment
         pX = std::span<float>(g_EngineArena.Allocate<float, 32>(paddedCount), paddedCount);
         pY = std::span<float>(g_EngineArena.Allocate<float, 32>(paddedCount), paddedCount);
         pZ = std::span<float>(g_EngineArena.Allocate<float, 32>(paddedCount), paddedCount);
@@ -105,23 +118,23 @@ public:
         // cellStartOffset.resize(TOTAL_CELLS, 0);
         // cellOccupancyMask.resize(TOTAL_CELLS / 64, 0); // 4,096 elements
 
-        particleCellIndices = std::span<uint32_t, 32>(g_EngineArena.Allocate<uint32_t>(paddedCount), paddedCount);
+        particleCellIndices = std::span<uint32_t>(g_EngineArena.Allocate<uint32_t, 32>(paddedCount), paddedCount);
         
         // Setup Grid
-        cellStartOffset = std::span<uint32_t, 64>(g_EngineArena.Allocate<uint32_t>(TOTAL_CELLS), TOTAL_CELLS);
-        cellOccupancyMask = std::span<uint64_t, 64>(g_EngineArena.Allocate<uint64_t>(TOTAL_CELLS / 64), TOTAL_CELLS / 64);
+        cellStartOffset = std::span<uint32_t>(g_EngineArena.Allocate<uint32_t, 64>(TOTAL_CELLS), TOTAL_CELLS);
+        cellOccupancyMask = std::span<uint64_t>(g_EngineArena.Allocate<uint64_t, 64>(TOTAL_CELLS / 64), TOTAL_CELLS / 64);
 
         // --- ALLOCATE TEMPORARY BUFFERS FROM THE ARENA ---
-        temp_pX = std::span<float, 32>(g_EngineArena.Allocate<float>(paddedCount), paddedCount);
-        temp_pY = std::span<float, 32>(g_EngineArena.Allocate<float>(paddedCount), paddedCount);
-        temp_pZ = std::span<float, 32>(g_EngineArena.Allocate<float>(paddedCount), paddedCount);
+        temp_pX = std::span<float>(g_EngineArena.Allocate<float, 32>(paddedCount), paddedCount);
+        temp_pY = std::span<float>(g_EngineArena.Allocate<float, 32>(paddedCount), paddedCount);
+        temp_pZ = std::span<float>(g_EngineArena.Allocate<float, 32>(paddedCount), paddedCount);
 
-        temp_vX = std::span<float, 32>(g_EngineArena.Allocate<float>(paddedCount), paddedCount);
-        temp_vY = std::span<float, 32>(g_EngineArena.Allocate<float>(paddedCount), paddedCount);
-        temp_vZ = std::span<float, 32>(g_EngineArena.Allocate<float>(paddedCount), paddedCount);
+        temp_vX = std::span<float>(g_EngineArena.Allocate<float, 32>(paddedCount), paddedCount);
+        temp_vY = std::span<float>(g_EngineArena.Allocate<float, 32>(paddedCount), paddedCount);
+        temp_vZ = std::span<float>(g_EngineArena.Allocate<float, 32>(paddedCount), paddedCount);
 
-        temp_cellIndices = std::span<uint32_t, 32>(g_EngineArena.Allocate<uint32_t>(paddedCount), paddedCount);
-        temp_destIndices = std::span<uint32_t, 32>(g_EngineArena.Allocate<uint32_t>(paddedCount), paddedCount);
+        temp_cellIndices = std::span<uint32_t>(g_EngineArena.Allocate<uint32_t, 32>(paddedCount), paddedCount);
+        temp_destIndices = std::span<uint32_t>(g_EngineArena.Allocate<uint32_t, 32>(paddedCount), paddedCount);
 
         // Pre-allocate the working buffers ONCE
         // cellCounts.resize(TOTAL_CELLS, 0);
@@ -193,6 +206,14 @@ public:
         // Dispatch the workload to keep the ImGui slider buttery smooth
         g_JobSystem.DispatchAndWait(spawnCount, CHUNK_SIZE, [&](uint32_t localStart, uint32_t localEnd) {
 
+            float* ENGINE_RESTRICT r_pX = std::assume_aligned<32>(pX.data());
+            float* ENGINE_RESTRICT r_pY = std::assume_aligned<32>(pY.data());
+            float* ENGINE_RESTRICT r_pZ = std::assume_aligned<32>(pZ.data());
+
+            float* ENGINE_RESTRICT r_vX = std::assume_aligned<32>(vX.data());
+            float* ENGINE_RESTRICT r_vY = std::assume_aligned<32>(vY.data());
+            float* ENGINE_RESTRICT r_vZ = std::assume_aligned<32>(vZ.data());
+
             // Fast, stateless hash function for lock-free parallel noise
             // Evaluates in ~3 clock cycles per particle in the ALU with zero memory fetches and is much better than C-langauge rand().
             auto fastHash = [](uint32_t index) -> float {
@@ -227,14 +248,14 @@ public:
                 float r = 200.0f + randomOffset;
 
                 // 1. Apply the current rotation directly
-                pX[globalIdx] = current_c * r;
-                pY[globalIdx] = current_s * r;
-                pZ[globalIdx] = 0.0f; 
+                r_pX[globalIdx] = current_c * r;
+                r_pY[globalIdx] = current_s * r;
+                r_pZ[globalIdx] = 0.0f; 
 
                 // Tangential velocity is just the perpendicular vector (-y, x)
-                vX[globalIdx] = -current_s * speed; 
-                vY[globalIdx] =  current_c * speed;
-                vZ[globalIdx] = 0.0f;
+                r_vX[globalIdx] = -current_s * speed; 
+                r_vY[globalIdx] =  current_c * speed;
+                r_vZ[globalIdx] = 0.0f;
 
                 // 2. Rotate the direction vector for the NEXT particle
                 // (This replaces ~200 cycles of std::cos/sin with just 6 cycles of ALU math)
@@ -264,13 +285,16 @@ public:
         // We only need basic threading here, it happens exactly once per toggle
         g_JobSystem.DispatchAndWait(activeCount, 2048, [&](uint32_t start, uint32_t end) {
 
+            float* ENGINE_RESTRICT r_pZ = std::assume_aligned<32>(pZ.data());
+            float* ENGINE_RESTRICT r_vZ = std::assume_aligned<32>(vZ.data());
+
             // OPTIMIZATION: Branch is hoisted OUTSIDE the hot loop!
             if (to2D) {
                 // Fast path: Squash everything flat and kill vertical momentum instantly
                 for (uint32_t i = start; i < end; ++i) {
                     // Squash everything flat and kill vertical momentum instantly
-                    pZ[i] = 0.0f;
-                    vZ[i] = 0.0f;
+                    r_pZ[i] = 0.0f;
+                    r_vZ[i] = 0.0f;
                 }
             } else {
 
@@ -292,8 +316,8 @@ public:
                     float rand2 = fastHash(i + activeCount); // Offset the seed for a different result
 
                     // Map the 0.0 to 1.0 range back to your desired physical bounds
-                    pZ[i] = (rand1 * 100.0f) - 50.0f;  // -50 to 50 
-                    vZ[i] = (rand2 * 4.0f) - 2.0f;     // -2 to 2
+                    r_pZ[i] = (rand1 * 100.0f) - 50.0f;  // -50 to 50 
+                    r_vZ[i] = (rand2 * 4.0f) - 2.0f;     // -2 to 2
                 }
             }
         });
@@ -301,6 +325,8 @@ public:
 
     // --- Dedicated Physics Benchmark (Zero OS Overhead) ---
     FORCE_INLINE void integrate_benchmark(float deltaTime, int activeCount, float gravityVal, int64_t repeats) {
+
+        [[assume(activeCount > 0)]]; // C++23: Hint to optimizer that arrays aren't empty
         
         // SIMD requires multiples of 8
         int paddedActiveCount = (activeCount + 7) & ~7; 
@@ -316,6 +342,15 @@ public:
             // Ensure our start and end align to AVX boundaries
             uint32_t alignedStart = start & ~7;
             uint32_t alignedEnd = (end + 7) & ~7;
+
+            // CRITICAL OPTIMIZATION: Extract raw aligned pointers.
+            // Guarantees to the compiler that these arrays DO NOT OVERLAP and are strictly 32-byte aligned.
+            float* ENGINE_RESTRICT r_pX = std::assume_aligned<32>(pX.data());
+            float* ENGINE_RESTRICT r_pY = std::assume_aligned<32>(pY.data());
+            float* ENGINE_RESTRICT r_pZ = std::assume_aligned<32>(pZ.data());
+            float* ENGINE_RESTRICT r_vX = std::assume_aligned<32>(vX.data());
+            float* ENGINE_RESTRICT r_vY = std::assume_aligned<32>(vY.data());
+            float* ENGINE_RESTRICT r_vZ = std::assume_aligned<32>(vZ.data());
 
             // Pre-load constants into AVX registers ONCE per thread
             __m256 dt = _mm256_set1_ps(deltaTime);
@@ -333,13 +368,22 @@ public:
                     // 1. ALIGNED LOAD (_mm256_load_ps): Positions and Velocities
                     // The silicon no longer has to check for cache line straddling. 
                     // It blindly pulls exactly half of a 64-byte L1 cache line directly into the YMM register.
-                    __m256 px = _mm256_load_ps(&pX[i]);
-                    __m256 py = _mm256_load_ps(&pY[i]);
-                    __m256 pz = _mm256_load_ps(&pZ[i]);
+                    // __m256 px = _mm256_load_ps(&pX[i]);
+                    // __m256 py = _mm256_load_ps(&pY[i]);
+                    // __m256 pz = _mm256_load_ps(&pZ[i]);
 
-                    __m256 vx = _mm256_load_ps(&vX[i]);
-                    __m256 vy = _mm256_load_ps(&vY[i]);
-                    __m256 vz = _mm256_load_ps(&vZ[i]);
+                    // __m256 vx = _mm256_load_ps(&vX[i]);
+                    // __m256 vy = _mm256_load_ps(&vY[i]);
+                    // __m256 vz = _mm256_load_ps(&vZ[i]);
+
+                    // Loading from the perfectly aliased, restricted pointers
+                    __m256 px = _mm256_load_ps(r_pX + i);
+                    __m256 py = _mm256_load_ps(r_pY + i);
+                    __m256 pz = _mm256_load_ps(r_pZ + i);
+
+                    __m256 vx = _mm256_load_ps(r_vX + i);
+                    __m256 vy = _mm256_load_ps(r_vY + i);
+                    __m256 vz = _mm256_load_ps(r_vZ + i);
 
                     // 2. MATH: Distance to Center (0,0,0)
                     __m256 distSq = _mm256_mul_ps(px, px);
@@ -381,13 +425,22 @@ public:
                     // Unaligned stores sometimes force the CPU to do a "Read-Modify-Write" 
                     // if the data crosses a cache line. Aligned stores bypass this entirely,
                     // writing cleanly to the write-combine buffer/L1 cache.
-                    _mm256_store_ps(&pX[i], px);
-                    _mm256_store_ps(&pY[i], py);
-                    _mm256_store_ps(&pZ[i], pz);
+                    // _mm256_store_ps(&pX[i], px);
+                    // _mm256_store_ps(&pY[i], py);
+                    // _mm256_store_ps(&pZ[i], pz);
 
-                    _mm256_store_ps(&vX[i], vx);
-                    _mm256_store_ps(&vY[i], vy);
-                    _mm256_store_ps(&vZ[i], vz);
+                    // _mm256_store_ps(&vX[i], vx);
+                    // _mm256_store_ps(&vY[i], vy);
+                    // _mm256_store_ps(&vZ[i], vz);
+
+                    // Writing back to restricted pointers
+                    _mm256_store_ps(r_pX + i, px);
+                    _mm256_store_ps(r_pY + i, py);
+                    _mm256_store_ps(r_pZ + i, pz);
+
+                    _mm256_store_ps(r_vX + i, vx);
+                    _mm256_store_ps(r_vY + i, vy);
+                    _mm256_store_ps(r_vZ + i, vz);
                 }
             }
         });
@@ -395,6 +448,8 @@ public:
 
     // --- BUILD SPATIAL GRID (O(N) Counting Sort) RUNS EVERY SINGLE FRAME ---
     FORCE_INLINE void buildSpatialGridParallel(int activeCount) {
+        [[assume(activeCount >= 0)]];
+
         uint32_t threadCount = g_JobSystem.nextWorkerId.load(std::memory_order_relaxed);
 
         // Cache to local consts. The compiler locks these into registers!
@@ -427,6 +482,11 @@ public:
             // Calculate AVX boundary so we don't read past the array
             uint32_t alignedEnd = start + ((end - start) & ~7u);
 
+            float* ENGINE_RESTRICT r_pX = std::assume_aligned<32>(pX.data());
+            float* ENGINE_RESTRICT r_pY = std::assume_aligned<32>(pY.data());
+            float* ENGINE_RESTRICT r_pZ = std::assume_aligned<32>(pZ.data());
+            uint32_t* ENGINE_RESTRICT r_particleCellIndices = std::assume_aligned<32>(particleCellIndices.data());
+
             // Pre-load constants for the AVX2 loop
             __m256 vWorldOffset = _mm256_set1_ps(WORLD_SIZE * 0.5f);
             __m256 vInvCellSize = _mm256_set1_ps(INV_CELL_SIZE);
@@ -448,8 +508,10 @@ public:
             // ----------------------------------------------------
             for (uint32_t i = start; i < alignedEnd; i += 8) {
                 // Load Positions
-                __m256 px = _mm256_load_ps(&pX[i]);
-                __m256 py = _mm256_load_ps(&pY[i]);
+                // __m256 px = _mm256_load_ps(&pX[i]);
+                // __m256 py = _mm256_load_ps(&pY[i]);
+                __m256 px = _mm256_load_ps(r_pX + i);
+                __m256 py = _mm256_load_ps(r_pY + i);
 
                 // Shift Coordinates to positive space
                 px = _mm256_add_ps(px, vWorldOffset);
@@ -461,7 +523,8 @@ public:
                 __m256i gridZ = vZero;
 
                 if (!localIs2D) {
-                    __m256 pz = _mm256_load_ps(&pZ[i]);
+                    // __m256 pz = _mm256_load_ps(&pZ[i]);
+                    __m256 pz = _mm256_load_ps(r_pZ + i);
                     pz = _mm256_add_ps(pz, vWorldOffset);
                     gridZ = _mm256_cvttps_epi32(_mm256_mul_ps(pz, vInvCellSize));
 
@@ -479,7 +542,10 @@ public:
                 hashes = _mm256_and_si256(hashes, vHashMask);
 
                 // Store 8 hashes back to the main array simultaneously
-                _mm256_storeu_si256((__m256i*)&particleCellIndices[i], hashes);
+                // _mm256_storeu_si256((__m256i*)&particleCellIndices[i], hashes);
+
+                // Use the restricted pointer for clean, unaliased storing
+                _mm256_store_si256((__m256i*)(r_particleCellIndices + i), hashes);
 
                 // Write to our L1 Cache buffer instead of main memory! Ensures AVX2 pipeline never stalls and reduces memory bus contention.
                 _mm256_store_si256((__m256i*)&hashBuffer[bufferIdx], hashes);
@@ -514,8 +580,8 @@ public:
                 // Clean up the remaining 1 to 7 particles using ultra-fast L1 cache table
                 for (uint32_t i = alignedEnd; i < end; ++i) {
                     // Shift coordinates from (-1000, 1000) to (0, 2000) so grid math is positive
-                    float shiftedX = pX[i] + (WORLD_SIZE * 0.5f);
-                    float shiftedY = pY[i] + (WORLD_SIZE * 0.5f);
+                    float shiftedX = r_pX[i] + (WORLD_SIZE * 0.5f);
+                    float shiftedY = r_pY[i] + (WORLD_SIZE * 0.5f);
 
                     // std::clamp: Guarantees the index never exceeds our 1024 LUT bounds to prevent segfaults (i.e., particles won't crash the engine if they wander slightly off-grid)
                     // [15-20 clock cycles] to perform a single floating-point division, [4 clock cycles] to perform a single floating-point multiplication
@@ -552,7 +618,7 @@ public:
                     } 
                     else {
                         // True 3D Path: Morton Encoding
-                        float shiftedZ = pZ[i] + (WORLD_SIZE * 0.5f);
+                        float shiftedZ = r_pZ[i] + (WORLD_SIZE * 0.5f);
 
                         // Branchless Z-Clamp
                         __m128 vz = _mm_set_ss(shiftedZ * INV_CELL_SIZE);
@@ -574,7 +640,7 @@ public:
                     }
 
                     // Save the hash so we don't calculate it twice, and increment the histogram
-                    particleCellIndices[i] = hash;
+                    r_particleCellIndices[i] = hash;
 
                     // Flat Array Math: (Worker ID * Total Cells) + Hash (i.e., flat mapping)
                     threadLocalCounts[(workerId * TOTAL_CELLS) + hash]++; // Thread-local write! Zero false sharing, zero atomics.
@@ -614,9 +680,15 @@ public:
             uint32_t chunkIdx = start / PREFIX_CHUNK_SIZE;
             uint32_t localRunningTotal = 0;
 
+            // Extract the thread local counts!
+            uint32_t* ENGINE_RESTRICT r_threadLocalCounts = std::assume_aligned<64>(threadLocalCounts.data());
+            uint32_t* ENGINE_RESTRICT r_cellStartOffset = std::assume_aligned<64>(cellStartOffset.data());
+            uint64_t* ENGINE_RESTRICT r_cellOccupancyMask = std::assume_aligned<64>(cellOccupancyMask.data());
+
             for (uint32_t cell = start; cell < end; ++cell) {
                 // Save the start of this cell so solveCollisions() can find it!
-                cellStartOffset[cell] = localRunningTotal; // Store the local offset temporarily
+                // cellStartOffset[cell] = localRunningTotal; // Store the local offset temporarily
+                r_cellStartOffset[cell] = localRunningTotal;
                 uint32_t cellCount = 0;
 
                 // Accumulate all threads' contributions for this specific cell
@@ -624,11 +696,11 @@ public:
                     uint32_t flatIndex = (t * TOTAL_CELLS) + cell;
 
                     // 1. Read the data into the ALU
-                    cellCount += threadLocalCounts[flatIndex];
+                    cellCount += r_threadLocalCounts[flatIndex];
 
                     // 2. ZERO-ON-READ: Zero the memory while it is still hot in the L1 Cache! This instantly prepares the buffer for the NEXT frame for free.
                     // Requires no Read-For-Ownership (RFO) penalty from the main RAM.
-                    threadLocalCounts[flatIndex] = 0;
+                    r_threadLocalCounts[flatIndex] = 0;
                 }
                 localRunningTotal += cellCount;
 
@@ -639,10 +711,10 @@ public:
                 // Bitwise AND 63 (& 63) is identical to modulo 64.
                 if (cellCount > 0) {
                     // Set the bit to 1 (Occupied)
-                    cellOccupancyMask[cell >> 6] |= (1ULL << (cell & 63));
+                    r_cellOccupancyMask[cell >> 6] |= (1ULL << (cell & 63));
                 } else {
                     // Set the bit to 0 (Empty) to clean up from the previous frame
-                    cellOccupancyMask[cell >> 6] &= ~(1ULL << (cell & 63));
+                    r_cellOccupancyMask[cell >> 6] &= ~(1ULL << (cell & 63));
                 }
             }
             // Save the total sum of this chunk for the Main Thread to read
@@ -667,12 +739,18 @@ public:
             uint32_t chunkIdx = start / PREFIX_CHUNK_SIZE;
             uint32_t globalBase = globalOffsets[chunkIdx];
 
+            uint32_t* ENGINE_RESTRICT r_cellStartOffset = std::assume_aligned<64>(cellStartOffset.data());
+            uint32_t* ENGINE_RESTRICT r_currentInsertPos = std::assume_aligned<64>(currentInsertPos.data());
+
             for (uint32_t cell = start; cell < end; ++cell) {
                 // Add the chunk's global base to the local offsets calculated in Step 2A
-                cellStartOffset[cell] += globalBase;
+                // cellStartOffset[cell] += globalBase;
                 
                 // Simultaneously initialize the working copy for Phase 3A (Atomic Scatter)
-                currentInsertPos[cell] = cellStartOffset[cell]; 
+                // currentInsertPos[cell] = cellStartOffset[cell]; 
+
+                r_cellStartOffset[cell] += globalBase;
+                r_currentInsertPos[cell] = r_cellStartOffset[cell];
             }
         });
 
@@ -698,19 +776,29 @@ public:
         // PHASE 3A: ATOMIC SCATTER DESTINATIONS
         // ==========================================
         g_JobSystem.DispatchAndWait(activeCount, CHUNK_SIZE, [&](uint32_t start, uint32_t end) {
+
+            uint32_t* ENGINE_RESTRICT r_particleCellIndices = std::assume_aligned<32>(particleCellIndices.data());
+            uint32_t* ENGINE_RESTRICT r_temp_destIndices = std::assume_aligned<32>(temp_destIndices.data());
+            uint32_t* ENGINE_RESTRICT r_temp_cellIndices = std::assume_aligned<32>(temp_cellIndices.data());
+            uint32_t* ENGINE_RESTRICT r_currentInsertPos = std::assume_aligned<64>(currentInsertPos.data());
+
             for (uint32_t i = start; i < end; ++i) {
-                uint32_t hash = particleCellIndices[i];
+                // uint32_t hash = particleCellIndices[i];
+                uint32_t hash = r_particleCellIndices[i];
 
                 // std::atomic_ref guarantees safety regardless of which worker steals the chunk.
                 // C++20: Safely increment the global insert position regardless of which thread stole this job!
-                std::atomic_ref<uint32_t> safeOffset(currentInsertPos[hash]);
+                std::atomic_ref<uint32_t> safeOffset(r_currentInsertPos[hash]);
 
                 // Store the exact destination index for this particle.
-                temp_destIndices[i] = safeOffset.fetch_add(1, std::memory_order_relaxed);
+                // temp_destIndices[i] = safeOffset.fetch_add(1, std::memory_order_relaxed);
 
                 // Keep the hash synced in the new sorted order
                 // We can safely move the hash now too
-                temp_cellIndices[temp_destIndices[i]] = hash;
+                // temp_cellIndices[temp_destIndices[i]] = hash;
+
+                r_temp_destIndices[i] = safeOffset.fetch_add(1, std::memory_order_relaxed);
+                r_temp_cellIndices[r_temp_destIndices[i]] = hash;
             }
             
         });
@@ -722,31 +810,57 @@ public:
         // Now we move the data one component at a time. 
         // The hardware prefetcher only has to track: pX (read), destIndices (read), temp_pX (write).
         g_JobSystem.DispatchAndWait(activeCount, CHUNK_SIZE, [&](uint32_t start, uint32_t end) {
+
+            // By proving these pointers don't overlap, the compiler unrolls these loops flawlessly
+            float* ENGINE_RESTRICT r_pX = std::assume_aligned<32>(pX.data());
+            float* ENGINE_RESTRICT r_pY = std::assume_aligned<32>(pY.data());
+            float* ENGINE_RESTRICT r_pZ = std::assume_aligned<32>(pZ.data());
+            
+            float* ENGINE_RESTRICT r_temp_pX = std::assume_aligned<32>(temp_pX.data());
+            float* ENGINE_RESTRICT r_temp_pY = std::assume_aligned<32>(temp_pY.data());
+            float* ENGINE_RESTRICT r_temp_pZ = std::assume_aligned<32>(temp_pZ.data());
+
+            float* ENGINE_RESTRICT r_vX = std::assume_aligned<32>(vX.data());
+            float* ENGINE_RESTRICT r_vY = std::assume_aligned<32>(vY.data());
+            float* ENGINE_RESTRICT r_vZ = std::assume_aligned<32>(vZ.data());
+
+            float* ENGINE_RESTRICT r_temp_vX = std::assume_aligned<32>(temp_vX.data());
+            float* ENGINE_RESTRICT r_temp_vY = std::assume_aligned<32>(temp_vY.data());
+            float* ENGINE_RESTRICT r_temp_vZ = std::assume_aligned<32>(temp_vZ.data());
+
+            uint32_t* ENGINE_RESTRICT r_temp_destIndices = std::assume_aligned<32>(temp_destIndices.data());
+
             // By separating these loops we stop thrashing the cache.
             // Streams through pX linearly, looks up the destination, and writes. Then repeats this process for pY, pZ, etc..
             for (uint32_t i = start; i < end; ++i) {
-                uint32_t dest = temp_destIndices[i];
-                temp_pX[dest] = pX[i]; // Move the data into the temporary SoA arrays
+                // uint32_t dest = temp_destIndices[i];
+                // temp_pX[dest] = pX[i]; // Move the data into the temporary SoA arrays
+                r_temp_pX[r_temp_destIndices[i]] = r_pX[i];
             }
             for (uint32_t i = start; i < end; ++i) {
-                uint32_t dest = temp_destIndices[i];
-                temp_pY[dest] = pY[i];
+                // uint32_t dest = temp_destIndices[i];
+                // temp_pY[dest] = pY[i];
+                r_temp_pY[r_temp_destIndices[i]] = r_pY[i];
             }
             for (uint32_t i = start; i < end; ++i) {
-                uint32_t dest = temp_destIndices[i];
-                temp_pZ[dest] = pZ[i];
+                // uint32_t dest = temp_destIndices[i];
+                // temp_pZ[dest] = pZ[i];
+                r_temp_pZ[r_temp_destIndices[i]] = r_pZ[i];
             }
             for (uint32_t i = start; i < end; ++i) {
-                uint32_t dest = temp_destIndices[i];
-                temp_vX[dest] = vX[i];
+                // uint32_t dest = temp_destIndices[i];
+                // temp_vX[dest] = vX[i];
+                r_temp_vX[r_temp_destIndices[i]] = r_vX[i];
             }
             for (uint32_t i = start; i < end; ++i) {
-                uint32_t dest = temp_destIndices[i];
-                temp_vY[dest] = vY[i];
+                // uint32_t dest = temp_destIndices[i];
+                // temp_vY[dest] = vY[i];
+                r_temp_vY[r_temp_destIndices[i]] = r_vY[i];
             }
             for (uint32_t i = start; i < end; ++i) {
-                uint32_t dest = temp_destIndices[i];
-                temp_vZ[dest] = vZ[i];
+                // uint32_t dest = temp_destIndices[i];
+                // temp_vZ[dest] = vZ[i];
+                r_temp_vZ[r_temp_destIndices[i]] = r_vZ[i];
             }
         });
 
@@ -806,6 +920,19 @@ public:
             // --- C++20 TEMPLATED KERNEL DISPATCHER ---
             // By templating this entire block, the compiler generates 4 distinct, highly-optimized branchless versions of your physics engine!
             auto collisionKernel = [&]<bool Is2D, bool IsLegacy>() {
+
+                // Extract aligned, restricted pointers
+                float* ENGINE_RESTRICT r_pX = std::assume_aligned<32>(pX.data());
+                float* ENGINE_RESTRICT r_pY = std::assume_aligned<32>(pY.data());
+                float* ENGINE_RESTRICT r_pZ = std::assume_aligned<32>(pZ.data());
+
+                float* ENGINE_RESTRICT r_vX = std::assume_aligned<32>(vX.data());
+                float* ENGINE_RESTRICT r_vY = std::assume_aligned<32>(vY.data());
+                float* ENGINE_RESTRICT r_vZ = std::assume_aligned<32>(vZ.data());
+                
+                uint32_t* ENGINE_RESTRICT r_particleCellIndices = std::assume_aligned<32>(particleCellIndices.data());
+                uint32_t* ENGINE_RESTRICT r_cellStartOffset = std::assume_aligned<64>(cellStartOffset.data());
+                uint64_t* ENGINE_RESTRICT r_cellOccupancyMask = std::assume_aligned<64>(cellOccupancyMask.data());
             
                 // --- COLLISION CONSTANTS ---
                 const float RADIUS = CELL_SIZE; // Distance at which they collide
@@ -844,9 +971,9 @@ public:
                     localThreadOps += Is2D ? 35 : 45;
 
                     // Broadcast Particle 'i' to all 8 slots in the SIMD register
-                    __m256 p_i_x = _mm256_set1_ps(pX[i]);
-                    __m256 p_i_y = _mm256_set1_ps(pY[i]);
-                    __m256 p_i_z = _mm256_set1_ps(pZ[i]);
+                    __m256 p_i_x = _mm256_set1_ps(r_pX[i]);
+                    __m256 p_i_y = _mm256_set1_ps(r_pY[i]);
+                    __m256 p_i_z = _mm256_set1_ps(r_pZ[i]);
 
                     // Accumulators: We will accumulate forces in these registers
                     __m256 accX = _mm256_setzero_ps();
@@ -856,27 +983,29 @@ public:
                     float scalarForceX = 0.0f, scalarForceY = 0.0f, scalarForceZ = 0.0f;
 
                     // Check if we moved to a new spatial cell
-                    uint32_t myHash = particleCellIndices[i];
+                    uint32_t myHash = r_particleCellIndices[i];
 
                     // Calculates the neighbor offsets once and stores them in ultra-fast L1 cache, and resuses that list for every subsequent particle 
                     // that shares that cell which will reduce the bounds checking, integer math, and unpredictable branching by 90% in this hot loop.
                     // Dramatically increases performance when increasing the number of particles on screen.  
                     if (myHash != lastHash) {
+
                         // We crossed a cell boundary! Recompute the neighbor list exactly once.
                         lastHash = myHash;
                         validNeighbors = 0;
+
                         // =========================================================
                         // RE-CALCULATE GRID COORDS
                         // =========================================================
-                        float shiftedX = pX[i] + (WORLD_SIZE * 0.5f);
-                        float shiftedY = pY[i] + (WORLD_SIZE * 0.5f);
+                        float shiftedX = r_pX[i] + (WORLD_SIZE * 0.5f);
+                        float shiftedY = r_pY[i] + (WORLD_SIZE * 0.5f);
                         
                         int gx = (int)(shiftedX * INV_CELL_SIZE);
                         int gy = (int)(shiftedY * INV_CELL_SIZE);
                         int gz = 0; // Default for 2D
                         
                         if constexpr (!Is2D) {
-                            float shiftedZ = pZ[i] + (WORLD_SIZE * 0.5f);
+                            float shiftedZ = r_pZ[i] + (WORLD_SIZE * 0.5f);
                             gz = (int)(shiftedZ * INV_CELL_SIZE);
                         }
 
@@ -919,13 +1048,13 @@ public:
                                     // ==========================================
                                     // Check if the 64-bit integer has a 1 at this exact bit position.
                                     // If it evaluates to 0, the cell is mathematically guaranteed to be empty.
-                                    if ((cellOccupancyMask[nHash >> 6] & (1ULL << (nHash & 63))) == 0) {
+                                    if ((r_cellOccupancyMask[nHash >> 6] & (1ULL << (nHash & 63))) == 0) {
                                         continue; 
                                     }
 
                                     // Only fetch from the 1MB L3 cache if the cell is actually occupied!
-                                    uint32_t startIdx = cellStartOffset[nHash];
-                                    uint32_t endIdx = (nHash + 1 < TOTAL_CELLS) ? cellStartOffset[nHash + 1] : activeCount;
+                                    uint32_t startIdx = r_cellStartOffset[nHash];
+                                    uint32_t endIdx = (nHash + 1 < TOTAL_CELLS) ? r_cellStartOffset[nHash + 1] : activeCount;
 
                                     // Only add to our local cache if the cell actually has particles
                                     if (startIdx < endIdx) {
@@ -1067,8 +1196,8 @@ public:
                                 // 2. FOLDED X & Y MATH (Saves 2 Registers)
                                 // The load is nested directly inside the subtraction!
                                 // The CPU reads straight from the L1 Cache into the ALU execution port.
-                                __m256 diffX = _mm256_sub_ps(p_i_x, _mm256_loadu_ps(&pX[j]));
-                                __m256 diffY = _mm256_sub_ps(p_i_y, _mm256_loadu_ps(&pY[j]));
+                                __m256 diffX = _mm256_sub_ps(p_i_x, _mm256_loadu_ps(r_pX + j));
+                                __m256 diffY = _mm256_sub_ps(p_i_y, _mm256_loadu_ps(r_pY + j));
 
                                 // 3. DISTANCE SQUARED (distSq = dx*dx + dy*dy)
                                 __m256 distSq = _mm256_fmadd_ps(diffY, diffY, _mm256_mul_ps(diffX, diffX));
@@ -1126,8 +1255,9 @@ public:
 
                             // --- 2D SCALAR REMAINDER  ---
                             for (; j < maxNeighborsToCheck; ++j) {
-                                float diffX = pX[i] - pX[j];
-                                float diffY = pY[i] - pY[j];
+                                float diffX = r_pX[i] - r_pX[j];
+                                float diffY = r_pY[i] - r_pY[j];
+
                                 float distSq = diffX*diffX + diffY*diffY;
                                 if (distSq > 0.0001f && distSq < RADIUS_SQ) {
                                     // 1. Hardware 12-bit approximation (~4 clock cycles)
@@ -1280,7 +1410,7 @@ public:
                                 // 1. FOLDED Z-CULL (Saves 1 Register)
                                 // We inline the load directly into the subtraction. 
                                 // The compiler emits: vsubps ymm0, ymm1, YMMWORD PTR [mem]
-                                __m256 diffZ = _mm256_sub_ps(p_i_z, _mm256_loadu_ps(&pZ[j]));
+                                __m256 diffZ = _mm256_sub_ps(p_i_z, _mm256_loadu_ps(r_pZ + j));
 
                                 // Calculate just the Z distance squared
                                 __m256 zDistSq = _mm256_mul_ps(diffZ, diffZ);
@@ -1303,8 +1433,8 @@ public:
 
                                 // Calculate distances: dx, dy, dz
                                 // 2. FOLDED X & Y SURVIVOR MATH (Saves 2 Registers)
-                                __m256 diffX = _mm256_sub_ps(p_i_x, _mm256_loadu_ps(&pX[j]));
-                                __m256 diffY = _mm256_sub_ps(p_i_y, _mm256_loadu_ps(&pY[j]));
+                                __m256 diffX = _mm256_sub_ps(p_i_x, _mm256_loadu_ps(r_pX + j));
+                                __m256 diffY = _mm256_sub_ps(p_i_y, _mm256_loadu_ps(r_pY + j));
 
                                 
                                 // 3. FULL DISTANCE SQUARED
@@ -1382,9 +1512,9 @@ public:
                             // --- 3D SCALAR REMAINDER ---
                             // Handle the remaining 1 to 7 particles that didn't cleanly fit into an 8-wide AVX register
                             for (; j < maxNeighborsToCheck; ++j) {
-                                float diffX = pX[i] - pX[j];
-                                float diffY = pY[i] - pY[j];
-                                float diffZ = pZ[i] - pZ[j];
+                                float diffX = r_pX[i] - r_pX[j];
+                                float diffY = r_pY[i] - r_pY[j];
+                                float diffZ = r_pZ[i] - r_pZ[j]; // (3D only)
                                 
                                 float distSq = diffX*diffX + diffY*diffY + diffZ*diffZ;
                                 
@@ -1428,8 +1558,8 @@ public:
                     scalarForceY += hsum_avx2(accY);
 
                     // Apply the final accumulated push force directly to Particle i's velocity
-                    vX[i] += scalarForceX;
-                    vY[i] += scalarForceY;
+                    r_vX[i] += scalarForceX;
+                    r_vY[i] += scalarForceY;
                     // vZ[i] += scalarForceZ;
 
                     // Only dump Z and modify velocity if we are actually in 3D
@@ -1440,7 +1570,7 @@ public:
                         //     scalarForceZ += tempZ[k];
                         // }
                         scalarForceZ += hsum_avx2(accZ);
-                        vZ[i] += scalarForceZ;
+                        r_vZ[i] += scalarForceZ;
                     }
                 }
                 // Safely write to this specific thread's isolated cache line
@@ -1473,6 +1603,8 @@ public:
 
     // --- Dynamic Integration Job System---
     FORCE_INLINE void integrate(float deltaTime, int activeCount, float gravityVal, float mouseX = 0.0f, float mouseY = 0.0f, bool isMouseDown = false) {
+        [[assume(activeCount > 0)]]; // C++23 hint
+
         __m256 dt = _mm256_set1_ps(deltaTime);
         __m256 gravityStrength = _mm256_set1_ps(gravityVal); // Tune this for more "violence"
         __m256 epsilon = _mm256_set1_ps(0.001f);       // Prevents infinite force at center
@@ -1509,6 +1641,14 @@ public:
             uint32_t alignedStart = start & ~7;
             uint32_t alignedEnd = (end + 7) & ~7;
 
+            // Extract restricted pointers
+            float* ENGINE_RESTRICT r_pX = std::assume_aligned<32>(pX.data());
+            float* ENGINE_RESTRICT r_pY = std::assume_aligned<32>(pY.data());
+            float* ENGINE_RESTRICT r_pZ = std::assume_aligned<32>(pZ.data());
+            float* ENGINE_RESTRICT r_vX = std::assume_aligned<32>(vX.data());
+            float* ENGINE_RESTRICT r_vY = std::assume_aligned<32>(vY.data());
+            float* ENGINE_RESTRICT r_vZ = std::assume_aligned<32>(vZ.data());
+
             // ==========================================
             // HOISTED CONSTANTS (Shared by both loops)
             // ==========================================
@@ -1534,10 +1674,10 @@ public:
                 // ==========================================
                 for (int i = alignedStart; i < alignedEnd; i += 8) {
                     // 1. LOAD: Positions and Velocities (X and Y ONLY)
-                    __m256 px = _mm256_load_ps(&pX[i]);
-                    __m256 py = _mm256_load_ps(&pY[i]);
-                    __m256 vx = _mm256_load_ps(&vX[i]);
-                    __m256 vy = _mm256_load_ps(&vY[i]);
+                    __m256 px = _mm256_load_ps(r_pX + i);
+                    __m256 py = _mm256_load_ps(r_pY + i);
+                    __m256 vx = _mm256_load_ps(r_vX + i);
+                    __m256 vy = _mm256_load_ps(r_vY + i);
 
                     // 2. MATH: Distance to Center (0,0)
                     __m256 distSq = _mm256_mul_ps(px, px);
@@ -1599,10 +1739,10 @@ public:
                     vy = _mm256_blendv_ps(vy, bouncedVy, maskY);
 
                     // 6. STORE: Save results (X and Y ONLY)
-                    _mm256_store_ps(&pX[i], px);
-                    _mm256_store_ps(&pY[i], py);
-                    _mm256_store_ps(&vX[i], vx);
-                    _mm256_store_ps(&vY[i], vy);
+                    _mm256_store_ps(r_pX + i, px);
+                    _mm256_store_ps(r_pY + i, py);
+                    _mm256_store_ps(r_vX + i, vx);
+                    _mm256_store_ps(r_vY + i, vy);
                 }
             }
             else {
@@ -1637,13 +1777,13 @@ public:
                     */
 
                     // 1. LOAD: Positions and Velocities from RAM into L1 cache.
-                    __m256 px = _mm256_load_ps(&pX[i]);
-                    __m256 py = _mm256_load_ps(&pY[i]);
-                    __m256 pz = _mm256_load_ps(&pZ[i]);
+                    __m256 px = _mm256_load_ps(r_pX + i);
+                    __m256 py = _mm256_load_ps(r_pY + i);
+                    __m256 pz = _mm256_load_ps(r_pZ + i);
 
-                    __m256 vx = _mm256_load_ps(&vX[i]);
-                    __m256 vy = _mm256_load_ps(&vY[i]);
-                    __m256 vz = _mm256_load_ps(&vZ[i]);
+                    __m256 vx = _mm256_load_ps(r_vX + i);
+                    __m256 vy = _mm256_load_ps(r_vY + i);
+                    __m256 vz = _mm256_load_ps(r_vZ + i);
 
                     // 2. MATH: Distance to Center (0,0,0)
                     // Vector to center is just -px, -py, -pz
@@ -1753,13 +1893,13 @@ public:
                     vz = _mm256_blendv_ps(vz, bouncedVz, maskZ);
 
                     // 8. STORE: Save results of the new positions and velocities back into RAM.
-                    _mm256_store_ps(&pX[i], px);
-                    _mm256_store_ps(&pY[i], py);
-                    _mm256_store_ps(&pZ[i], pz);
+                    _mm256_store_ps(r_pX + i, px);
+                    _mm256_store_ps(r_pY + i, py);
+                    _mm256_store_ps(r_pZ + i, pz);
 
-                    _mm256_store_ps(&vX[i], vx);
-                    _mm256_store_ps(&vY[i], vy);
-                    _mm256_store_ps(&vZ[i], vz);
+                    _mm256_store_ps(r_vX + i, vx);
+                    _mm256_store_ps(r_vY + i, vy);
+                    _mm256_store_ps(r_vZ + i, vz);
                 }
             }
 
