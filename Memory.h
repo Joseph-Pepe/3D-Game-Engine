@@ -4,6 +4,23 @@
 #include <new>
 #include <limits>
 #include <memory> // Required for std::allocator in consteval
+#include <print>      // Required for std::println
+#include <stacktrace> // Required for std::stacktrace
+
+// ==================================================================================
+// COMPILER SPECIFIC MACROS
+// ==================================================================================
+#if defined(_MSC_VER)
+    #define ENGINE_FORCE_INLINE __forceinline
+#elif defined(__clang__) || defined(__GNUC__)
+    #define ENGINE_FORCE_INLINE inline __attribute__((always_inline))
+#else
+    #define ENGINE_FORCE_INLINE inline
+#endif
+
+// ==================================================================================
+// C++26 SIMD DETECTION
+// ==================================================================================
 
 // Check if the header exists AND if the compiler is running in C++26 (or newer) mode
 #if __has_include(<simd>) && (defined(__cplusplus) && __cplusplus > 202302L || defined(_MSVC_LANG) && _MSVC_LANG > 202302L)
@@ -69,7 +86,10 @@ struct AlignedAllocator {
         
             // Native C++17 aligned allocation
             // [::operator new]: when used  with std::align_val_t, the compiler has full visibility into the memory allocation semantics leading to better loop unrolling and aliasing optimizations.
-            return static_cast<T*>(::operator new(n * sizeof(T), std::align_val_t{Alignment}));
+            return static_cast<T*>(
+                // std::assume_aligned informs the optimizer, ::operator new handles the actual OS alignment
+                std::assume_aligned<Alignment>(::operator new(n * sizeof(T), std::align_val_t{Alignment}))
+            );
         }
     }
 
@@ -114,7 +134,7 @@ using AlignedVector64 = std::vector<T, AlignedAllocator<T, 64>>; // AVX-512 (64-
 
     // 1. Detect the hardware's preferred alignment at compile time
     // Ask the C++26 standard exactly how many bytes the current hardware needs
-    constexpr std::size_t NATIVE_SIMD_ALIGN = std::experimental::memory_alignment_v<std::experimental::native_simd<float>>;
+    constexpr std::size_t NATIVE_SIMD_ALIGN = std::simd_alignment_v<std::simd<float>>;
 
     // 2. Define a vector that automatically aligns to the current machine's architecture
     template <typename T>
@@ -161,16 +181,17 @@ public:
     LinearArena(const LinearArena&) = delete;
     LinearArena& operator=(const LinearArena&) = delete;
 
-    // --- BARE-METAL BUMP ALLOCATION ---
-    template <typename T>
-    [[nodiscard]] T* Allocate(size_t count, size_t alignment = alignof(T)) {
+    // --- BARE-METAL BUMP ALLOCATION --- Alignment is now a template parameter to unlock std::assume_aligned optimizations
+    template <typename T, size_t Align = alignof(T)>
+    [[nodiscard]] ENGINE_FORCE_INLINE T* Allocate(size_t count) {
+        static_assert((Align & (Align - 1)) == 0, "Alignment must be a power of 2");
+        
         // 1. Where are we currently in memory?
         uintptr_t currentAddress = reinterpret_cast<uintptr_t>(m_memory + m_offset);
         
         // 2. Bitwise Alignment Calculation (No slow modulo arithmetic!)
         // Formula pushes the address forward to the nearest multiple of the requested alignment.
-        size_t padding = (alignment - (currentAddress & (alignment - 1))) & (alignment - 1);
-        
+        size_t padding = (Align - (currentAddress & (Align - 1))) & (Align - 1);
         size_t totalAllocationSize = padding + (count * sizeof(T));
 
         // 3. Out of Memory Guard
@@ -186,19 +207,20 @@ public:
         // 5. Bump the offset forward
         m_offset += totalAllocationSize;
 
-        return reinterpret_cast<T*>(alignedAddress);
+        // C++20/26: Prove to the compiler that the memory boundary is safe for AVX
+        return std::assume_aligned<Align>(reinterpret_cast<T*>(alignedAddress));
     }
 
     // --- THE MAGIC O(1) FREE ---
-    FORCE_INLINE void Reset() {
+    ENGINE_FORCE_INLINE void Reset() {
         // We don't overwrite the memory (that wastes CPU cycles).
         // We just move the bump pointer back to the start. The next allocation will cleanly overwrite the old data.
         m_offset = 0;
     }
 
     // Telemetry
-    FORCE_INLINE size_t GetUsedMemory() const { return m_offset; }
-    FORCE_INLINE size_t GetCapacity() const { return m_capacity; }
+    ENGINE_FORCE_INLINE size_t GetUsedMemory() const { return m_offset; }
+    ENGINE_FORCE_INLINE size_t GetCapacity() const { return m_capacity; }
 };
 
 // Global Memory Pools
