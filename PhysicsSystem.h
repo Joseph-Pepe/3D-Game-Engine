@@ -707,9 +707,8 @@ public:
         const bool localIsLegacy = g_EngineSettings.isLegacyCPU;
 
         g_JobSystem.DispatchAndWait(activeCount, CHUNK_SIZE, [&](uint32_t start, uint32_t end) {
-
             // --- C++20 TEMPLATED KERNEL DISPATCHER ---
-            // By templating this entire block, the compiler generates 4 distinct, branchless versions of your physics engine!
+            // By templating this entire block, the compiler generates 4 distinct, highly-optimized branchless versions of your physics engine!
             auto collisionKernel = [&]<bool Is2D, bool IsLegacy>() {
             
                 // --- COLLISION CONSTANTS ---
@@ -1351,6 +1350,19 @@ public:
                 // Safely write to this specific thread's isolated cache line
                 g_JobSystem.threadStats[tl_workerIndex]->totalFlops.fetch_add(localThreadOps, std::memory_order_relaxed);
             };
+
+            // ======================================
+            // TEMPLATED KERNEL DISPATCHER
+            // ======================================
+            /*
+                - If we use regular booleans for 2D and 3D, the compiled binary will contain assembly instructions for both 2D and 3D math stitched together with jump commands.
+                - This bloats the CPU's ultra-fast L1 instruction cache.
+
+                - Instead we hoist the boolean checks outside the job system lambda using a kernel dispatcher.
+                - Now the compiler will generate four specialized, highly optimized copies of this physics loop.
+                - When the 2D mode is active, the 3D math does not exist in the execution path.
+                - Reduces the size to fit in the ultra-fast L1i cache which prevents micro-stalls in the CPU cores.
+            */
 
             // --- DISPATCH THE KERNEL ---
             if (localIs2D) {
