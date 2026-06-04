@@ -13,11 +13,15 @@
 
 class ParticlePhysicsSOA {
 public:
+    // C++20 Spans are lightweight, zero cost abstractions that act exactly like arrays, but does not try to free() its memory when it goes out of scope.
+
     // Component 1: Positions (Strictly 32-byte aligned!)
-    AlignedVector32<float> pX, pY, pZ;
+    // AlignedVector32<float> pX, pY, pZ;
+    std::span<float> pX, pY, pZ;
     
     // Component 2: Velocities
-    AlignedVector32<float> vX, vY, vZ;
+    // AlignedVector32<float> vX, vY, vZ;
+    std::span<float> vX, vY, vZ;
 
     // =============================================================
     // CONTIGUOUS FLAT 1D ARRAY
@@ -32,10 +36,10 @@ public:
     */
 
     // Histogram per potential thread (maxQueues, Flat 1D Array for contiguous cache locality)
-    std::vector<uint32_t> threadLocalCounts;
+    std::span<uint32_t> threadLocalCounts;
 
     // Saves the destination indices (i.e., allows the prefetcher to predict where to go next)
-    std::vector<uint32_t> temp_destIndices;
+    std::span<uint32_t> temp_destIndices;
 
     // --- SPATIAL GRID SETTINGS ---
     // Assuming our galaxy spans roughly -1000 to +1000 in X and Y
@@ -52,54 +56,127 @@ public:
     // static constexpr int TOTAL_CELLS = GRID_WIDTH * GRID_HEIGHT;
 
     // --- GRID DATA STRUCTURES ---
-    std::vector<uint32_t> particleCellIndices;
-    std::vector<uint32_t> cellStartOffset;
-
-    // The 32KB L1-Cache Cull Mask
-    std::vector<uint64_t> cellOccupancyMask;
+    std::span<uint32_t> particleCellIndices;
+    std::span<uint32_t> cellStartOffset;
+    std::span<uint64_t> cellOccupancyMask; // The 32KB L1-Cache Cull Mask
 
     // Persistent Working Buffers for the Counting Sort
-    std::vector<uint32_t> cellCounts; // histogram to count particles per cell
-    std::vector<uint32_t> currentInsertPos; // We create a working copy of the offsets to increment as we place particles into the temp buffers
+    std::span<uint32_t> cellCounts; // histogram to count particles per cell
+    std::span<uint32_t> currentInsertPos; // We create a working copy of the offsets to increment as we place particles into the temp buffers
 
     // --- TEMPORARY SOA BUFFERS (For the Counting Sort) ---
-    AlignedVector32<float> temp_pX, temp_pY, temp_pZ;
-    AlignedVector32<float> temp_vX, temp_vY, temp_vZ;
-    std::vector<uint32_t> temp_cellIndices;
+    std::span<float> temp_pX, temp_pY, temp_pZ;
+    std::span<float> temp_vX, temp_vY, temp_vZ;
+    std::span<uint32_t> temp_cellIndices;
 
     ParticlePhysicsSOA(size_t count) {
         size_t paddedCount = (count + 7uz) & ~7uz; // C++23: 'uz' is the size_t literal, Pad for AVX2, ensures array sizes are multiples of 8.
 
         // Allocate one massive, contiguous block of memory for all threads
-        threadLocalCounts.resize(g_JobSystem.maxQueues * TOTAL_CELLS, 0);
+        // threadLocalCounts.resize(g_JobSystem.maxQueues * TOTAL_CELLS, 0);
+
+        // 1. Allocate from the Arena
+        uint32_t totalThreadLocalSize = g_JobSystem.maxQueues * TOTAL_CELLS;
+        threadLocalCounts = std::span<uint32_t>(g_EngineArena.Allocate<uint32_t>(totalThreadLocalSize, 64), totalThreadLocalSize);
         
-        pX.resize(paddedCount, 0.0f);
-        pY.resize(paddedCount, 0.0f);
-        pZ.resize(paddedCount, 0.0f);
+        cellCounts = std::span<uint32_t>(g_EngineArena.Allocate<uint32_t>(TOTAL_CELLS, 64), TOTAL_CELLS);
+        currentInsertPos = std::span<uint32_t>(g_EngineArena.Allocate<uint32_t>(TOTAL_CELLS, 64), TOTAL_CELLS);
+
+        // ALLOCATE DIRECTLY FROM THE ARENA IN O(1) TIME!
+        // We pass '32' as the second argument to strictly enforce AVX2 32-byte alignment.
+        pX = std::span<float>(g_EngineArena.Allocate<float>(paddedCount, 32), paddedCount);
+        pY = std::span<float>(g_EngineArena.Allocate<float>(paddedCount, 32), paddedCount);
+        pZ = std::span<float>(g_EngineArena.Allocate<float>(paddedCount, 32), paddedCount);
+
+        vX = std::span<float>(g_EngineArena.Allocate<float>(paddedCount, 32), paddedCount);
+        vY = std::span<float>(g_EngineArena.Allocate<float>(paddedCount, 32), paddedCount);
+        vZ = std::span<float>(g_EngineArena.Allocate<float>(paddedCount, 32), paddedCount);
         
-        vX.resize(paddedCount, 1.5f); // Give them some initial speed
-        vY.resize(paddedCount, 0.5f);
-        vZ.resize(paddedCount, -1.0f);
+        // pX.resize(paddedCount, 0.0f);
+        // pY.resize(paddedCount, 0.0f);
+        // pZ.resize(paddedCount, 0.0f);
+        
+        // vX.resize(paddedCount, 1.5f); // Give them some initial speed
+        // vY.resize(paddedCount, 0.5f);
+        // vZ.resize(paddedCount, -1.0f);
 
         // Initialize Grid Arrays
-        particleCellIndices.resize(paddedCount, 0);
-        cellStartOffset.resize(TOTAL_CELLS, 0);
-        cellOccupancyMask.resize(TOTAL_CELLS / 64, 0); // 4,096 elements
+        // particleCellIndices.resize(paddedCount, 0);
+        // cellStartOffset.resize(TOTAL_CELLS, 0);
+        // cellOccupancyMask.resize(TOTAL_CELLS / 64, 0); // 4,096 elements
+
+        particleCellIndices = std::span<uint32_t>(g_EngineArena.Allocate<uint32_t>(paddedCount, 32), paddedCount);
+        
+        // Setup Grid
+        cellStartOffset = std::span<uint32_t>(g_EngineArena.Allocate<uint32_t>(TOTAL_CELLS, 64), TOTAL_CELLS);
+        cellOccupancyMask = std::span<uint64_t>(g_EngineArena.Allocate<uint64_t>(TOTAL_CELLS / 64, 64), TOTAL_CELLS / 64);
+
+        // --- ALLOCATE TEMPORARY BUFFERS FROM THE ARENA ---
+        temp_pX = std::span<float>(g_EngineArena.Allocate<float>(paddedCount, 32), paddedCount);
+        temp_pY = std::span<float>(g_EngineArena.Allocate<float>(paddedCount, 32), paddedCount);
+        temp_pZ = std::span<float>(g_EngineArena.Allocate<float>(paddedCount, 32), paddedCount);
+
+        temp_vX = std::span<float>(g_EngineArena.Allocate<float>(paddedCount, 32), paddedCount);
+        temp_vY = std::span<float>(g_EngineArena.Allocate<float>(paddedCount, 32), paddedCount);
+        temp_vZ = std::span<float>(g_EngineArena.Allocate<float>(paddedCount, 32), paddedCount);
+
+        temp_cellIndices = std::span<uint32_t>(g_EngineArena.Allocate<uint32_t>(paddedCount, 32), paddedCount);
+        temp_destIndices = std::span<uint32_t>(g_EngineArena.Allocate<uint32_t>(paddedCount, 32), paddedCount);
 
         // Pre-allocate the working buffers ONCE
-        cellCounts.resize(TOTAL_CELLS, 0);
-        currentInsertPos.resize(TOTAL_CELLS, 0);
+        // cellCounts.resize(TOTAL_CELLS, 0);
+        // currentInsertPos.resize(TOTAL_CELLS, 0);
 
-        temp_destIndices.resize(paddedCount, 0);
+        // temp_destIndices.resize(paddedCount, 0);
 
         // Initialize Temp Arrays (Must be padded for AVX2!)
-        temp_cellIndices.resize(paddedCount, 0);
-        temp_pX.resize(paddedCount, 0.0f);
-        temp_pY.resize(paddedCount, 0.0f);
-        temp_pZ.resize(paddedCount, 0.0f);
-        temp_vX.resize(paddedCount, 0.0f);
-        temp_vY.resize(paddedCount, 0.0f);
-        temp_vZ.resize(paddedCount, 0.0f);
+        // temp_cellIndices.resize(paddedCount, 0);
+        // temp_pX.resize(paddedCount, 0.0f);
+        // temp_pY.resize(paddedCount, 0.0f);
+        // temp_pZ.resize(paddedCount, 0.0f);
+        // temp_vX.resize(paddedCount, 0.0f);
+        // temp_vY.resize(paddedCount, 0.0f);
+        // temp_vZ.resize(paddedCount, 0.0f);
+
+        // ==========================================
+        // ZERO-INITIALIZE ARENA MEMORY
+        // ==========================================
+        // Unlike std::vector, raw Arena memory contains random garbage data from the OS.
+        // We MUST explicitly initialize it to prevent NaN explosions in the physics math.
+
+        // Zero-Initialize the new memory
+        std::fill(threadLocalCounts.begin(), threadLocalCounts.end(), 0u);
+        std::fill(cellCounts.begin(), cellCounts.end(), 0u);
+        std::fill(currentInsertPos.begin(), currentInsertPos.end(), 0u);
+
+        // --- 1. Positions (Spawn at origin) ---
+        std::fill(pX.begin(), pX.end(), 0.0f);
+        std::fill(pY.begin(), pY.end(), 0.0f);
+        std::fill(pZ.begin(), pZ.end(), 0.0f);
+
+        // --- 2. Velocities (Initial orbital momentum) ---
+        std::fill(vX.begin(), vX.end(), 1.5f);
+        std::fill(vY.begin(), vY.end(), 0.5f);
+        std::fill(vZ.begin(), vZ.end(), -1.0f);
+
+        // --- 3. Spatial Grid Core ---
+        std::fill(particleCellIndices.begin(), particleCellIndices.end(), 0u);
+        std::fill(cellStartOffset.begin(), cellStartOffset.end(), 0u);
+        
+        // Note: cellOccupancyMask is a 64-bit integer mask, so we fill with 0ULL
+        std::fill(cellOccupancyMask.begin(), cellOccupancyMask.end(), 0ULL);
+
+        // --- 4. Temporary Sorting Buffers (Zeroed out) ---
+        std::fill(temp_pX.begin(), temp_pX.end(), 0.0f);
+        std::fill(temp_pY.begin(), temp_pY.end(), 0.0f);
+        std::fill(temp_pZ.begin(), temp_pZ.end(), 0.0f);
+        
+        std::fill(temp_vX.begin(), temp_vX.end(), 0.0f);
+        std::fill(temp_vY.begin(), temp_vY.end(), 0.0f);
+        std::fill(temp_vZ.begin(), temp_vZ.end(), 0.0f);
+
+        std::fill(temp_cellIndices.begin(), temp_cellIndices.end(), 0u);
+        std::fill(temp_destIndices.begin(), temp_destIndices.end(), 0u);
     }
 
     // --- Reusable Spawner (Thread-Safe & Lock-Free, Trigonometry) ---
@@ -679,13 +756,22 @@ public:
 
         // std::vector::swap does NOT copy data. It merely swaps the internal memory pointers.
         // This is a wildly fast O(1) operation.
-        pX.swap(temp_pX);
-        pY.swap(temp_pY);
-        pZ.swap(temp_pZ);
-        vX.swap(temp_vX);
-        vY.swap(temp_vY);
-        vZ.swap(temp_vZ);
-        particleCellIndices.swap(temp_cellIndices);
+        // pX.swap(temp_pX);
+        // pY.swap(temp_pY);
+        // pZ.swap(temp_pZ);
+        // vX.swap(temp_vX);
+        // vY.swap(temp_vY);
+        // vZ.swap(temp_vZ);
+        // particleCellIndices.swap(temp_cellIndices);
+
+        // std::swap flips the memory addresses the spans are looking at in O(1) time.
+        std::swap(pX, temp_pX);
+        std::swap(pY, temp_pY);
+        std::swap(pZ, temp_pZ);
+        std::swap(vX, temp_vX);
+        std::swap(vY, temp_vY);
+        std::swap(vZ, temp_vZ);
+        std::swap(particleCellIndices, temp_cellIndices);
     }
 
     // --- AVX2 SPATIAL HASH COLLISION SOLVER ---
