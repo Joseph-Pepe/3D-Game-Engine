@@ -175,7 +175,9 @@ FORCE_INLINE uint32_t getMortonCodeLUT(uint32_t x, uint32_t y, uint32_t z) {
 
 // --- HARDWARE MORTON ENCODING (BMI2) ---
 // Interleaves the bits of X, Y, and Z to preserve 3D spatial cache locality (3D array flattening), optimizes L1/L2 cache
-FORCE_INLINE uint32_t getMortonCode(uint32_t x, uint32_t y, uint32_t z, bool isLegacy) {
+// By passing IsLegacy as a template parameter, the compiler resolves the branch at compile-time.
+template <bool IsLegacy>
+FORCE_INLINE uint32_t getMortonCode(uint32_t x, uint32_t y, uint32_t z) {
     // x bits go to slots 0, 3, 6, 9...
     // y bits go to slots 1, 4, 7, 10...
     // z bits go to slots 2, 5, 8, 11...
@@ -190,7 +192,8 @@ FORCE_INLINE uint32_t getMortonCode(uint32_t x, uint32_t y, uint32_t z, bool isL
         - Cache it into a local, const stack variable at the moment the thread wakes up and pass them explicitly.
         - Passing a const variable into an inline function, the compiler will optimize it and make it a pure branchless execution path.
     */
-    if(!isLegacy) {
+    // C++17/26 'if constexpr' ensures the false path is entirely deleted from the compiled binary.
+    if constexpr (!IsLegacy) {
         // We use "masks" to define where the bits should land, bit manipulation instruction 2, parallel bits deposit.
         uint32_t mx = _pdep_u32(x, 0x09249249);
         uint32_t my = _pdep_u32(y, 0x12492492);
