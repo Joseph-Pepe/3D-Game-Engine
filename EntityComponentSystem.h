@@ -6,8 +6,6 @@
 #include <type_traits>
 #include <print>
 
-
-
 // Engine Dependencies
 #include "Math.h"
 #include "imgui.h"
@@ -28,8 +26,6 @@
 
 // C++26 Reflection Header
 #include <meta> 
-
-
 
 
 // ==================================================================================
@@ -146,14 +142,18 @@ private:
     // C++26: Pack Indexing allows us to auto-generate vectors for every component in the tuple
     template <typename... Types>
     struct Storage {
-        std::tuple<std::vector<Types>...> arrays;
+        // 1. DENSE ARRAYS: The actual packed component data. (No gaps!)
+        std::tuple<std::vector<Types>...> denseArrays;
+        
+        // 2. SPARSE ARRAYS: Maps Entity ID -> Dense Array Index.
+        // If an entity doesn't have the component, its value is -1.
+        std::tuple<std::vector<uint32_t>...> sparseArrays;
         
         Storage() {
-            // Reserve memory for all arrays instantly
-            auto reserve_all = []<std::size_t... I>(std::tuple<std::vector<Types>...>& tup, std::index_sequence<I...>) {
-                (std::get<I>(tup).reserve(MAX_ENTITIES), ...);
+            auto init_sparse = []<std::size_t... I>(std::tuple<std::vector<uint32_t>...>& tup, std::index_sequence<I...>) {
+                (std::get<I>(tup).resize(MAX_ENTITIES, static_cast<uint32_t>(-1)), ...);
             };
-            reserve_all(arrays, std::index_sequence_for<Types...>{});
+            init_sparse(sparseArrays, std::index_sequence_for<Types...>{});
         }
     };
 
@@ -177,21 +177,33 @@ public:
     void AddComponent(Entity e, T component) {
         constexpr uint32_t compID = GetComponentID<T>();
         
-        // Add the component to the bitmask signature
+        // Add the component to the bitmask, mark the signature
         entitySignatures[e] |= (1 << compID);
 
-        // Ensure the vector is large enough, then copy the data
-        auto& compArray = std::get<compID>(componentStorage.arrays);
-        if (compArray.size() <= e) {
-            compArray.resize(e + 1);
+        auto& denseArray = std::get<compID>(componentStorage.denseArrays);
+        auto& sparseArray = std::get<compID>(componentStorage.sparseArrays);
+
+        // 1. If it already has the component, just update the dense data
+        if (sparseArray[e] != static_cast<uint32_t>(-1)) {
+            denseArray[sparseArray[e]] = component;
+        } 
+        // 2. Otherwise, pack it tightly at the end of the dense array
+        else {
+            uint32_t newIndex = static_cast<uint32_t>(denseArray.size());
+            denseArray.push_back(component);
+            sparseArray[e] = newIndex; // Map the Entity to its packed index
         }
-        compArray[e] = component;
     }
 
     template <typename T>
     T& GetComponent(Entity e) {
         constexpr uint32_t compID = GetComponentID<T>();
-        return std::get<compID>(componentStorage.arrays)[e];
+        
+        // 1. Look up where this entity's data lives in the packed array
+        uint32_t denseIndex = std::get<compID>(componentStorage.sparseArrays)[e];
+        
+        // 2. Return the tightly packed data
+        return std::get<compID>(componentStorage.denseArrays)[denseIndex];
     }
 
     template <typename T>
