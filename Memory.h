@@ -70,7 +70,7 @@ struct AlignedAllocator {
     constexpr AlignedAllocator() noexcept = default;
 
     template <typename U> 
-    AlignedAllocator(const AlignedAllocator<U, Alignment>&) noexcept {}
+    constexpr AlignedAllocator(const AlignedAllocator<U, Alignment>&) noexcept {}
 
     // Enforce [[nodiscard]] and allow compile-time execution
     [[nodiscard]] constexpr T* allocate(std::size_t n) {
@@ -93,7 +93,7 @@ struct AlignedAllocator {
         }
     }
 
-    void deallocate(T* ptr, std::size_t n) noexcept {
+    constexpr void deallocate(T* ptr, std::size_t n) noexcept {
         if consteval {
             std::allocator<T>{}.deallocate(ptr, n);
         } else {
@@ -212,15 +212,15 @@ public:
     }
 
     // --- THE MAGIC O(1) FREE ---
-    ENGINE_FORCE_INLINE void Reset() {
+    ENGINE_FORCE_INLINE void Reset() noexcept {
         // We don't overwrite the memory (that wastes CPU cycles).
         // We just move the bump pointer back to the start. The next allocation will cleanly overwrite the old data.
         m_offset = 0;
     }
 
     // Telemetry
-    ENGINE_FORCE_INLINE size_t GetUsedMemory() const { return m_offset; }
-    ENGINE_FORCE_INLINE size_t GetCapacity() const { return m_capacity; }
+    ENGINE_FORCE_INLINE size_t GetUsedMemory() const noexcept { return m_offset; }
+    ENGINE_FORCE_INLINE size_t GetCapacity() const noexcept { return m_capacity; }
 };
 
 // Global Memory Pools
