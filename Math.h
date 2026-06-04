@@ -175,7 +175,7 @@ FORCE_INLINE uint32_t getMortonCodeLUT(uint32_t x, uint32_t y, uint32_t z) {
 
 // --- HARDWARE MORTON ENCODING (BMI2) ---
 // Interleaves the bits of X, Y, and Z to preserve 3D spatial cache locality (3D array flattening), optimizes L1/L2 cache
-// By passing IsLegacy as a template parameter, the compiler resolves the branch at compile-time (i.e., compiler generates two completely separate, beanchless versions of the function at coimpile-time saving millions of evaluations per frame).
+// By passing IsLegacy as a template parameter, the compiler resolves the branch at compile-time (i.e., compiler generates two completely separate, branchless versions of the function at compile-time saving millions of evaluations per frame).
 template <bool IsLegacy>
 FORCE_INLINE uint32_t getMortonCode(uint32_t x, uint32_t y, uint32_t z) {
     // x bits go to slots 0, 3, 6, 9...
