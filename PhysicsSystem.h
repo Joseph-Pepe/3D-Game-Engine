@@ -706,6 +706,16 @@ public:
         const bool localIs2D = g_EngineSettings.is2DMode;
         const bool localIsLegacy = g_EngineSettings.isLegacyCPU;
 
+        // ======================================
+        // TEMPLATED KERNEL DISPATCHER
+        // ======================================
+        /*
+            - collisionKernel evaluates g_EngineSettings.is2DMode exactly once per thread chunk.
+            - After that it locks this thread onto a perfectly unrolled, branchless track of pure AVX2 execution for the next 512 to 1024 particles.
+            - Improves performance.
+            - Since congnitive load is shifted over to the compiler, the CPU can focus on the raw, uninterrupted stream of math.
+        */
+
         g_JobSystem.DispatchAndWait(activeCount, CHUNK_SIZE, [&](uint32_t start, uint32_t end) {
             // --- C++20 TEMPLATED KERNEL DISPATCHER ---
             // By templating this entire block, the compiler generates 4 distinct, highly-optimized branchless versions of your physics engine!
