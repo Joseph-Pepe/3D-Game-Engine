@@ -15,7 +15,6 @@
     #define ENGINE_HAS_CXX26_SIMD 0
 #endif
 
-
 // ==================================================================================
 // MEMORY ALLOCATION (HARDWARE ALIGNMENT)
 // ==================================================================================
@@ -122,3 +121,86 @@ using AlignedVector64 = std::vector<T, AlignedAllocator<T, 64>>; // AVX-512 (64-
     using NativeAlignedVector = std::vector<T, AlignedAllocator<T, NATIVE_SIMD_ALIGN>>;
 
 #endif
+
+// ==================================================================================
+// LINEAR ARENA ALLOCATOR (ZERO-FRAGMENTATION MEMORY)
+// ==================================================================================
+/*
+    - Grabs one massive block of memory from the OS at startup.
+    - e.g., reserves a flat 1GB of RAM at the exact moment the engine boots up.
+    - Allocations are just pointer addition (O(1) time).
+    - Deallocations are a single integer reset (O(1) time).
+    - Completely eliminates Heap Fragmentation and OS-level memory stalls.
+*/
+
+class LinearArena {
+private:
+    uint8_t* m_memory;        // The master pointer to our massive memory block
+    size_t   m_capacity;      // Total size of the arena in bytes
+    size_t   m_offset;        // The bump pointer (how much we have used)
+
+public:
+    // Ask the OS for a massive chunk of memory upfront, strictly aligned to 64 bytes (AVX-512 ready)
+    LinearArena(size_t sizeInBytes) : m_capacity(sizeInBytes), m_offset(0) {
+        // We use native aligned new to guarantee the master block starts on a cache line boundary
+        m_memory = static_cast<uint8_t*>(::operator new(sizeInBytes, std::align_val_t{64}));
+        
+        if (!m_memory) {
+            std::println(stderr, "[FATAL] OS Refused to allocate {} bytes for Arena!", sizeInBytes);
+            std::abort();
+        }
+        
+        std::println("[MEMORY] Initialized Linear Arena: {:.2f} MB", (float)sizeInBytes / (1024.0f * 1024.0f));
+    }
+
+    ~LinearArena() {
+        ::operator delete(m_memory, m_capacity, std::align_val_t{64});
+    }
+
+    // Prevent copying (We don't want two objects thinking they own the same 1GB of RAM)
+    LinearArena(const LinearArena&) = delete;
+    LinearArena& operator=(const LinearArena&) = delete;
+
+    // --- BARE-METAL BUMP ALLOCATION ---
+    template <typename T>
+    [[nodiscard]] T* Allocate(size_t count, size_t alignment = alignof(T)) {
+        // 1. Where are we currently in memory?
+        uintptr_t currentAddress = reinterpret_cast<uintptr_t>(m_memory + m_offset);
+        
+        // 2. Bitwise Alignment Calculation (No slow modulo arithmetic!)
+        // Formula pushes the address forward to the nearest multiple of the requested alignment.
+        size_t padding = (alignment - (currentAddress & (alignment - 1))) & (alignment - 1);
+        
+        size_t totalAllocationSize = padding + (count * sizeof(T));
+
+        // 3. Out of Memory Guard
+        if (m_offset + totalAllocationSize > m_capacity) {
+            std::println(stderr, "[FATAL] LinearArena Exhausted! Capacity: {} bytes", m_capacity);
+            std::println(stderr, "{}", std::to_string(std::stacktrace::current()));
+            std::abort();
+        }
+
+        // 4. Calculate the final aligned pointer
+        uintptr_t alignedAddress = currentAddress + padding;
+        
+        // 5. Bump the offset forward
+        m_offset += totalAllocationSize;
+
+        return reinterpret_cast<T*>(alignedAddress);
+    }
+
+    // --- THE MAGIC O(1) FREE ---
+    FORCE_INLINE void Reset() {
+        // We don't overwrite the memory (that wastes CPU cycles).
+        // We just move the bump pointer back to the start. The next allocation will cleanly overwrite the old data.
+        m_offset = 0;
+    }
+
+    // Telemetry
+    FORCE_INLINE size_t GetUsedMemory() const { return m_offset; }
+    FORCE_INLINE size_t GetCapacity() const { return m_capacity; }
+};
+
+// Global Memory Pools
+// Allocate a 500MB Master Engine Arena
+inline LinearArena g_EngineArena(500 * 1024 * 1024);
