@@ -10,9 +10,28 @@
 #include <exception>
 #include <chrono>
 #include <new>
+#include <immintrin.h>     // REQUIRED for _mm_pause, _mm_prefetch, _mm256_zeroupper
+
+
+// --- HARDWARE INTRINSICS ---
+#if defined(_MSC_VER)
+    #include <intrin.h>    // REQUIRED for __rdtsc on MSVC
+#else
+    #include <x86intrin.h> // REQUIRED for __rdtsc on GCC/Clang
+#endif
 
 // The Job System needs the fast PRNG from Math.h for the work-stealing logic!
 #include "Math.h"
+
+// ==================================================================================
+// CROSS-PLATFORM CACHE LINE ALIGNMENT
+// ==================================================================================
+// Prevents compilation errors on strict compilers while maintaining false-sharing protection.
+#if defined(__cpp_lib_hardware_interference_size)
+    constexpr std::size_t CACHE_CHUNK_SIZE = std::hardware_destructive_interference_size;
+#else
+    constexpr std::size_t CACHE_CHUNK_SIZE = 64; // Standard L1 cache line size
+#endif
 
 // ==================================================================================
 // COROUTINE MEMORY POOL (Zero-OS Allocation), GLOBAL JOB SYSTEM QUEUE 
@@ -27,7 +46,8 @@ extern JobSystem g_JobSystem; // Use 'extern' here to promise the compiler that 
 inline thread_local uint32_t tl_workerIndex = 0;
 
 struct EngineJob {
-    struct promise_type {
+    // Explicitly align the promise_type so the compiler offsets spilled __m256 YMM registers internally.
+    struct alignas(32) promise_type {
 
         // --- 32-Byte Aligned Allocation Header ---
         // Forces the payload to remain strictly aligned for AVX2 instructions,
@@ -136,10 +156,10 @@ struct YieldToJobSystem {
 
 // --- THE UNIFIED SCHEDULER ---
 // std::hardware_destructive_interference_size: asks the target hardware how large its cache is, so its dynamically scaling to the CPU architecture (Intel/AMD x86, M1/M2/M3 ARM: 128-byte cache).
-class alignas(std::hardware_destructive_interference_size) WorkStealingQueue {
+class alignas(CACHE_CHUNK_SIZE) WorkStealingQueue {
 private:
-    alignas(std::hardware_destructive_interference_size) std::atomic<int64_t> top{0};    // Thieves steal from this cache line
-    alignas(std::hardware_destructive_interference_size) std::atomic<int64_t> bottom{0}; // The Owner pushes/pops from this cache line
+    alignas(CACHE_CHUNK_SIZE) std::atomic<int64_t> top{0};    // Thieves steal from this cache line
+    alignas(CACHE_CHUNK_SIZE) std::atomic<int64_t> bottom{0}; // The Owner pushes/pops from this cache line
     std::vector<std::coroutine_handle<>> jobs;
     int64_t mask;
 
@@ -246,23 +266,23 @@ private:
     std::vector<std::thread> workers;
 
     // Read constantly by every thread. Keep it on its own isolated island! Must keep wake and sleep away from terminate.
-    alignas(std::hardware_destructive_interference_size) std::atomic<bool> terminate{false};
+    alignas(CACHE_CHUNK_SIZE) std::atomic<bool> terminate{false};
 
     // C++20: Atomic Futex for lock-free sleeping
-    alignas(std::hardware_destructive_interference_size) std::atomic<uint32_t> wakeSignal{0};
+    alignas(CACHE_CHUNK_SIZE) std::atomic<uint32_t> wakeSignal{0};
     
     // ISOLATED: Written frequently as threads sleep/wake.
     // We pad based on the target hardware (by ensuring the next variable is aligned) 
     // to guarantee it lives completely alone.
-    alignas(std::hardware_destructive_interference_size) std::atomic<int> sleepingThreads{0};
+    alignas(CACHE_CHUNK_SIZE) std::atomic<int> sleepingThreads{0};
     
 public:
     std::vector<std::unique_ptr<WorkStealingQueue>> queues;
     // ISOLATED: Read heavily by new threads.
-    alignas(std::hardware_destructive_interference_size) std::atomic<uint32_t> nextWorkerId{0};
+    alignas(CACHE_CHUNK_SIZE) std::atomic<uint32_t> nextWorkerId{0};
     uint32_t maxQueues;
 
-    struct alignas(std::hardware_destructive_interference_size) ThreadMetrics {
+    struct alignas(CACHE_CHUNK_SIZE) ThreadMetrics {
         std::atomic<double> utilization{0.0};
         std::atomic<uint64_t> jobsCompleted{0};
         std::atomic<uint64_t> totalFlops{0}; // Isolated math tracker!
@@ -519,7 +539,7 @@ public:
         // Stack allocated. Fastest memory access possible.
         // Force this atomic counter to sit on its own hardware-specific chunk cache line (L1 cache line size).
         // This prevents other local stack variables from getting caught in the crossfire of thread contention!
-        alignas(std::hardware_destructive_interference_size) std::atomic<int> counter{0};
+        alignas(CACHE_CHUNK_SIZE) std::atomic<int> counter{0};
 
         uint32_t chunksDispatched = 0; // Track exactly how much work we made
 
