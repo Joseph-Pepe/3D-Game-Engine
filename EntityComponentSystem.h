@@ -11,6 +11,8 @@
 #include <cstring> // Required for std::memcpy
 #include <algorithm>
 #include <cstddef>
+#include <ranges>
+#include <stdexcept>
 
 // Engine Dependencies
 #include "Math.h"
@@ -472,6 +474,108 @@ private:
     std::vector<EntityRecord> entityDirectory;
     uint32_t nextEntity = 0;
 
+    // Ensures when UI or gameplay systems modify a proxy struct, it scatters the data safely back into the correct SIMD lanes without corrupting neighboring entities.
+    template <typename T>
+    void WriteToArchetypeChunk(Archetype* arch, uint32_t chunkIndex, uint32_t laneIndex, uint32_t globalID, const T& component) {
+        
+        // 1. Locate the component's byte buffer
+        auto it = std::ranges::find(arch->componentIDs, globalID);
+        if (it == arch->componentIDs.end()) {
+            throw std::runtime_error("Critical ECS Failure: Component ID not found in Archetype signature.");
+        }
+        
+        size_t bufferIndex = std::distance(arch->componentIDs.begin(), it);
+        auto& byteBuffer = arch->chunks[chunkIndex].componentBuffers[bufferIndex];
+
+        // 2. COMPILE-TIME BRANCH: Scatter (AoSoA) vs Direct Write (AoS)
+        if constexpr (ComponentStorageTrait<T>::is_aosoa) {
+            
+            // --- AoSoA WRITE PATH ---
+            using ChunkType = typename ComponentStorageTrait<T>::StorageType::value_type; 
+            
+            uint32_t subChunkIndex = laneIndex / 8;
+            uint32_t innerLane = laneIndex % 8;
+            
+            auto* chunk8 = reinterpret_cast<ChunkType*>(byteBuffer.data() + (subChunkIndex * sizeof(ChunkType)));
+            
+            // Scatter the proxy data back into the SIMD lanes
+            if constexpr (std::is_same_v<T, PhysicsComponent>) {
+                chunk8->velX[innerLane] = component.velocity.x;
+                chunk8->velY[innerLane] = component.velocity.y;
+                chunk8->velZ[innerLane] = component.velocity.z;
+                chunk8->mass[innerLane] = component.mass;
+                chunk8->friction[innerLane] = component.friction;
+                chunk8->isStatic[innerLane] = component.isStatic;
+            } else {
+                throw std::runtime_error("AoSoA proxy injection missing for this type.");
+            }
+
+        } else {
+            
+            // --- AoS WRITE PATH ---
+            size_t stride = sizeof(T); 
+            auto* ptr = reinterpret_cast<T*>(byteBuffer.data() + (laneIndex * stride));
+            
+            // Overwrite the contiguous memory block with the updated struct
+            *ptr = component;
+        }
+    }
+
+    // ==================================================
+    // TYPE-AWARE ARCHETYPE READER
+    // ==================================================
+
+    template <typename T>
+    auto ReadFromArchetypeChunk(Archetype* arch, uint32_t chunkIndex, uint32_t laneIndex, uint32_t globalID) -> std::conditional_t<ComponentStorageTrait<T>::is_aosoa, T, T&> {
+        
+        // 1. Locate the component's byte buffer in this archetype using C++20/26 ranges
+        auto it = std::ranges::find(arch->componentIDs, globalID);
+        if (it == arch->componentIDs.end()) {
+            throw std::runtime_error("Critical ECS Failure: Component ID not found in Archetype signature.");
+        }
+        
+        size_t bufferIndex = std::distance(arch->componentIDs.begin(), it);
+        auto& byteBuffer = arch->chunks[chunkIndex].componentBuffers[bufferIndex];
+
+        // 2. COMPILE-TIME BRANCH: AoSoA vs AoS
+        if constexpr (ComponentStorageTrait<T>::is_aosoa) {
+            
+            // --- AoSoA READ PATH (e.g., PhysicsComponent from PhysicsChunk8) ---
+            using ChunkType = typename ComponentStorageTrait<T>::StorageType::value_type; 
+            
+            uint32_t subChunkIndex = laneIndex / 8;
+            uint32_t innerLane = laneIndex % 8;
+            
+            // Cast the byte array to our aligned SIMD chunk type
+            auto* chunk8 = reinterpret_cast<ChunkType*>(byteBuffer.data() + (subChunkIndex * sizeof(ChunkType)));
+            
+            // Reconstruct and return the proxy POD struct (Copy)
+            if constexpr (std::is_same_v<T, PhysicsComponent>) {
+                T proxy;
+                proxy.velocity.x = chunk8->velX[innerLane];
+                proxy.velocity.y = chunk8->velY[innerLane];
+                proxy.velocity.z = chunk8->velZ[innerLane];
+                proxy.mass = chunk8->mass[innerLane];
+                proxy.friction = chunk8->friction[innerLane];
+                proxy.isStatic = chunk8->isStatic[innerLane];
+                return proxy;
+            } else {
+                // If you add more AoSoA types later, you handle their reconstruction here
+                throw std::runtime_error("AoSoA proxy reconstruction missing for this type.");
+            }
+
+        } else {
+            
+            // --- AoS READ PATH (e.g., TransformComponent) ---
+            // Direct memory mapping. We use sizeof(T) to guarantee type-safe strides.
+            size_t stride = sizeof(T); 
+            auto* ptr = reinterpret_cast<T*>(byteBuffer.data() + (laneIndex * stride));
+            
+            // Return a direct memory reference so ImGui (or systems) can mutate it in-place
+            return *ptr;
+        }
+    }
+
     // ==================================================
     // RAW MEMORY MANIPULATION (COPYABLE SILICON BYTES)
     // ==================================================
@@ -518,19 +622,6 @@ private:
             // Blistering fast silicon copy
             std::memcpy(destPtr, srcPtr, stride);
         }
-    }
-
-    void InjectComponentData(Archetype* destArchetype, uint32_t compID, void* data, 
-                                uint32_t destChunk, uint32_t destLane) {
-        
-        // Find the array index for the newly added component
-        auto it = std::find(destArchetype->componentIDs.begin(), destArchetype->componentIDs.end(), compID);
-        size_t destIndex = std::distance(destArchetype->componentIDs.begin(), it);
-        size_t stride = destArchetype->componentStrides[destIndex];
-
-        // Inject the new struct data directly into the byte buffer
-        void* destPtr = destArchetype->chunks[destChunk].componentBuffers[destIndex].data() + (destLane * stride);
-        std::memcpy(destPtr, data, stride);
     }
 
     void FillHoleInChunk(Archetype* srcArchetype, uint32_t srcChunk, uint32_t srcLane) {
@@ -586,8 +677,8 @@ public:
             EntityRecord& record = entityDirectory[e];
             Archetype* arch = archetypeManager.GetArchetype(record.archetypeSignature);
             
-            // To be implemented: Casting the type-erased std::byte array back to T
-            // WriteToArchetypeChunk(arch, record.chunkIndex, record.laneIndex, globalID, component);
+            // Casting the type-erased std::byte array back to T
+            WriteToArchetypeChunk(arch, record.chunkIndex, record.laneIndex, globalID, component);
 
         } else {
             // ROUTE TO SPARSE SET
@@ -612,7 +703,7 @@ public:
         }
     }
 
-    void MoveEntityToNewArchetype(Entity e, uint32_t newComponentID, void* componentData) {
+    void MoveEntityToNewArchetype(Entity e, uint32_t newComponentID) {
         EntityRecord& record = entityDirectory[e];
         Archetype* currentArchetype = archetypeManager.GetArchetype(record.archetypeSignature);
 
@@ -624,12 +715,9 @@ public:
         uint32_t destLaneIndex;
         AllocateLane(e, destinationArchetype, destChunkIndex, destLaneIndex);
 
-        // 3. Move the data (memcpy the old components to the new chunk)
+        // 3-4. Move the data (memcpy the old components to the new chunk)
         MoveEntityData(currentArchetype, record.chunkIndex, record.laneIndex,
                     destinationArchetype, destChunkIndex, destLaneIndex);
-
-        // 4. Inject the new component data into the newly allocated lane
-        InjectComponentData(destinationArchetype, newComponentID, componentData, destChunkIndex, destLaneIndex);
 
         // 5. Swap and Pop the hole left in the old archetype
         FillHoleInChunk(currentArchetype, record.chunkIndex, record.laneIndex);
@@ -646,7 +734,11 @@ public:
         if constexpr (ComponentTrait<T>::backend == StorageBackend::Archetype) {
             constexpr uint32_t globalID = GetGlobalComponentID<T>();
             // 1. ROUTE TO ARCHEPTYPE GRAPH
-            MoveEntityToNewArchetype(e, globalID, &component);
+            // Physically move the entity to the new Archetype chunk
+            MoveEntityToNewArchetype(e, globalID);
+
+            // 2. Safely write the new component using your type-aware C++26 writer!
+            SetComponent(e, component);
         } else {
             // 2. ROUTE TO SPARSE SET (lightning-fast sparse set insertion)
             constexpr uint32_t sparseID = GetSparseComponentID<T>();
@@ -692,9 +784,7 @@ public:
             // Find the byte offset for this specific component type within the archetype
             // (You will need to calculate this based on componentStrides in the Archetype class)
             // For now, this is the placeholder where you cast the type-erased std::byte memory back to T:
-            // return ReadFromArchetypeChunk<T>(arch, record.chunkIndex, record.laneIndex, globalID);
-            
-            throw std::runtime_error("Archetype chunk reading not yet implemented!");
+            return ReadFromArchetypeChunk<T>(arch, record.chunkIndex, record.laneIndex, globalID);
         } else {
             // --- 2. ROUTE TO SPARSE SET ---
             constexpr uint32_t sparseID = GetSparseComponentID<T>(); // USE SPARSE ID!
