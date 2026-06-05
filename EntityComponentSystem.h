@@ -109,8 +109,6 @@ void DrawComponentUI(T& component, const char* componentName) {
     to assign them permanent, deterministic integer IDs at compile time.
 */
 
-using ComponentRegistry = std::tuple<TransformComponent, PhysicsComponent>;
-
 template <typename T, typename Tuple>
 struct ComponentIndex;
 
