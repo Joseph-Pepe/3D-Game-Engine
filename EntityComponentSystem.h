@@ -24,13 +24,11 @@
 
 */
 
-
-// C++26 Reflection Header
-#include <meta> 
+#include <meta>  // C++26 Reflection
 
 
 // ==================================================================================
-// 1. THE COMPONENTS (Zero Boilerplate)
+// 1. THE COMPONENTS (POD STRUCTS)
 // ==================================================================================
 // No macros, no inheritance, just pure Plain Old Data (POD) structs.
 
@@ -46,6 +44,19 @@ struct PhysicsComponent {
     float friction = 0.5f;
     bool isStatic = false;
 };
+
+// 1. Add the Bridge Component (Auto-inspected by C++26 Reflection)
+struct ParticleEmitterComponent {
+    int activeParticles = 100000;
+    float gravityPull = 5.0f;
+    bool isAwake = true;
+
+    // Pointer to the heavy silicon-level math manager
+    ParticlePhysicsSOA* physicsEngine = nullptr; 
+};
+
+// 2. Register it in the Master Tuple
+using ComponentRegistry = std::tuple<TransformComponent, PhysicsComponent, ParticleEmitterComponent>;
 
 // ==================================================================================
 // 2. C++26 AUTO-INSPECTOR (The Magic UI Generator)
@@ -174,12 +185,15 @@ struct alignas(32) PhysicsChunk8 {
     
     // --- Mass (8 entities) --- Additional physics data
     alignas(32) float mass[8] = {1.0f};
+    alignas(32) float friction[8] = {0.5f};
 
     // If an object is static, it shouldn't be in the physics chunk at all!
+    // Bools are terrible for SIMD padding. Pack them into a bitmask in production, but we use an array here for structural parity with the POD struct.
+    alignas(32) bool isStatic[8] = {false};
 };
 
 // ==================================================================================
-// AOS & AoSoA COMPONENTS
+// STORAGE TRAITS
 // ==================================================================================
 /*
     [AOS (Array of Structs)]
@@ -212,7 +226,7 @@ struct ComponentStorageTrait<PhysicsComponent> {
 
 
 // ==================================================================================
-// 4. THE ECS REGISTRY (Sparse Set / SoA Storage)
+// 4. THE ECS REGISTRY (Sparse Set / SoA / AoSoA Storage)
 // ==================================================================================
 
 using Entity = uint32_t;
@@ -238,7 +252,7 @@ private:
         }
     };
 
-    Storage<TransformComponent, PhysicsComponent> componentStorage;
+    Storage<TransformComponent, PhysicsComponent, ParticleEmitterComponent> componentStorage;
 
     // Bitmask array: Each entity has a 32-bit signature showing which components it owns.
     // e.g., 0b011 means it has Transform (ID 0) and Physics (ID 1).
@@ -254,6 +268,29 @@ public:
         return nextEntity++;
     }
 
+    // Handles writing logical struct data into memory (AoS or AoSoA lane)
+    template <typename T>
+    void SetComponent(Entity e, const T& component) {
+        constexpr uint32_t compID = GetComponentID<T>();
+        uint32_t denseIndex = std::get<compID>(componentStorage.sparseArrays)[e];
+
+        if constexpr (ComponentStorageTrait<T>::is_aosoa) {
+            uint32_t chunkIndex = denseIndex / 8;
+            uint32_t laneIndex = denseIndex % 8;
+            auto& chunk = std::get<compID>(componentStorage.denseArrays)[chunkIndex];
+            
+            // Scatter the data into the SIMD lanes
+            chunk.velX[laneIndex] = component.velocity.x;
+            chunk.velY[laneIndex] = component.velocity.y;
+            chunk.velZ[laneIndex] = component.velocity.z;
+            chunk.mass[laneIndex] = component.mass;
+            chunk.friction[laneIndex] = component.friction;
+            chunk.isStatic[laneIndex] = component.isStatic;
+        } else {
+            std::get<compID>(componentStorage.denseArrays)[denseIndex] = component;
+        }
+    }
+
     template <typename T>
     void AddComponent(Entity e, T component) {
         constexpr uint32_t compID = GetComponentID<T>();
@@ -266,18 +303,33 @@ public:
 
         // 1. If it already has the component, just update the dense data
         if (sparseArray[e] != static_cast<uint32_t>(-1)) {
-            denseArray[sparseArray[e]] = component;
+            SetComponent(e, component);
         } 
         // 2. Otherwise, pack it tightly at the end of the dense array
         else {
-            uint32_t newIndex = static_cast<uint32_t>(denseArray.size());
-            denseArray.push_back(component);
-            sparseArray[e] = newIndex; // Map the Entity to its packed index
+            if constexpr (ComponentStorageTrait<T>::is_aosoa) {
+                // Chunk Packing Logic. Ensure a chunk has free lanes before inserting.
+                if (denseArray.empty() || denseArray.back().activeCount == 8) {
+                    denseArray.push_back(typename ComponentStorageTrait<T>::StorageType::value_type{});
+                }
+                
+                uint32_t chunkIndex = denseArray.size() - 1;
+                uint32_t laneIndex = denseArray.back().activeCount++;
+                
+                sparseArray[e] = (chunkIndex * 8) + laneIndex;
+                SetComponent(e, component); // Write data into the newly reserved lane
+            } else {
+                // Standard AoS Packing
+                uint32_t newIndex = static_cast<uint32_t>(denseArray.size());
+                denseArray.push_back(component);
+                sparseArray[e] = newIndex; // Map the Entity to its packed index
+            }
         }
     }
 
     template <typename T>
-    decltype(auto) GetComponent(Entity e) {
+    // Returns a Reference for AoS, but a Copy for AoSoA to satisfy C++ return deduction
+    auto GetComponent(Entity e) -> std::conditional_t<ComponentStorageTrait<T>::is_aosoa, T, T&> {
         constexpr uint32_t compID = GetComponentID<T>();
         
         // Look up where this entity's data lives in the packed array
@@ -287,16 +339,16 @@ public:
             // AoSoA Path: Calculate Chunk and Lane
             uint32_t chunkIndex = denseIndex / 8;
             uint32_t laneIndex = denseIndex % 8;
+            auto& chunk = std::get<compID>(componentStorage.denseArrays)[chunkIndex];
             
-            auto& chunkArray = std::get<compID>(componentStorage.denseArrays);
-            
-            // Return a proxy object or extract a temporary scalar struct.
-            // For UI/Single Entity logic, we reconstruct the POD struct on the fly:
+            // For UI/Single Entity logic, we reconstruct the POD struct on the fly: Gather the data from the SIMD lanes into a temporary struct
             T proxy;
-            proxy.velocity.x = chunkArray[chunkIndex].velocityX[laneIndex];
-            proxy.velocity.y = chunkArray[chunkIndex].velocityY[laneIndex];
-            proxy.velocity.z = chunkArray[chunkIndex].velocityZ[laneIndex];
-            proxy.mass = chunkArray[chunkIndex].mass[laneIndex];
+            proxy.velocity.x = chunk.velX[laneIndex];
+            proxy.velocity.y = chunk.velY[laneIndex];
+            proxy.velocity.z = chunk.velZ[laneIndex];
+            proxy.mass = chunk.mass[laneIndex];
+            proxy.friction = chunk.friction[laneIndex];
+            proxy.isStatic = chunk.isStatic[laneIndex];
             return proxy; 
         } else {
             // AoS Path: Standard direct reference return to the tightly packed data
@@ -310,27 +362,26 @@ public:
         return (entitySignatures[e] & (1 << compID)) != 0;
     }
 
-    // --- RENDER THE ENTIRE UI FOR AN ENTITY IN ONE LINE ---
+    // --- WRITE-BACK PROXY STRATEGY FOR UI: RENDER THE ENTIRE UI FOR AN ENTITY ---
     void DrawInspector(Entity e) {
         if (HasComponent<TransformComponent>(e)) {
-            DrawComponentUI(GetComponent<TransformComponent>(e), "Transform");
+            // AoS returns a direct reference, ImGui modifies it directly in memory
+            auto& transform = GetComponent<TransformComponent>(e);
+            DrawComponentUI(transform, "Transform");
         }
         
         if (HasComponent<PhysicsComponent>(e)) {
-            DrawComponentUI(GetComponent<PhysicsComponent>(e), "Physics");
+            // AoSoA returns a copy. ImGui modifies the contiguous struct layout.
+            auto physicsCopy = GetComponent<PhysicsComponent>(e);
+            DrawComponentUI(physicsCopy, "Physics");
+            
+            // Write the modified data back into the scattered SIMD lanes
+            SetComponent(e, physicsCopy); 
+        }
+
+        if (HasComponent<ParticleEmitterComponent>(e)) {
+            auto& emitter = GetComponent<ParticleEmitterComponent>(e);
+            DrawComponentUI(emitter, "Particle Emitter");
         }
     }
 };
-
-// 1. Add the Bridge Component (Auto-inspected by C++26 Reflection)
-struct ParticleEmitterComponent {
-    int activeParticles = 100000;
-    float gravityPull = 5.0f;
-    bool isAwake = true;
-
-    // Pointer to the heavy silicon-level math manager
-    ParticlePhysicsSOA* physicsEngine = nullptr; 
-};
-
-// 2. Register it in the Master Tuple
-using ComponentRegistry = std::tuple<TransformComponent, PhysicsComponent, ParticleEmitterComponent>;
