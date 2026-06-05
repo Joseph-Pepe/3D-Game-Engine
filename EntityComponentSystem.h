@@ -8,6 +8,8 @@
 #include <immintrin.h> // AVX and AVX2 intrinsics
 #include <memory>
 #include <cstdint>
+#include <cstring> // Required for std::memcpy
+#include <algorithm>
 #include <cstddef>
 
 // Engine Dependencies
@@ -57,9 +59,6 @@ struct ParticleEmitterComponent {
     // Pointer to the heavy silicon-level math manager
     ParticlePhysicsSOA* physicsEngine = nullptr; 
 };
-
-// 2. Register it in the Master Tuple
-using ComponentRegistry = std::tuple<TransformComponent, PhysicsComponent, ParticleEmitterComponent>;
 
 // ==================================================================================
 // 2. C++26 AUTO-INSPECTOR (The Magic UI Generator)
@@ -138,6 +137,32 @@ struct ComponentIndex<T, std::tuple<Types...>> {
     }();
 };
 
+// 1. The Global Master List (Used for the 64-bit Archetype Graph Mask)
+using GlobalComponentRegistry = std::tuple<
+    TransformComponent, 
+    PhysicsComponent, 
+    ParticleEmitterComponent
+>;
+
+// 2. The Sparse List (Used ONLY for instantiating std::vector arrays)
+using SparseComponentRegistry = std::tuple<
+    ParticleEmitterComponent 
+>;
+
+// 2. Register it in the Master Tuple
+using ComponentRegistry = std::tuple<TransformComponent, PhysicsComponent, ParticleEmitterComponent>;
+
+// Distinct compile-time ID generators
+template <typename T>
+constexpr uint32_t GetGlobalComponentID() {
+    return static_cast<uint32_t>(ComponentIndex<T, GlobalComponentRegistry>::value);
+}
+
+template <typename T>
+constexpr uint32_t GetSparseComponentID() {
+    return static_cast<uint32_t>(ComponentIndex<T, SparseComponentRegistry>::value);
+}
+
 template <typename T>
 constexpr uint32_t GetComponentID() {
     return static_cast<uint32_t>(ComponentIndex<T, ComponentRegistry>::value);
@@ -196,7 +221,7 @@ struct alignas(32) PhysicsChunk8 {
 };
 
 // ==================================================================================
-// STORAGE TRAITS
+// STORAGE CLASS TRAITS
 // ==================================================================================
 /*
     [AOS (Array of Structs)]
@@ -226,175 +251,45 @@ struct ComponentStorageTrait<PhysicsComponent> {
     static constexpr bool is_aosoa = true;
 };
 
-
-
-// ==================================================================================
-// 4. THE ECS REGISTRY (SPARSE SET ARCHITECTURE: SoA / AoSoA Storage)
-// ==================================================================================
 /*
-    - Great for adding and removing components on the fly.
-    - Cache misses when dealing with multiple components that need to run because these components are stored in isolated arrays, independent of eachother.
+    [Sparse Set Storage]
+
+        - Used for components that are added/removed constantly or sparse components that only a few entities possess.
+        - e.g., StunnedTag, CameraFocus, Inventory.
+        - Great for adding and removing components on the fly.
+        - Cache misses when dealing with multiple components that need to run because these components are stored in isolated arrays, independent of eachother.
+
+    [Archetype Storage]
+
+        - Used for components that are iterated over sequentially every single frame and require perfect SIMD alignment.
+        - e.g., changing [Transform, Physics, MeshRenderer] is rare.
+        - Best for crunching millions of physics particles.
 */
 
-using Entity = uint32_t;
-constexpr Entity MAX_ENTITIES = 100000;
+enum class StorageBackend {
+    Archetype,
+    SparseSet
+};
 
-class ECS {
-private:
-    // C++26: Pack Indexing allows us to auto-generate vectors for every component in the tuple
-    template <typename... Types>
-    struct Storage {
-        // DENSE ARRAYS: Now dynamically resolves to std::vector<T> OR std::vector<Chunk8>, the actual packed component data (No gaps!) 
-        std::tuple<typename ComponentStorageTrait<Types>::StorageType...> denseArrays;
-        
-        // 2. SPARSE ARRAYS: Maps Entity ID -> logical dense index (0, 1, 2, 3...)
-        // If an entity doesn't have the component, its value is -1.
-        std::tuple<std::vector<uint32_t>...> sparseArrays;
-        
-        Storage() {
-            auto init_sparse = []<std::size_t... I>(std::tuple<std::vector<uint32_t>...>& tup, std::index_sequence<I...>) {
-                (std::get<I>(tup).resize(MAX_ENTITIES, static_cast<uint32_t>(-1)), ...);
-            };
-            init_sparse(sparseArrays, std::index_sequence_for<Types...>{});
-        }
-    };
+template <typename T>
+struct ComponentTrait {
+    // Default everything to Sparse Set (safer for random gameplay tags)
+    static constexpr StorageBackend backend = StorageBackend::SparseSet;
+};
 
-    Storage<TransformComponent, PhysicsComponent, ParticleEmitterComponent> componentStorage;
+// Specialize your heavy SIMD components to force them into the Archetype Graph
+template <> 
+struct ComponentTrait<TransformComponent> {
+    static constexpr StorageBackend backend = StorageBackend::Archetype;
+};
 
-    // Bitmask array: Each entity has a 32-bit signature showing which components it owns.
-    // e.g., 0b011 means it has Transform (ID 0) and Physics (ID 1).
-    std::vector<uint32_t> entitySignatures;
-    uint32_t nextEntity = 0;
-
-public:
-    ECS() {
-        entitySignatures.resize(MAX_ENTITIES, 0);
-    }
-
-    Entity CreateEntity() {
-        return nextEntity++;
-    }
-
-    // Handles writing logical struct data into memory (AoS or AoSoA lane)
-    template <typename T>
-    void SetComponent(Entity e, const T& component) {
-        constexpr uint32_t compID = GetComponentID<T>();
-        uint32_t denseIndex = std::get<compID>(componentStorage.sparseArrays)[e];
-
-        if constexpr (ComponentStorageTrait<T>::is_aosoa) {
-            uint32_t chunkIndex = denseIndex / 8;
-            uint32_t laneIndex = denseIndex % 8;
-            auto& chunk = std::get<compID>(componentStorage.denseArrays)[chunkIndex];
-            
-            // Scatter the data into the SIMD lanes
-            chunk.velX[laneIndex] = component.velocity.x;
-            chunk.velY[laneIndex] = component.velocity.y;
-            chunk.velZ[laneIndex] = component.velocity.z;
-            chunk.mass[laneIndex] = component.mass;
-            chunk.friction[laneIndex] = component.friction;
-            chunk.isStatic[laneIndex] = component.isStatic;
-        } else {
-            std::get<compID>(componentStorage.denseArrays)[denseIndex] = component;
-        }
-    }
-
-    template <typename T>
-    void AddComponent(Entity e, T component) {
-        constexpr uint32_t compID = GetComponentID<T>();
-        
-        // Add the component to the bitmask, mark the signature
-        entitySignatures[e] |= (1 << compID);
-
-        auto& denseArray = std::get<compID>(componentStorage.denseArrays);
-        auto& sparseArray = std::get<compID>(componentStorage.sparseArrays);
-
-        // 1. If it already has the component, just update the dense data
-        if (sparseArray[e] != static_cast<uint32_t>(-1)) {
-            SetComponent(e, component);
-        } 
-        // 2. Otherwise, pack it tightly at the end of the dense array
-        else {
-            if constexpr (ComponentStorageTrait<T>::is_aosoa) {
-                // Chunk Packing Logic. Ensure a chunk has free lanes before inserting.
-                if (denseArray.empty() || denseArray.back().activeCount == 8) {
-                    denseArray.push_back(typename ComponentStorageTrait<T>::StorageType::value_type{});
-                }
-                
-                uint32_t chunkIndex = denseArray.size() - 1;
-                uint32_t laneIndex = denseArray.back().activeCount++;
-                
-                sparseArray[e] = (chunkIndex * 8) + laneIndex;
-                SetComponent(e, component); // Write data into the newly reserved lane
-            } else {
-                // Standard AoS Packing
-                uint32_t newIndex = static_cast<uint32_t>(denseArray.size());
-                denseArray.push_back(component);
-                sparseArray[e] = newIndex; // Map the Entity to its packed index
-            }
-        }
-    }
-
-    template <typename T>
-    // Returns a Reference for AoS, but a Copy for AoSoA to satisfy C++ return deduction
-    auto GetComponent(Entity e) -> std::conditional_t<ComponentStorageTrait<T>::is_aosoa, T, T&> {
-        constexpr uint32_t compID = GetComponentID<T>();
-        
-        // Look up where this entity's data lives in the packed array
-        uint32_t denseIndex = std::get<compID>(componentStorage.sparseArrays)[e];
-
-        if constexpr (ComponentStorageTrait<T>::is_aosoa) {
-            // AoSoA Path: Calculate Chunk and Lane
-            uint32_t chunkIndex = denseIndex / 8;
-            uint32_t laneIndex = denseIndex % 8;
-            auto& chunk = std::get<compID>(componentStorage.denseArrays)[chunkIndex];
-            
-            // For UI/Single Entity logic, we reconstruct the POD struct on the fly: Gather the data from the SIMD lanes into a temporary struct
-            T proxy;
-            proxy.velocity.x = chunk.velX[laneIndex];
-            proxy.velocity.y = chunk.velY[laneIndex];
-            proxy.velocity.z = chunk.velZ[laneIndex];
-            proxy.mass = chunk.mass[laneIndex];
-            proxy.friction = chunk.friction[laneIndex];
-            proxy.isStatic = chunk.isStatic[laneIndex];
-            return proxy; 
-        } else {
-            // AoS Path: Standard direct reference return to the tightly packed data
-            return std::get<compID>(componentStorage.denseArrays)[denseIndex];
-        }
-    }
-
-    template <typename T>
-    bool HasComponent(Entity e) {
-        constexpr uint32_t compID = GetComponentID<T>();
-        return (entitySignatures[e] & (1 << compID)) != 0;
-    }
-
-    // --- WRITE-BACK PROXY STRATEGY FOR UI: RENDER THE ENTIRE UI FOR AN ENTITY ---
-    void DrawInspector(Entity e) {
-        if (HasComponent<TransformComponent>(e)) {
-            // AoS returns a direct reference, ImGui modifies it directly in memory
-            auto& transform = GetComponent<TransformComponent>(e);
-            DrawComponentUI(transform, "Transform");
-        }
-        
-        if (HasComponent<PhysicsComponent>(e)) {
-            // AoSoA returns a copy. ImGui modifies the contiguous struct layout.
-            auto physicsCopy = GetComponent<PhysicsComponent>(e);
-            DrawComponentUI(physicsCopy, "Physics");
-            
-            // Write the modified data back into the scattered SIMD lanes
-            SetComponent(e, physicsCopy); 
-        }
-
-        if (HasComponent<ParticleEmitterComponent>(e)) {
-            auto& emitter = GetComponent<ParticleEmitterComponent>(e);
-            DrawComponentUI(emitter, "Particle Emitter");
-        }
-    }
+template <> 
+struct ComponentTrait<PhysicsComponent> {
+    static constexpr StorageBackend backend = StorageBackend::Archetype;
 };
 
 // ==================================================================================
-// 5. ECS ARCHETYPE MEMORY MODEL
+// 5. ECS ARCHETYPE GRAPH MEMORY MODEL
 // ==================================================================================
 /*
     - An archetype is a container of chunks that stores a fixed number of entities, and its components in tightly packed, parallel arrays.
@@ -410,10 +305,13 @@ public:
     - e.g., Archetype B (Transform + Physics + ParticleEmitter) stored in a completely separate memory block.
 */
 
+using ComponentMask = uint64_t; // Supports up to 64 unique component types
+using Entity = uint32_t;
+
 // Max unique component types in the engine
 constexpr uint32_t MAX_COMPONENTS = 64;
+constexpr Entity MAX_ENTITIES = 100000;
 
-using ComponentMask = uint64_t; // Supports up to 64 unique component types
 
 // The central map for every alive entity
 struct EntityRecord {
@@ -428,11 +326,14 @@ std::vector<EntityRecord> entityDirectory(MAX_ENTITIES);
 // A single block of memory holding 256 entities of the EXACT same signature
 struct ArchetypeChunk {
     uint32_t activeCount = 0;
+
+    // REVERSE LOOKUP: Maps Lane Index -> Entity ID
+    Entity entities[ENTITIES_PER_CHUNK];
     
     // Type-erased memory for the components. 
     // e.g., If this archetype has Transform and Physics, this array contains:
     // [Transform x 256] followed by [PhysicsChunk8 x 32]
-    std::vector<std::vector<std::byte>> componentData; 
+    std::vector<std::vector<std::byte>> componentBuffers; 
 };
 
 class Archetype {
@@ -475,7 +376,7 @@ private:
     // Quick lookup to see if an archetype already exists anywhere in the world
     std::unordered_map<ComponentMask, Archetype*> archetypeDirectory;
 
-    // Helper to get or create an archetype based on a bitmask signature
+    // Archetype based on a bitmask signature
     Archetype* GetOrCreateArchetype(ComponentMask targetSignature) {
         // 1. Does it already exist?
         auto it = archetypeDirectory.find(targetSignature);
@@ -499,6 +400,15 @@ public:
     ArchetypeManager() {
         // Always create the "Empty" archetype (Entity with no components) at boot
         GetOrCreateArchetype(0);
+    }
+
+    // Lookup for the ECS to find an entity's current home
+    Archetype* GetArchetype(ComponentMask signature) {
+        auto it = archetypeDirectory.find(signature);
+        if (it != archetypeDirectory.end()) {
+            return it->second;
+        }
+        return nullptr; 
     }
 
     // ==========================================
@@ -525,30 +435,328 @@ public:
     }
 };
 
-void ECS::AddComponentToEntity(Entity e, uint32_t newComponentID, void* componentData) {
-    EntityRecord& record = entityDirectory[e];
-    Archetype* currentArchetype = archetypeManager.GetArchetype(record.archetypeSignature);
+// ============================================================================================
+// 4. THE ECS REGISTRY (HYBRID: SPARSE SET ARCHITECTURE & ARCHETYPE GRAPH: SoA / AoSoA Storage)
+// ============================================================================================
 
-    // 1. Traverse the Graph
-    Archetype* destinationArchetype = archetypeManager.GetNextArchetype_Add(currentArchetype, newComponentID);
+class ECS {
+private:
 
-    // 2. Allocate space in the destination archetype's chunks
-    uint32_t destChunkIndex;
-    uint32_t destLaneIndex;
-    AllocateLane(destinationArchetype, destChunkIndex, destLaneIndex);
+    // --- HEAVY STORAGE ---
+    ArchetypeManager archetypeManager;
 
-    // 3. Move the data (memcpy the old components to the new chunk)
-    MoveEntityData(currentArchetype, record.chunkIndex, record.laneIndex,
-                   destinationArchetype, destChunkIndex, destLaneIndex);
+    // --- LIGHT STORAGE (Sparse Sets) --- We only create sparse sets for components marked as StorageBackend::SparseSet
+    // C++26: Pack Indexing allows us to auto-generate vectors for every component in the tuple
+    template <typename... Types>
+    struct SparseStorage {
+        // DENSE ARRAYS: Now dynamically resolves to std::vector<T> OR std::vector<Chunk8>, the actual packed component data (No gaps!) 
+        std::tuple<typename ComponentStorageTrait<Types>::StorageType...> denseArrays;
+        
+        // 2. SPARSE ARRAYS: Maps Entity ID -> logical dense index (0, 1, 2, 3...)
+        // If an entity doesn't have the component, its value is -1.
+        std::tuple<std::vector<uint32_t>...> sparseArrays;
+        
+        SparseStorage() {
+            auto init_sparse = []<std::size_t... I>(std::tuple<std::vector<uint32_t>...>& tup, std::index_sequence<I...>) {
+                (std::get<I>(tup).resize(MAX_ENTITIES, static_cast<uint32_t>(-1)), ...);
+            };
+            init_sparse(sparseArrays, std::index_sequence_for<Types...>{});
+        }
+    };
 
-    // 4. Inject the new component data into the newly allocated lane
-    InjectComponentData(destinationArchetype, newComponentID, componentData, destChunkIndex, destLaneIndex);
+    // Use the Sparse Registry to generate the arrays!
+    SparseStorage<ParticleEmitterComponent /*, TransformComponent, PhysicsComponent, other sparse components*/> sparseManager;
 
-    // 5. Swap and Pop the hole left in the old archetype
-    FillHoleInChunk(currentArchetype, record.chunkIndex, record.laneIndex);
+    // Bitmask array: Each entity has a 32-bit signature showing which components it owns.
+    // e.g., 0b011 means it has Transform (ID 0) and Physics (ID 1).
+    std::vector<EntityRecord> entityDirectory;
+    uint32_t nextEntity = 0;
 
-    // 6. Update the central directory so the engine knows where the entity lives now
-    record.archetypeSignature = destinationArchetype->signature;
-    record.chunkIndex = destChunkIndex;
-    record.laneIndex = destLaneIndex;
-}
+    // ==================================================
+    // RAW MEMORY MANIPULATION (COPYABLE SILICON BYTES)
+    // ==================================================
+
+    void AllocateLane(Entity e, Archetype* destArchetype, uint32_t& outChunk, uint32_t& outLane) {
+        // 1. If we have no chunks, or the last chunk is full, allocate a new memory block
+        if (destArchetype->chunks.empty() || destArchetype->chunks.back().activeCount == ENTITIES_PER_CHUNK) {
+            ArchetypeChunk newChunk;
+            
+            // Allocate contiguous byte buffers for every component type in this archetype
+            for (size_t stride : destArchetype->componentStrides) {
+                newChunk.componentBuffers.emplace_back(stride * ENTITIES_PER_CHUNK);
+            }
+            destArchetype->chunks.push_back(std::move(newChunk));
+        }
+
+        outChunk = static_cast<uint32_t>(destArchetype->chunks.size() - 1);
+        outLane = destArchetype->chunks.back().activeCount++;
+        
+        // Store the reverse lookup!
+        destArchetype->chunks[outChunk].entities[outLane] = e; 
+    }
+
+    void MoveEntityData(Archetype* srcArchetype, uint32_t srcChunk, uint32_t srcLane,
+                            Archetype* destArchetype, uint32_t destChunk, uint32_t destLane) {
+        
+        // If coming from the "Empty" Archetype (Signature 0), there is no data to move.
+        if (srcArchetype->signature == 0) return;
+
+        // Iterate through every component the OLD archetype had
+        for (size_t srcIndex = 0; srcIndex < srcArchetype->componentIDs.size(); ++srcIndex) {
+            
+            uint32_t compID = srcArchetype->componentIDs[srcIndex];
+            size_t stride = srcArchetype->componentStrides[srcIndex];
+
+            // Find where this component lives in the NEW archetype's arrays
+            auto destIt = std::find(destArchetype->componentIDs.begin(), destArchetype->componentIDs.end(), compID);
+            size_t destIndex = std::distance(destArchetype->componentIDs.begin(), destIt);
+
+            // Calculate exact memory addresses
+            void* srcPtr = srcArchetype->chunks[srcChunk].componentBuffers[srcIndex].data() + (srcLane * stride);
+            void* destPtr = destArchetype->chunks[destChunk].componentBuffers[destIndex].data() + (destLane * stride);
+
+            // Blistering fast silicon copy
+            std::memcpy(destPtr, srcPtr, stride);
+        }
+    }
+
+    void InjectComponentData(Archetype* destArchetype, uint32_t compID, void* data, 
+                                uint32_t destChunk, uint32_t destLane) {
+        
+        // Find the array index for the newly added component
+        auto it = std::find(destArchetype->componentIDs.begin(), destArchetype->componentIDs.end(), compID);
+        size_t destIndex = std::distance(destArchetype->componentIDs.begin(), it);
+        size_t stride = destArchetype->componentStrides[destIndex];
+
+        // Inject the new struct data directly into the byte buffer
+        void* destPtr = destArchetype->chunks[destChunk].componentBuffers[destIndex].data() + (destLane * stride);
+        std::memcpy(destPtr, data, stride);
+    }
+
+    void FillHoleInChunk(Archetype* srcArchetype, uint32_t srcChunk, uint32_t srcLane) {
+        // We don't do swap-and-pop on the empty archetype
+        if (srcArchetype->signature == 0) return; 
+
+        ArchetypeChunk& chunk = srcArchetype->chunks[srcChunk];
+        uint32_t lastLane = chunk.activeCount - 1;
+
+        // If the entity we moved wasn't the very last one in the chunk, we have a hole to fill
+        if (srcLane != lastLane) {
+            
+            // 1. Move the data of the LAST entity into the HOLE
+            for (size_t i = 0; i < srcArchetype->componentIDs.size(); ++i) {
+                size_t stride = srcArchetype->componentStrides[i];
+                
+                void* holePtr = chunk.componentBuffers[i].data() + (srcLane * stride);
+                void* lastPtr = chunk.componentBuffers[i].data() + (lastLane * stride);
+                
+                std::memcpy(holePtr, lastPtr, stride);
+            }
+
+            // 2. Move the Reverse Lookup Entity ID
+            Entity movedEntity = chunk.entities[lastLane];
+            chunk.entities[srcLane] = movedEntity;
+
+            // 3. Update the Global Directory so the ECS knows the moved entity has a new lane!
+            entityDirectory[movedEntity].laneIndex = srcLane;
+        }
+
+        // Shrink the active count (destroying the now-duplicated last lane)
+        chunk.activeCount--;
+    }
+
+public:
+    ECS() {
+        entityDirectory.resize(MAX_ENTITIES);
+    }
+
+    Entity CreateEntity() {
+        Entity e = nextEntity++;
+        // Initialize the entity in the "Empty" archetype
+        entityDirectory[e] = {0, 0, 0}; 
+        return e;
+    }
+
+    // Handles writing logical struct data into memory (AoS or AoSoA lane)
+    template <typename T>
+    void SetComponent(Entity e, const T& component) {
+        if constexpr (ComponentTrait<T>::backend == StorageBackend::Archetype) {
+            // ROUTE TO ARCHEPTYPE
+            constexpr uint32_t globalID = GetGlobalComponentID<T>(); // Use Global ID
+            EntityRecord& record = entityDirectory[e];
+            Archetype* arch = archetypeManager.GetArchetype(record.archetypeSignature);
+            
+            // To be implemented: Casting the type-erased std::byte array back to T
+            // WriteToArchetypeChunk(arch, record.chunkIndex, record.laneIndex, globalID, component);
+
+        } else {
+            // ROUTE TO SPARSE SET
+            constexpr uint32_t sparseID = GetSparseComponentID<T>(); // USE SPARSE ID!
+            uint32_t denseIndex = std::get<sparseID>(sparseManager.sparseArrays)[e];
+
+            if constexpr (ComponentStorageTrait<T>::is_aosoa) {
+                uint32_t chunkIndex = denseIndex / 8;
+                uint32_t laneIndex = denseIndex % 8;
+                auto& chunk = std::get<sparseID>(sparseManager.denseArrays)[chunkIndex];
+                
+                // Scatter the data into the SIMD lanes
+                chunk.velX[laneIndex] = component.velocity.x;
+                chunk.velY[laneIndex] = component.velocity.y;
+                chunk.velZ[laneIndex] = component.velocity.z;
+                chunk.mass[laneIndex] = component.mass;
+                chunk.friction[laneIndex] = component.friction;
+                chunk.isStatic[laneIndex] = component.isStatic;
+            } else {
+                std::get<sparseID>(sparseManager.denseArrays)[denseIndex] = component;
+            }
+        }
+    }
+
+    void MoveEntityToNewArchetype(Entity e, uint32_t newComponentID, void* componentData) {
+        EntityRecord& record = entityDirectory[e];
+        Archetype* currentArchetype = archetypeManager.GetArchetype(record.archetypeSignature);
+
+        // 1. Traverse the Graph
+        Archetype* destinationArchetype = archetypeManager.GetNextArchetype_Add(currentArchetype, newComponentID);
+
+        // 2. Allocate space in the destination archetype's chunks
+        uint32_t destChunkIndex;
+        uint32_t destLaneIndex;
+        AllocateLane(e, destinationArchetype, destChunkIndex, destLaneIndex);
+
+        // 3. Move the data (memcpy the old components to the new chunk)
+        MoveEntityData(currentArchetype, record.chunkIndex, record.laneIndex,
+                    destinationArchetype, destChunkIndex, destLaneIndex);
+
+        // 4. Inject the new component data into the newly allocated lane
+        InjectComponentData(destinationArchetype, newComponentID, componentData, destChunkIndex, destLaneIndex);
+
+        // 5. Swap and Pop the hole left in the old archetype
+        FillHoleInChunk(currentArchetype, record.chunkIndex, record.laneIndex);
+
+        // 6. Update the central directory so the engine knows where the entity lives now
+        record.archetypeSignature = destinationArchetype->signature;
+        record.chunkIndex = destChunkIndex;
+        record.laneIndex = destLaneIndex;
+    }
+
+    template <typename T>
+    void AddComponent(Entity e, T component) {
+        // C++17/26 Compile-Time Routing
+        if constexpr (ComponentTrait<T>::backend == StorageBackend::Archetype) {
+            constexpr uint32_t globalID = GetGlobalComponentID<T>();
+            // 1. ROUTE TO ARCHEPTYPE GRAPH
+            MoveEntityToNewArchetype(e, globalID, &component);
+        } else {
+            // 2. ROUTE TO SPARSE SET (lightning-fast sparse set insertion)
+            constexpr uint32_t sparseID = GetSparseComponentID<T>();
+            auto& denseArray = std::get<sparseID>(sparseManager.denseArrays);
+            auto& sparseArray = std::get<sparseID>(sparseManager.sparseArrays);
+
+            // 1. If it already has the component, just update the dense data
+            if (sparseArray[e] != static_cast<uint32_t>(-1)) {
+                SetComponent(e, component);
+            } 
+            // 2. Otherwise, pack it tightly at the end of the dense array
+            else {
+                if constexpr (ComponentStorageTrait<T>::is_aosoa) {
+                    // Chunk Packing Logic. Ensure a chunk has free lanes before inserting.
+                    if (denseArray.empty() || denseArray.back().activeCount == 8) {
+                        denseArray.push_back(typename ComponentStorageTrait<T>::StorageType::value_type{});
+                    }
+                    
+                    uint32_t chunkIndex = denseArray.size() - 1;
+                    uint32_t laneIndex = denseArray.back().activeCount++;
+                    
+                    sparseArray[e] = (chunkIndex * 8) + laneIndex;
+                    SetComponent(e, component); // Write data into the newly reserved lane
+                } else {
+                    // Standard AoS Packing
+                    uint32_t newIndex = static_cast<uint32_t>(denseArray.size());
+                    denseArray.push_back(component);
+                    sparseArray[e] = newIndex; // Map the Entity to its packed index
+                }
+            }
+        }
+    }
+
+    template <typename T>
+    // Returns a Reference for AoS, but a Copy for AoSoA to satisfy C++ return deduction
+    auto GetComponent(Entity e) -> std::conditional_t<ComponentStorageTrait<T>::is_aosoa, T, T&> {
+        if constexpr (ComponentTrait<T>::backend == StorageBackend::Archetype) {
+            // --- 1. ROUTE TO ARCHETYPE GRAPH ---
+            constexpr uint32_t globalID = GetGlobalComponentID<T>(); // Use Global ID
+            EntityRecord& record = entityDirectory[e];
+            Archetype* arch = archetypeManager.GetArchetype(record.archetypeSignature);
+            
+            // Find the byte offset for this specific component type within the archetype
+            // (You will need to calculate this based on componentStrides in the Archetype class)
+            // For now, this is the placeholder where you cast the type-erased std::byte memory back to T:
+            // return ReadFromArchetypeChunk<T>(arch, record.chunkIndex, record.laneIndex, globalID);
+            
+            throw std::runtime_error("Archetype chunk reading not yet implemented!");
+        } else {
+            // --- 2. ROUTE TO SPARSE SET ---
+            constexpr uint32_t sparseID = GetSparseComponentID<T>(); // USE SPARSE ID!
+
+            // Look up where this entity's data lives in the packed array
+            uint32_t denseIndex = std::get<sparseID>(sparseManager.sparseArrays)[e];
+
+            if constexpr (ComponentStorageTrait<T>::is_aosoa) {
+                // AoSoA Path: Calculate Chunk and Lane
+                uint32_t chunkIndex = denseIndex / 8;
+                uint32_t laneIndex = denseIndex % 8;
+                auto& chunk = std::get<sparseID>(sparseManager.denseArrays)[chunkIndex];
+                
+                // For UI/Single Entity logic, we reconstruct the POD struct on the fly: Gather the data from the SIMD lanes into a temporary struct
+                T proxy;
+                proxy.velocity.x = chunk.velX[laneIndex];
+                proxy.velocity.y = chunk.velY[laneIndex];
+                proxy.velocity.z = chunk.velZ[laneIndex];
+                proxy.mass = chunk.mass[laneIndex];
+                proxy.friction = chunk.friction[laneIndex];
+                proxy.isStatic = chunk.isStatic[laneIndex];
+                return proxy; 
+            } else {
+                // AoS Path: Standard direct reference return to the tightly packed data
+                return std::get<sparseID>(sparseManager.denseArrays)[denseIndex];
+            }
+        }
+    }
+
+    template <typename T>
+    bool HasComponent(Entity e) {
+        if constexpr (ComponentTrait<T>::backend == StorageBackend::Archetype) {
+            constexpr uint32_t globalID = GetGlobalComponentID<T>(); // Use Global ID
+            // Check the 64-bit archetype signature in the entity directory
+            return (entityDirectory[e].archetypeSignature & (1ULL << globalID)) != 0;
+        } else {
+            constexpr uint32_t sparseID = GetSparseComponentID<T>(); // USE SPARSE ID!
+            // Check if the sparse map has a valid index
+            return std::get<sparseID>(sparseManager.sparseArrays)[e] != static_cast<uint32_t>(-1);
+        }
+    }
+
+    // --- WRITE-BACK PROXY STRATEGY FOR UI: RENDER THE ENTIRE UI FOR AN ENTITY ---
+    void DrawInspector(Entity e) {
+        if (HasComponent<TransformComponent>(e)) {
+            // AoS returns a direct reference, ImGui modifies it directly in memory
+            auto& transform = GetComponent<TransformComponent>(e);
+            DrawComponentUI(transform, "Transform");
+        }
+        
+        if (HasComponent<PhysicsComponent>(e)) {
+            // AoSoA returns a copy. ImGui modifies the contiguous struct layout.
+            auto physicsCopy = GetComponent<PhysicsComponent>(e);
+            DrawComponentUI(physicsCopy, "Physics");
+            
+            // Write the modified data back into the scattered SIMD lanes
+            SetComponent(e, physicsCopy); 
+        }
+
+        if (HasComponent<ParticleEmitterComponent>(e)) {
+            auto& emitter = GetComponent<ParticleEmitterComponent>(e);
+            DrawComponentUI(emitter, "Particle Emitter");
+        }
+    }
+};
