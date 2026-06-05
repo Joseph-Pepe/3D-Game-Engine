@@ -194,6 +194,22 @@ struct YieldToJobSystem {
 // ==================================================================================
 // 2. STACKFUL FIBERS (Deep Engine Logic & Fiber Pooling)
 // ==================================================================================
+/*
+    - A fiber is a user-mode thread with its own manually allocated, contiguou block of memory (e.g., 64KB to 128KB) to act as a real hardware stack.
+    - Used for loading assets from SSD, AI behavior trees, rendering graph evaluations, and anywhere you need to yield deep inside middleware or third-party libraries (like Havok or FMOD).
+    - When a job hits a lock, you don't return. 
+    - When a fiber yields, the CPU saves its hardware registers (RSP, RIP, etc.) and seamlessly swaps to another fiber's stack.
+    
+      1. instead you drop down to assembly.
+      2. save the CPU registers .
+      3. swap the stack pointer (RSP on x64) to a new fiber.
+      4. resume execution.
+
+    - Pooling fibers allows us to bypass the OS Virtual Memory Manager.
+    - Skips the massive kernel overhead of mapping and unmapping 64KB stack pages.
+    - Once a pool is warmed up, a fiber context switch drops to less than 50 nanoseconds (i.e., lock-free stackful context switch).
+
+*/
 
 enum class FiberState : uint32_t {
     Ready,
