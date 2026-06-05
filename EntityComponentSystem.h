@@ -131,6 +131,44 @@ constexpr uint32_t GetComponentID() {
 }
 
 // ==================================================================================
+// THE AOS & AoSoA CHUNK COMPONENT
+// ==================================================================================
+
+// 256 Entities per chunk. Must be a multiple of the SIMD width (8 for AVX2).
+constexpr uint32_t ENTITIES_PER_CHUNK = 256; 
+
+// alignas(64) ensures the chunk starts on a hardware cache-line boundary
+struct alignas(64) PhysicsChunk {
+    // How many entities in this specific chunk are currently alive? (0 to 256)
+    uint32_t activeCount = 0; 
+
+    // --- The Internal SoA Data ---
+    // Because ENTITIES_PER_CHUNK is 256 (a multiple of 8), we don't need to worry about the SIMD Padding Trap!
+    
+    // Position (Vector3)
+    alignas(32) float posX[ENTITIES_PER_CHUNK];
+    alignas(32) float posY[ENTITIES_PER_CHUNK];
+    alignas(32) float posZ[ENTITIES_PER_CHUNK];
+
+    // Velocity (Vector3)
+    alignas(32) float velX[ENTITIES_PER_CHUNK];
+    alignas(32) float velY[ENTITIES_PER_CHUNK];
+    alignas(32) float velZ[ENTITIES_PER_CHUNK];
+};
+
+// A single instance of this struct represents 8 discrete physical objects! alignas(32) ensures the starting address never straddles a cache line.
+struct alignas(32) PhysicsChunk8 {
+    // Tightly packed arrays. Perfectly sized to instantly load into __m256 registers.
+    float velocityX[8] = {0};
+    float velocityY[8] = {0};
+    float velocityZ[8] = {0};
+    
+    float mass[8] = {1.0f};
+
+    // If an object is static, it shouldn't be in the physics chunk at all!
+};
+
+// ==================================================================================
 // 4. THE ECS REGISTRY (Sparse Set / SoA Storage)
 // ==================================================================================
 
