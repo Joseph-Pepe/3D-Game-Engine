@@ -24,9 +24,9 @@
 
 #if __has_include(<meta>) && (defined(__cplusplus) && __cplusplus > 202302L || defined(_MSVC_LANG) && _MSVC_LANG > 202302L)
     #include <meta>        // Required for C++26 reflection
-    #define ENGINE_HAS_CXX26_META_REFLECION 1
+    #define ENGINE_HAS_CXX26_META_REFLECTION 1
 #else
-    #define ENGINE_HAS_CXX26_META_REFLECION 0
+    #define ENGINE_HAS_CXX26_META_REFLECTION 0
 #endif
 
 // ==================================================================================
@@ -222,7 +222,7 @@ public:
     [[nodiscard]] ENGINE_FORCE_INLINE T* Allocate(size_t count) {
         static_assert((Align & (Align - 1)) == 0, "Alignment must be a power of 2");
 
-        #if ENGINE_HAS_CXX26_META_REFLECION
+        #if ENGINE_HAS_CXX26_META_REFLECTION
             constexpr std::string_view typeName = std::meta::identifier_of(^T);
         #endif
 
@@ -246,7 +246,7 @@ public:
         // 5. Calculate the final aligned pointer
         uintptr_t alignedAddress = currentAddress + padding;
 
-        #if ENGINE_ENABLE_MEMORY_PROFILING && ENGINE_HAS_CXX26_META_REFLECION
+        #if ENGINE_ENABLE_MEMORY_PROFILING && ENGINE_HAS_CXX26_META_REFLECTION
             MemoryProfiler::TrackAllocation(typeName, totalAllocationSize);
         #endif
 
@@ -260,7 +260,7 @@ public:
     [[nodiscard]] ENGINE_FORCE_INLINE T* AllocatePadded(size_t count, size_t simdWidthElements = 8) {
         static_assert((Align & (Align - 1)) == 0, "Alignment must be a power of 2");
 
-        #if ENGINE_HAS_CXX26_META_REFLECION
+        #if ENGINE_HAS_CXX26_META_REFLECTION
             constexpr std::string_view typeName = std::meta::identifier_of(^T);
         #endif
         
@@ -286,7 +286,7 @@ public:
         uintptr_t alignedAddress = currentAddress + padding;
         m_offset += totalAllocationSize;
 
-        #if ENGINE_ENABLE_MEMORY_PROFILING && ENGINE_HAS_CXX26_META_REFLECION
+        #if ENGINE_ENABLE_MEMORY_PROFILING && ENGINE_HAS_CXX26_META_REFLECTION
             MemoryProfiler::TrackAllocation(typeName, totalAllocationSize);
         #endif
 
@@ -352,7 +352,7 @@ public:
     [[nodiscard]] ENGINE_FORCE_INLINE T* Allocate(size_t count) {
         static_assert((Align & (Align - 1)) == 0, "Alignment must be a power of 2");
 
-        #if ENGINE_HAS_CXX26_META_REFLECION
+        #if ENGINE_HAS_CXX26_META_REFLECTION
             // C++26 Reflection: Introspect the type at compile-time to get its string identifier
             constexpr std::string_view typeName = std::meta::identifier_of(^T);
         #endif 
@@ -385,7 +385,7 @@ public:
         ));
 
         // Now your telemetry subsystem knows exactly what is being allocated natively
-        #if ENGINE_ENABLE_MEMORY_PROFILING && ENGINE_HAS_CXX26_META_REFLECION
+        #if ENGINE_ENABLE_MEMORY_PROFILING && ENGINE_HAS_CXX26_META_REFLECTION
             MemoryProfiler::TrackAllocation(typeName, totalAllocationSize);
         #endif
         
@@ -402,9 +402,9 @@ public:
     [[nodiscard]] ENGINE_FORCE_INLINE T* AllocatePadded(size_t count, size_t simdWidthElements = 8) {
         static_assert((Align & (Align - 1)) == 0, "Alignment must be a power of 2");
 
-        #if ENGINE_HAS_CXX26_META_REFLECION
+        #if ENGINE_HAS_CXX26_META_REFLECTION
             // C++26 Reflection: Introspect the type at compile-time to get its string identifier
-            constexpr auto typeName = std::meta::identifier_of(^T);
+            constexpr std::string_view typeName = std::meta::identifier_of(^T);
         #endif
         
         // 1. CAPACITY PADDING: Round the requested count UP to the nearest multiple of the SIMD width (e.g., 8 for AVX2), so it does not read past the end of the allocation preventing memory corruption.
@@ -436,7 +436,7 @@ public:
         ));
 
         // Now your telemetry subsystem knows exactly what is being allocated natively
-        #if ENGINE_ENABLE_MEMORY_PROFILING && ENGINE_HAS_CXX26_META_REFLECION
+        #if ENGINE_ENABLE_MEMORY_PROFILING && ENGINE_HAS_CXX26_META_REFLECTION
             MemoryProfiler::TrackAllocation(typeName, totalAllocationSize);
         #endif
 
