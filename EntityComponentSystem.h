@@ -5,6 +5,7 @@
 #include <string_view>
 #include <type_traits>
 #include <print>
+#include <immintrin.h> // AVX and AVX2 intrinsics
 
 // Engine Dependencies
 #include "Math.h"
@@ -156,17 +157,61 @@ struct alignas(64) PhysicsChunk {
     alignas(32) float velZ[ENTITIES_PER_CHUNK];
 };
 
-// A single instance of this struct represents 8 discrete physical objects! alignas(32) ensures the starting address never straddles a cache line.
+// A single instance of this struct represents 8 discrete physical objects! alignas(32) ensures the memory address is perfectly aligned for AVX load instructions
 struct alignas(32) PhysicsChunk8 {
+    // Number of active entities in this specific chunk (0 to 8)
+    uint32_t activeCount = 0;
+
     // Tightly packed arrays. Perfectly sized to instantly load into __m256 registers.
-    float velocityX[8] = {0};
-    float velocityY[8] = {0};
-    float velocityZ[8] = {0};
+
+    // --- Position (8 entities) ---
+    float posX[8] = {0};
+    float posY[8] = {0};
+    float posZ[8] = {0};
+
+    // --- Velocity (8 entities) ---
+    float velX[8] = {0};
+    float velY[8] = {0};
+    float velZ[8] = {0};
     
+    // --- Mass (8 entities) ---
     float mass[8] = {1.0f};
 
     // If an object is static, it shouldn't be in the physics chunk at all!
 };
+
+// ==================================================================================
+// AOS & AoSoA COMPONENTS
+// ==================================================================================
+/*
+    [AOS (Array of Structs)]
+
+        - Used for simple logical components.
+        - e.g., gameplay logic, AI, and player input.
+
+    [AoSoA (Array of Structs of Arrays)]
+
+        - Used for heavy math/physics components.
+        - e.g., physics updates with 100% pure silicon throughput.
+*/
+
+// 1. Define a trait to determine how a component is stored (AOS or AoSoA)
+template <typename T>
+struct ComponentStorageTrait {
+    // Default to standard AoS (Array of Structs)
+    using StorageType = std::vector<T>;
+    static constexpr bool is_aosoa = false;
+};
+
+// 2. Specialize the trait for your heavy math components
+template <>
+struct ComponentStorageTrait<PhysicsComponent> {
+    // Override storage to use your AoSoA chunks
+    using StorageType = std::vector<PhysicsChunk8>;
+    static constexpr bool is_aosoa = true;
+};
+
+
 
 // ==================================================================================
 // 4. THE ECS REGISTRY (Sparse Set / SoA Storage)
@@ -180,10 +225,10 @@ private:
     // C++26: Pack Indexing allows us to auto-generate vectors for every component in the tuple
     template <typename... Types>
     struct Storage {
-        // 1. DENSE ARRAYS: The actual packed component data. (No gaps!)
-        std::tuple<std::vector<Types>...> denseArrays;
+        // DENSE ARRAYS: Now dynamically resolves to std::vector<T> OR std::vector<Chunk8>, the actual packed component data (No gaps!) 
+        std::tuple<typename ComponentStorageTrait<Types>::StorageType...> denseArrays;
         
-        // 2. SPARSE ARRAYS: Maps Entity ID -> Dense Array Index.
+        // 2. SPARSE ARRAYS: Maps Entity ID -> logical dense index (0, 1, 2, 3...)
         // If an entity doesn't have the component, its value is -1.
         std::tuple<std::vector<uint32_t>...> sparseArrays;
         
@@ -234,14 +279,31 @@ public:
     }
 
     template <typename T>
-    T& GetComponent(Entity e) {
+    decltype(auto) GetComponent(Entity e) {
         constexpr uint32_t compID = GetComponentID<T>();
         
-        // 1. Look up where this entity's data lives in the packed array
+        // Look up where this entity's data lives in the packed array
         uint32_t denseIndex = std::get<compID>(componentStorage.sparseArrays)[e];
-        
-        // 2. Return the tightly packed data
-        return std::get<compID>(componentStorage.denseArrays)[denseIndex];
+
+        if constexpr (ComponentStorageTrait<T>::is_aosoa) {
+            // AoSoA Path: Calculate Chunk and Lane
+            uint32_t chunkIndex = denseIndex / 8;
+            uint32_t laneIndex = denseIndex % 8;
+            
+            auto& chunkArray = std::get<compID>(componentStorage.denseArrays);
+            
+            // Return a proxy object or extract a temporary scalar struct.
+            // For UI/Single Entity logic, we reconstruct the POD struct on the fly:
+            T proxy;
+            proxy.velocity.x = chunkArray[chunkIndex].velocityX[laneIndex];
+            proxy.velocity.y = chunkArray[chunkIndex].velocityY[laneIndex];
+            proxy.velocity.z = chunkArray[chunkIndex].velocityZ[laneIndex];
+            proxy.mass = chunkArray[chunkIndex].mass[laneIndex];
+            return proxy; 
+        } else {
+            // AoS Path: Standard direct reference return to the tightly packed data
+            return std::get<compID>(componentStorage.denseArrays)[denseIndex];
+        }
     }
 
     template <typename T>
