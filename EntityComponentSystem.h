@@ -6,6 +6,9 @@
 #include <type_traits>
 #include <print>
 #include <immintrin.h> // AVX and AVX2 intrinsics
+#include <memory>
+#include <cstdint>
+#include <cstddef>
 
 // Engine Dependencies
 #include "Math.h"
@@ -226,8 +229,12 @@ struct ComponentStorageTrait<PhysicsComponent> {
 
 
 // ==================================================================================
-// 4. THE ECS REGISTRY (Sparse Set / SoA / AoSoA Storage)
+// 4. THE ECS REGISTRY (SPARSE SET ARCHITECTURE: SoA / AoSoA Storage)
 // ==================================================================================
+/*
+    - Great for adding and removing components on the fly.
+    - Cache misses when dealing with multiple components that need to run because these components are stored in isolated arrays, independent of eachother.
+*/
 
 using Entity = uint32_t;
 constexpr Entity MAX_ENTITIES = 100000;
@@ -385,3 +392,163 @@ public:
         }
     }
 };
+
+// ==================================================================================
+// 5. ECS ARCHETYPE MEMORY MODEL
+// ==================================================================================
+/*
+    - An archetype is a container of chunks that stores a fixed number of entities, and its components in tightly packed, parallel arrays.
+    - An entity only needs one entry in a central directory.
+    - This directory knows which archetype the entity belongs to, and where it sits inside that archetype's memory chunks.
+    - It groups entities with the exact same component signature into the same chunks of memory (i.e., tightly packed shared memory blocks).
+    - CPU prefetcher loads both components into L1/L2 cache seamlessly.
+    - Because an entity's components are strictly packed together in a chunk, you must move the entire entity to a different archetype.
+    
+    - [Transform] = to move the Object
+    - [Physics] = the velocity
+    - e.g., Archetype A (Transform + Physics) where [Pos, Pos, Pos] and [Vel, Vel, Vel] are packed side-by-side.
+    - e.g., Archetype B (Transform + Physics + ParticleEmitter) stored in a completely separate memory block.
+*/
+
+// Max unique component types in the engine
+constexpr uint32_t MAX_COMPONENTS = 64;
+
+using ComponentMask = uint64_t; // Supports up to 64 unique component types
+
+// The central map for every alive entity
+struct EntityRecord {
+    ComponentMask archetypeSignature; // e.g., 0b011 (Transform + Physics)
+    uint32_t chunkIndex;              // Which memory block in the Archetype?
+    uint32_t laneIndex;               // Which row inside that block?
+};
+
+// Global lookup table
+std::vector<EntityRecord> entityDirectory(MAX_ENTITIES);
+
+// A single block of memory holding 256 entities of the EXACT same signature
+struct ArchetypeChunk {
+    uint32_t activeCount = 0;
+    
+    // Type-erased memory for the components. 
+    // e.g., If this archetype has Transform and Physics, this array contains:
+    // [Transform x 256] followed by [PhysicsChunk8 x 32]
+    std::vector<std::vector<std::byte>> componentData; 
+};
+
+class Archetype {
+public:
+    ComponentMask signature;
+    std::vector<uint32_t> componentIDs; // Which components are in this archetype?
+    std::vector<size_t> componentStrides; // Size of each component (AoS or AoSoA lane)
+    
+    // The actual memory blocks
+    std::vector<ArchetypeChunk> chunks;
+
+    // ==========================================
+    // EDGE GRAPH
+    // ==========================================
+    /*
+        - Archetypes are treated as nodes in a state machine.
+        - Edge: pre-computed pointer to the next archetype.
+        - O(1) lookup: raw array of 64 pointers for our edges.
+    */
+
+    // If an entity in this archetype adds Component N, follow addEdges[N]
+    std::array<Archetype*, MAX_COMPONENTS> addEdges{nullptr};
+    
+    // If an entity in this archetype removes Component N, follow removeEdges[N]
+    std::array<Archetype*, MAX_COMPONENTS> removeEdges{nullptr};
+
+    Archetype(ComponentMask sig) : signature(sig) {}
+
+    Archetype(ComponentMask sig, std::vector<uint32_t> ids, std::vector<size_t> strides) 
+        : signature(sig), componentIDs(ids), componentStrides(strides) {}
+};
+
+#include <unordered_map>
+
+class ArchetypeManager {
+private:
+    // Owns the memory of all unique archetypes in the engine
+    std::vector<std::unique_ptr<Archetype>> allArchetypes;
+    
+    // Quick lookup to see if an archetype already exists anywhere in the world
+    std::unordered_map<ComponentMask, Archetype*> archetypeDirectory;
+
+    // Helper to get or create an archetype based on a bitmask signature
+    Archetype* GetOrCreateArchetype(ComponentMask targetSignature) {
+        // 1. Does it already exist?
+        auto it = archetypeDirectory.find(targetSignature);
+        if (it != archetypeDirectory.end()) {
+            return it->second;
+        }
+
+        // 2. If not, allocate it, initialize its memory chunks, and register it.
+        auto newArchetype = std::make_unique<Archetype>(targetSignature);
+        Archetype* ptr = newArchetype.get();
+        
+        // (You would initialize componentIDs and Strides here based on the mask)
+        
+        archetypeDirectory[targetSignature] = ptr;
+        allArchetypes.push_back(std::move(newArchetype));
+        
+        return ptr;
+    }
+
+public:
+    ArchetypeManager() {
+        // Always create the "Empty" archetype (Entity with no components) at boot
+        GetOrCreateArchetype(0);
+    }
+
+    // ==========================================
+    // GRAPH TRAVERSAL: The O(1) Transition
+    // ==========================================
+    Archetype* GetNextArchetype_Add(Archetype* current, uint32_t componentID) {
+        // FAST PATH: The edge is already cached. O(1) return.
+        if (current->addEdges[componentID] != nullptr) {
+            return current->addEdges[componentID];
+        }
+
+        // SLOW PATH: First time this transition has ever happened.
+        // Calculate what the new signature should be.
+        ComponentMask newSignature = current->signature | (1ULL << componentID);
+
+        // Find or create the destination archetype
+        Archetype* nextArchetype = GetOrCreateArchetype(newSignature);
+
+        // CACHE THE EDGES (Link the graph in both directions)
+        current->addEdges[componentID] = nextArchetype;
+        nextArchetype->removeEdges[componentID] = current;
+
+        return nextArchetype;
+    }
+};
+
+void ECS::AddComponentToEntity(Entity e, uint32_t newComponentID, void* componentData) {
+    EntityRecord& record = entityDirectory[e];
+    Archetype* currentArchetype = archetypeManager.GetArchetype(record.archetypeSignature);
+
+    // 1. Traverse the Graph
+    Archetype* destinationArchetype = archetypeManager.GetNextArchetype_Add(currentArchetype, newComponentID);
+
+    // 2. Allocate space in the destination archetype's chunks
+    uint32_t destChunkIndex;
+    uint32_t destLaneIndex;
+    AllocateLane(destinationArchetype, destChunkIndex, destLaneIndex);
+
+    // 3. Move the data (memcpy the old components to the new chunk)
+    MoveEntityData(currentArchetype, record.chunkIndex, record.laneIndex,
+                   destinationArchetype, destChunkIndex, destLaneIndex);
+
+    // 4. Inject the new component data into the newly allocated lane
+    InjectComponentData(destinationArchetype, newComponentID, componentData, destChunkIndex, destLaneIndex);
+
+    // 5. Swap and Pop the hole left in the old archetype
+    FillHoleInChunk(currentArchetype, record.chunkIndex, record.laneIndex);
+
+    // 6. Update the central directory so the engine knows where the entity lives now
+    record.archetypeSignature = destinationArchetype->signature;
+    record.chunkIndex = destChunkIndex;
+    record.laneIndex = destLaneIndex;
+}
