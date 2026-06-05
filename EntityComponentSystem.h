@@ -175,7 +175,7 @@ struct alignas(32) PhysicsChunk8 {
     alignas(32) float velZ[8] = {0};
     
     // --- Mass (8 entities) --- Additional physics data
-    float mass[8] = {1.0f};
+    alignas(32) float mass[8] = {1.0f};
 
     // If an object is static, it shouldn't be in the physics chunk at all!
 };
