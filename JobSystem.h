@@ -265,6 +265,13 @@ struct alignas(8) FiberJob {
 // --- THE UNIFIED SCHEDULER ---
 // std::hardware_destructive_interference_size: asks the target hardware how large its cache is, so its dynamically scaling to the CPU architecture (Intel/AMD x86, M1/M2/M3 ARM: 128-byte cache).
 class alignas(CACHE_CHUNK_SIZE) WorkStealingQueue {
+    // ======================
+    // WorkStealingQueue
+    // ======================
+    /*
+        - Must remain incredibly dumb and blindingly fast.
+        - It should only ever contain jobs that are 100% ready to execute.
+    */
 private:
     alignas(CACHE_CHUNK_SIZE) std::atomic<int64_t> top{0};    // Thieves steal from this cache line
     alignas(CACHE_CHUNK_SIZE) std::atomic<int64_t> bottom{0}; // The Owner pushes/pops from this cache line
@@ -365,6 +372,64 @@ public:
         return nullptr; // Failed to steal, or empty
     }
 };
+
+// ==================================================================================
+// DIRECTED ACYCLIC GRAPHS (DAGs) CONTINUATION AWAITER (Zero-Allocation Dependency Graph)
+// ==================================================================================
+/*
+    - Are handled via Atomic Continuations living outside the queue.
+    - co_await: C++ compiler will write the DAG state machine for us.
+    - Coroutine's local memory frame enables zero heap allocations, and zero mutex locks.
+    - Parent jobs passes a pointer to its own counter to its descendent, and goes to sleep.
+    - As each descendent finishes, it decrements the counter.
+    - The specific CPU thread that drops the counter to 0 is guaranteed to be the final one to finish, and pushes the parent job back into the WorkStealingQueue.
+*/
+// intercepts the co_await call and automatically allocates the atomic counter perfectly aligned in the parent's coroutine frame.
+template <typename F>
+struct DispatchAwaiter {
+    uint32_t dataCount;
+    uint32_t chunkSize;
+    F task;
+    
+    // MAGIC: Because this struct is part of a co_await expression, the compiler physically allocates this atomic counter INSIDE the parent Coroutine's 
+    // pooled memory block! Zero heap allocation.
+    alignas(CACHE_CHUNK_SIZE) std::atomic<uint32_t> unresolvedDependencies;
+
+    bool await_ready() const noexcept { 
+        return dataCount == 0; // If there's no work, don't suspend at all.
+    }
+
+    // DECLARE ONLY: The compiler doesn't know about g_JobSystem methods yet!
+    void await_suspend(std::coroutine_handle<> parentContinuation);
+
+    void await_resume() const noexcept {
+        // When this runs, all children are 100% finished.
+    }
+};
+
+/*
+EngineJob PhysicsSystemUpdate() {
+    // 1. Spawns 100 chunks of SIMD velocity math across 4 CPU cores.
+    // The physics system SUSPENDS here. It does not block the thread.
+    // The CPU core will immediately grab another job from the WorkStealingQueue.
+    co_await g_JobSystem.DispatchAsync(100000, 1000, [](uint32_t start, uint32_t end) {
+        // AVX2 Velocity Integration
+        UpdateVelocities(start, end); 
+    });
+
+    // 2. We only reach this line when ALL 100 chunks have completed.
+    // The DAG has resolved. Now we can safely detect collisions!
+    co_await g_JobSystem.DispatchAsync(100000, 1000, [](uint32_t start, uint32_t end) {
+        // Broadphase Collision Detection
+        DetectCollisions(start, end);
+    });
+
+    // 3. Resolve the graph
+    ResolveConstraints();
+
+    co_return;
+}
+*/
 
 // ==================================================================================
 // 4. THE MASTER THREAD POOL & FIBER POOL
@@ -759,8 +824,61 @@ public:
         SwitchToFiber(tl_mainWorkerFiber);
     }
 
-    // Pass 'task' BY VALUE. The lambda closure is tiny, copying it into 
-    // the coroutine frame prevents the use-after-free dangling reference.
+    // ==================================================================================
+    // THE DESCENDENT WORKER: Lock-Free Graph Resolution
+    // ==================================================================================
+    template <typename F>
+    EngineJob CreateChildDAGJob(uint32_t start, uint32_t end, F task, std::atomic<uint32_t>* parentCounter, std::coroutine_handle<> parentContinuation) {
+        
+        // 1. Execute the heavy SIMD payload (e.g., Calculate Velocity)
+        task(start, end); 
+
+        // 2. THE DAG RESOLUTION: memory_order_acq_rel (Acquire/Release)
+        // It guarantees that the thread hitting '0' sees all the RAM writes (velocities) calculated by the other 99 threads across the motherboard.
+        if (parentCounter->fetch_sub(1, std::memory_order_acq_rel) == 1) {
+            
+            // If the result WAS 1, and is now 0, I am the absolute last chunk to finish!
+            // Therefore, I am responsible for waking up the parent job.
+            
+            // Push the parent back into the queue so it can run "Resolve Physics"
+            Schedule(EncodeCoroutineTask(parentContinuation));
+        }
+
+        // Auto-destroy this child coroutine frame
+        co_return; 
+    }
+
+    // User-facing API wrapper
+    template <typename F>
+    DispatchAwaiter<F> DispatchAsync(uint32_t dataCount, uint32_t chunkSize, F task) {
+        return DispatchAwaiter<F>{dataCount, chunkSize, task, 0};
+    }
+
+    // --- HARDWARE WAKE-UP ROUTINE ---
+    void WakeWorkers(uint32_t chunksDispatched) {
+        int asleep = sleepingThreads.load(std::memory_order_relaxed);
+        
+        if (asleep > 0) {
+            wakeSignal.fetch_add(1, std::memory_order_release);
+
+            int wakeCount = std::min(asleep, (int)chunksDispatched);
+
+            if (wakeCount >= asleep) {
+                wakeSignal.notify_all(); 
+            } else {
+                for (int i = 0; i < wakeCount; ++i) {
+                    wakeSignal.notify_one(); 
+                }
+            }
+
+            uint64_t airlockStart = __rdtsc();
+            while (__rdtsc() - airlockStart < 10000) {
+                _mm_pause();  
+            }
+        }
+    }
+
+    // Pass 'task' BY VALUE. The lambda closure is tiny, copying it into the coroutine frame prevents the use-after-free dangling reference.
     // Pass a raw pointer to a stack-allocated atomic. Zero heap overhead!
     template <typename F>
     EngineJob CreateDispatchTask(uint32_t start, uint32_t end, F task, std::atomic<int>* counter) {
@@ -950,6 +1068,28 @@ inline JobSystem g_JobSystem; // C++17: 'inline' allows global variables in a he
 // ==================================================================================
 // 4. POST-DECLARATION DEFINITIONS
 // ==================================================================================
+
+template <typename F>
+// Called the exact microsecond the parent coroutine suspends
+inline void DispatchAwaiter<F>:: await_suspend(std::coroutine_handle<> parentContinuation) {
+    uint32_t totalChunks = (dataCount + chunkSize - 1) / chunkSize;
+    
+    // 1. Initialize the DAG dependency counter
+    unresolvedDependencies.store(totalChunks, std::memory_order_release);
+    
+    // 2. Spawn the children, passing them the counter and the parent's handle
+    for (uint32_t i = 0; i < dataCount; i += chunkSize) {
+        uint32_t start = i;
+        uint32_t end = std::min(i + chunkSize, dataCount);
+        
+        // Spawn the child job and throw it into the queue
+        EngineJob childJob = g_JobSystem.CreateChildDAGJob(start, end, task, &unresolvedDependencies, parentContinuation);
+        g_JobSystem.Schedule(childJob.handle);
+    }
+
+    // 3. Ring the bell to wake up sleeping workers
+    g_JobSystem.WakeWorkers(totalChunks);
+}
 
 // Define the Fiber's entry point after the JobSystem is fully defined
 inline void WINAPI FiberJob::FiberEntryPoint(void* lpParameter) {
