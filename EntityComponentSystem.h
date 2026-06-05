@@ -164,17 +164,17 @@ struct alignas(32) PhysicsChunk8 {
 
     // Tightly packed arrays. Perfectly sized to instantly load into __m256 registers.
 
-    // --- Position (8 entities) ---
-    float posX[8] = {0};
-    float posY[8] = {0};
-    float posZ[8] = {0};
+    // --- Vector3 Position (8 entities) --- explicitly aligned for _mm256_load_ps
+    alignas(32) float posX[8] = {0};
+    alignas(32) float posY[8] = {0};
+    alignas(32) float posZ[8] = {0};
 
-    // --- Velocity (8 entities) ---
-    float velX[8] = {0};
-    float velY[8] = {0};
-    float velZ[8] = {0};
+    // --- Vector3 Velocity (8 entities) --- 
+    alignas(32) float velX[8] = {0};
+    alignas(32) float velY[8] = {0};
+    alignas(32) float velZ[8] = {0};
     
-    // --- Mass (8 entities) ---
+    // --- Mass (8 entities) --- Additional physics data
     float mass[8] = {1.0f};
 
     // If an object is static, it shouldn't be in the physics chunk at all!
