@@ -12,16 +12,22 @@
 #include <new>
 #include <immintrin.h>     // REQUIRED for _mm_pause, _mm_prefetch, _mm256_zeroupper
 
-
 // --- HARDWARE INTRINSICS ---
-#if defined(_MSC_VER)
-    #include <intrin.h>    // REQUIRED for __rdtsc on MSVC
+#ifndef _WIN32_WINNT
+    #define _WIN32_WINNT 0x0600 // Vista or later required for modern Fiber APIs
+#endif
+
+#if defined(_WIN32) || defined(_MSC_VER)
+    #include <windows.h> // Required for OS-level Fibers
+    #include <intrin.h>  // REQUIRED for __rdtsc on MSVC
 #else
     #include <x86intrin.h> // REQUIRED for __rdtsc on GCC/Clang
+    #error "POSIX ucontext or ASM fiber backend required for non-Windows platforms"
 #endif
 
 // The Job System needs the fast PRNG from Math.h for the work-stealing logic!
 #include "Math.h"
+#include "FixedFunction.h"
 
 // ==================================================================================
 // CROSS-PLATFORM CACHE LINE ALIGNMENT
@@ -44,6 +50,41 @@ extern JobSystem g_JobSystem; // Use 'extern' here to promise the compiler that 
 
 // Used so a worker knows its own index without checking a map we initialize to 0, but will dynamically assign it.
 inline thread_local uint32_t tl_workerIndex = 0;
+
+// ==================================================================================
+// HYBRID TASK SYSTEM: TAGGED POINTERS
+// ==================================================================================
+/*
+    - Modern 64-bit Operating System (OS) pointers are aligned to atleast 8-bytes. 
+    - Its lowest 3-bits of any memory address are always 000.
+    - We can hijack the very last bit (Bit 0) to flag whether the job is a Coroutine or a Fiber.
+*/
+
+// Bit 0 = 0 -> Stackless Coroutine
+// Bit 0 = 1 -> Stackful Fiber
+
+inline void* EncodeCoroutineTask(std::coroutine_handle<> handle) {
+    // Assert alignment guarantees bit 0 is empty
+    assert((reinterpret_cast<uintptr_t>(handle.address()) & 1) == 0); 
+    return handle.address();
+}
+
+inline void* EncodeFiberTask(void* fiberHandle) {
+    assert((reinterpret_cast<uintptr_t>(fiberHandle) & 1) == 0);
+    return reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(fiberHandle) | 1);
+}
+
+inline bool IsFiberTask(void* taskPtr) {
+    return (reinterpret_cast<uintptr_t>(taskPtr) & 1) != 0;
+}
+
+inline void* DecodeFiberHandle(void* taskPtr) {
+    return reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(taskPtr) & ~1ULL);
+}
+
+// ==================================================================================
+// 1. STACKLESS COROUTINES (High-Throughput Math)
+// ==================================================================================
 
 struct EngineJob {
     // Explicitly align the promise_type so the compiler offsets spilled __m256 YMM registers internally.
@@ -151,7 +192,58 @@ struct YieldToJobSystem {
 };
 
 // ==================================================================================
-// 2. LOCK-FREE SCHEDULING
+// 2. STACKFUL FIBERS (Deep Engine Logic & Fiber Pooling)
+// ==================================================================================
+
+enum class FiberState : uint32_t {
+    Ready,
+    Running,
+    Yielded,
+    Finished // The critical safe-to-delete state
+};
+
+// A custom wrapper for the OS Fiber. In a true engine, you'd pool these just like Coroutines.
+// alignas(8) guarantees the memory address ends in 000, making it safe for Tagged Pointers!
+struct alignas(8) FiberJob {
+    void* handle = nullptr;
+    FixedFunction<void(), 64> payload; // Zero-allocation, move-only function wrapper.
+    std::atomic<FiberState> state{FiberState::Ready};
+
+    FiberJob() {
+        // Create a Fiber with a 64KB stack
+        handle = CreateFiber(65536, FiberEntryPoint, this);
+    }
+
+    ~FiberJob() {
+        if (handle) DeleteFiber(handle);
+    }
+
+    // DECLARE ONLY: The compiler doesn't need to know what it does yet.
+    static void WINAPI FiberEntryPoint(void* lpParameter);
+
+    // This is the static trampoline that the OS calls when the Fiber boots up
+    // static void WINAPI FiberEntryPoint(void* lpParameter) {
+    //     FiberJob* job = static_cast<FiberJob*>(lpParameter);
+
+    //     // The OS Fiber context never dies. It just loops, waits for work, and yields.
+    //     while (true) {
+    //         // 1. Execute the user's deep logic
+    //         if (job->payload) { // Check if the std::function contains a valid target
+    //             job->payload();
+    //         }
+
+    //         // 2. Mark this FiberJob as safely completed
+    //         job->state.store(FiberState::Finished, std::memory_order_release);
+
+    //         // 3. Yield back to the JobSystem.
+    //         // Execution literally freezes on this line until the pool assigns new work!
+    //         JobSystem::YieldFiber(nullptr); 
+    //     }
+    // }
+};
+
+// ==================================================================================
+// 3. UNIFIED LOCK-FREE SCHEDULER (Stores void*)
 // ==================================================================================
 
 // --- THE UNIFIED SCHEDULER ---
@@ -160,7 +252,8 @@ class alignas(CACHE_CHUNK_SIZE) WorkStealingQueue {
 private:
     alignas(CACHE_CHUNK_SIZE) std::atomic<int64_t> top{0};    // Thieves steal from this cache line
     alignas(CACHE_CHUNK_SIZE) std::atomic<int64_t> bottom{0}; // The Owner pushes/pops from this cache line
-    std::vector<std::coroutine_handle<>> jobs;
+    // std::vector<std::coroutine_handle<>> jobs;
+    std::vector<void*> jobs; // Now stores Tagged Pointers!
     int64_t mask;
 
 public:
@@ -188,13 +281,13 @@ public:
     }
 
     // ONLY the Owner Thread calls Push()
-    void Push(std::coroutine_handle<> job) {
+    void Push(void* job) {
         int64_t b = bottom.load(std::memory_order_relaxed);
         int64_t t = top.load(std::memory_order_acquire); // Read where the thieves are
 
         // STRICT ASSERTION: Fail fast if we blow past the ring buffer size.
         // This guarantees we never silently trigger a memory overwrite or OS allocation.
-        assert(b - t < (mask + 1) && "FATAL: Job queue overflow! Increase queue capacity.");
+        assert(b - t < (mask + 1) && "FATAL: Job Queue Overflow! Increase queue capacity.");
         
         jobs[b & mask] = job;
         
@@ -204,7 +297,7 @@ public:
     }
 
     // ONLY the Owner Thread calls Pop()
-    std::coroutine_handle<> Pop() {
+    void* Pop() {
         int64_t b = bottom.load(std::memory_order_relaxed) - 1;
         bottom.store(b, std::memory_order_relaxed);
         
@@ -214,7 +307,7 @@ public:
 
         if (t <= b) {
             // Queue is not empty
-            std::coroutine_handle<> job = jobs[b & mask];
+            void* job = jobs[b & mask];
             
             if (t == b) {
                 // This is the LAST job in the queue. 
@@ -237,13 +330,13 @@ public:
     }
 
     // ANY Thread can call Steal()
-    std::coroutine_handle<> Steal() {
+    void* Steal() {
         int64_t t = top.load(std::memory_order_acquire);        
         int64_t b = bottom.load(std::memory_order_acquire);
 
         if (t < b) {
             // There is work to steal!
-            std::coroutine_handle<> job = jobs[t & mask];
+            void* job = jobs[t & mask];
             
             // Attempt to steal it. If another thief grabs it first, CAS will fail.
             // Success CAS requires seq_cst, failure can safely be relaxed
@@ -258,7 +351,7 @@ public:
 };
 
 // ==================================================================================
-// 3. THE MASTER THREAD POOL
+// 4. THE MASTER THREAD POOL & FIBER POOL
 // ==================================================================================
 
 class JobSystem {
@@ -275,6 +368,59 @@ private:
     // We pad based on the target hardware (by ensuring the next variable is aligned) 
     // to guarantee it lives completely alone.
     alignas(CACHE_CHUNK_SIZE) std::atomic<int> sleepingThreads{0};
+
+    // --- FIBER TRACKING ---
+    // Thread-local storage so a running Fiber knows which Worker's core it is currently running on.
+    inline static thread_local void* tl_mainWorkerFiber = nullptr;
+    inline static thread_local FiberJob* tl_currentFiber = nullptr;
+
+    // --- GLOBAL FIBER POOL ---
+    // Pre-allocated storage for the actual fibers
+    std::vector<std::unique_ptr<FiberJob>> fiberStorage;
+    // Spinlock-protected vector of ready-to-use fibers
+    alignas(CACHE_CHUNK_SIZE) std::atomic_flag fiberPoolLock = ATOMIC_FLAG_INIT;
+    std::vector<FiberJob*> freeFibers;
+
+    void ExecuteTask(void* job) {
+        // Tagged Pointer Evaluation
+        if (IsFiberTask(job)) {
+
+            // 1. Decode to our specific FiberJob wrapper
+            FiberJob* fiberJob = static_cast<FiberJob*>(DecodeFiberHandle(job));
+
+            fiberJob->state.store(FiberState::Running, std::memory_order_relaxed);
+            tl_currentFiber = fiberJob;
+
+            // --- CONTEXT SWITCH ---
+            // Jump to the OS-allocated fiber stack!
+            SwitchToFiber(fiberJob->handle);
+
+            // We resume the Worker Thread here when the Fiber yields!
+            // ----------------------
+
+            tl_currentFiber = nullptr;
+
+            // 2. Evaluate what happened inside the Fiber
+            FiberState resultingState = fiberJob->state.load(std::memory_order_acquire);
+
+            if (resultingState == FiberState::Yielded) {
+                // The fiber yielded mid-execution (e.g., waiting on IO). 
+                // Do NOT recycle it. It will be scheduled again by whatever subsystem it is waiting on.
+            } 
+            else if (resultingState == FiberState::Finished) {
+                // The infinite loop reached the end of the payload. Recycle it!
+                ReleaseFiber(fiberJob);
+            }
+        } else { 
+            // --- Stackless Coroutine Logic ---
+            // PREFETCH THE COROUTINE FRAME!
+            // Triggers the MESI transfer across the CPU cores in the background before the pipeline hits the indirect jump.
+            _mm_prefetch((const char*)job, _MM_HINT_T0);
+
+            // It's a Stackless Coroutine! 
+            std::coroutine_handle<>::from_address(job).resume();
+        }
+    }
     
 public:
     std::vector<std::unique_ptr<WorkStealingQueue>> queues;
@@ -305,7 +451,19 @@ public:
         
         RegisterThread(); // Main UI Thread = Index 0
 
-        // FIX 2: Manually allocate the metrics structs
+        // PRE-ALLOCATE THE FIBER POOL (e.g., 256 Fibers)
+        for (int i = 0; i < 256; ++i) {
+            auto job = std::make_unique<FiberJob>();
+            freeFibers.push_back(job.get());
+            fiberStorage.push_back(std::move(job));
+        }
+
+        // The Main thread must also be a Fiber so it can context-switch!
+        #if defined(_WIN32)
+            tl_mainWorkerFiber = ConvertThreadToFiber(nullptr);
+        #endif
+
+        // Manually allocate the metrics structs
         for (uint32_t i = 0; i < maxQueues; ++i) {
             threadStats.push_back(std::make_unique<ThreadMetrics>());
         }
@@ -318,6 +476,9 @@ public:
                 //     // Crucial: Pin workers to cores to keep caches hot
                 //     SetThreadAffinityMask(GetCurrentThread(), (1ull << i));
                 // #endif
+
+                // Convert this standard OS Thread into a Fiber so it can context switch!
+                tl_mainWorkerFiber = ConvertThreadToFiber(nullptr);
                 
                 // --- Initialize our lightweight 4-byte state ---
                 // We use a simple hash of the worker index to ensure different starting seeds
@@ -346,7 +507,7 @@ public:
                         if (terminate.load(std::memory_order_relaxed)) break;
 
                         // 1. Check our own queue
-                        std::coroutine_handle<> job = queues[tl_workerIndex]->Pop();
+                        void* job = queues[tl_workerIndex]->Pop();
 
                         // ==========================================
                         // THE WAKEUP PHASE 
@@ -391,14 +552,13 @@ public:
 
                         // 3. If we have a job, execute it!
                         if (job) {
-
-                            // PREFETCH THE COROUTINE FRAME!
-                            // Triggers the MESI transfer across the CPU cores in the background before the pipeline hits the indirect jump.
-                            _mm_prefetch((const char*)job.address(), _MM_HINT_T0);
-
                             // WE FOUND WORK: Start the hardware cycle counter!
                             uint64_t jobStartCycles = __rdtsc(); // __rdtsc() counts literal CPU clock pulses  exactly when the AVX instructions fire.
-                            job.resume(); // Execute the heavy AVX2 math
+                            
+                            // Let the system figure out if it's a Fiber or Coroutine!
+                            ExecuteTask(job);
+
+                            // job.resume(); // Execute the heavy AVX2 math
 
                             // End cycle counter and add to total active cycles
                             activeCycles += (__rdtsc() - jobStartCycles);
@@ -470,11 +630,12 @@ public:
                                 // PREFETCH THE COROUTINE FRAME!
                                 // Triggers the MESI transfer across the CPU cores in the background 
                                 // before the pipeline hits the indirect jump.
-                                _mm_prefetch((const char*)job.address(), _MM_HINT_T0);
+                                // _mm_prefetch((const char*)job, _MM_HINT_T0);
                                 
                                 // If the spin loop successfully grabbed a job, execute it immediately.
                                 uint64_t jobStartCycles = __rdtsc();
-                                job.resume();
+                                // job.resume();
+                                ExecuteTask(job);
                                 activeCycles += (__rdtsc() - jobStartCycles);
                                 jobsThisFrame++;
                             }
@@ -511,7 +672,38 @@ public:
         for (auto& worker : workers) {
             if (worker.joinable()) worker.join();
         }
+
+        // --- Safe Fiber Teardown ---
+        freeFibers.clear();
+        fiberStorage.clear(); // This triggers ~FiberJob() which calls DeleteFiber
     }
+
+    // --- FIBER POOL MANAGEMENT ---
+    
+    FiberJob* GetFreeFiber() {
+        // Spinlock to safely pop from the shared pool
+        while (fiberPoolLock.test_and_set(std::memory_order_acquire)) { _mm_pause(); }
+        
+        // In a true AAA system, if the pool is empty, you'd dynamically allocate more.
+        assert(!freeFibers.empty() && "FATAL: Fiber pool exhausted!"); 
+        
+        FiberJob* job = freeFibers.back();
+        freeFibers.pop_back();
+        
+        fiberPoolLock.clear(std::memory_order_release);
+        return job;
+    }
+
+    void ReleaseFiber(FiberJob* job) {
+        job->payload = nullptr; // Free any captured variables in the std::function lambda
+        job->state.store(FiberState::Ready, std::memory_order_relaxed);
+        
+        while (fiberPoolLock.test_and_set(std::memory_order_acquire)) { _mm_pause(); }
+        freeFibers.push_back(job);
+        fiberPoolLock.clear(std::memory_order_release);
+    }
+
+    // --- SCHEDULING INTERFACES ---
 
     // Call this from ANY detached thread so it gets its own lock-free ring buffer!
     void RegisterThread() {
@@ -519,8 +711,36 @@ public:
         assert(tl_workerIndex < maxQueues && "Too many external threads registered!");
     }
 
+    // Schedule Stackless Coroutine
     void Schedule(std::coroutine_handle<> handle) {
-        queues[tl_workerIndex]->Push(handle);
+        queues[tl_workerIndex]->Push(EncodeCoroutineTask(handle));
+    }
+
+    // Schedule Stackful Fiber
+    template <typename Callable>
+    void ScheduleFiber(Callable&& callable) {
+        FiberJob* fiber = GetFreeFiber();
+
+        // Construct the FixedFunction directly in the FiberJob's memory
+        fiber->payload = std::forward<Callable>(callable);
+        
+        // Pass the FiberJob pointer (Encoded) so ExecuteTask can check its state later
+        queues[tl_workerIndex]->Push(EncodeFiberTask(fiber));
+    }
+
+    // Yield back to the Job System without destroying the Fiber
+    static void YieldFiber(void* nextTaskToRun) {
+        if (nextTaskToRun) {
+            g_JobSystem.queues[tl_workerIndex]->Push(nextTaskToRun);
+        }
+
+        // If we yielded mid-function, ensure the state reflects that so ExecuteTask doesn't recycle us!
+        if (tl_currentFiber && tl_currentFiber->state.load(std::memory_order_relaxed) == FiberState::Running) {
+            tl_currentFiber->state.store(FiberState::Yielded, std::memory_order_release);
+        }
+
+        // Jump OUT of the current fiber, and immediately back into the worker thread's main loop!
+        SwitchToFiber(tl_mainWorkerFiber);
     }
 
     // Pass 'task' BY VALUE. The lambda closure is tiny, copying it into 
@@ -568,11 +788,17 @@ public:
             - The OS sets a hardware timer. As soon as that timer goes off the OS steps in and seizes control of the CPU.
         */
         
+        // 1. Calculate exactly how many chunks we are about to dispatch
+        uint32_t totalChunks = (dataCount + chunkSize - 1) / chunkSize;
+
+        // 2. Do ONE atomic write, completely removing the fetch_add from the loop
+        counter.store(totalChunks, std::memory_order_release);
+
         for (uint32_t i = 0; i < dataCount; i += chunkSize) {
             uint32_t start = i;
             uint32_t end = std::min(i + chunkSize, dataCount);
             
-            counter.fetch_add(1, std::memory_order_acquire);
+            // counter.fetch_add(1, std::memory_order_acquire);
             
             // Pass the address of the local stack variable
             EngineJob job = CreateDispatchTask(start, end, task, &counter);
@@ -628,7 +854,7 @@ public:
         uint64_t telemetryStartCycles = __rdtsc();
         
         while (counter.load(std::memory_order_acquire) > 0) {
-            std::coroutine_handle<> job = queues[tl_workerIndex]->Pop();
+            void* job = queues[tl_workerIndex]->Pop();
 
             // ==========================================
             // THE DISPATCH WAIT LOOP
@@ -668,11 +894,13 @@ public:
 
             if (job) {
                 // PREFETCH THE COROUTINE FRAME!
-                _mm_prefetch((const char*)job.address(), _MM_HINT_T0);
+                _mm_prefetch((const char*)job, _MM_HINT_T0);
 
                 // 1. START HARDWARE TIMER
                 uint64_t jobStartCycles = __rdtsc();
-                job.resume(); 
+                // job.resume(); 
+
+                ExecuteTask(job);
 
                 // 2. END TIMER & ACCUMULATE
                 localActiveCycles += (__rdtsc() - jobStartCycles);
@@ -707,20 +935,43 @@ inline JobSystem g_JobSystem; // C++17: 'inline' allows global variables in a he
 // 4. POST-DECLARATION DEFINITIONS
 // ==================================================================================
 
+// Define the Fiber's entry point after the JobSystem is fully defined
+inline void WINAPI FiberJob::FiberEntryPoint(void* lpParameter) {
+    FiberJob* job = static_cast<FiberJob*>(lpParameter);
+
+    // The OS Fiber context never dies. It just loops, waits for work, and yields.
+    while (true) {
+        // 1. Execute the user's deep logic
+        if (job->payload) { 
+            job->payload();
+        }
+
+        // 2. Mark this FiberJob as safely completed
+        job->state.store(FiberState::Finished, std::memory_order_release);
+
+        // 3. Yield back to the JobSystem.
+        // Execution literally freezes on this line until the pool assigns new work!
+        JobSystem::YieldFiber(nullptr); 
+    }
+}
+
 // Define the Awaiter's suspend logic after the JobSystem is fully defined
 inline std::coroutine_handle<> YieldToJobSystem::await_suspend(std::coroutine_handle<> handle) const {
     // 1. Put the current job back in line
     g_JobSystem.Schedule(handle); 
 
-    // 2. Grab the next available job
-    std::coroutine_handle<> nextJob = g_JobSystem.queues[tl_workerIndex]->Pop();
+    // // 2. Grab the next available job
+    // std::coroutine_handle<> nextJob = g_JobSystem.queues[tl_workerIndex]->Pop();
     
-    if (nextJob) {
-        // The C++ compiler converts this into an indirect tail-call jump.
-        // Zero stack growth. Zero return-to-loop overhead.
-        return nextJob; 
-    }
+    // if (nextJob) {
+    //     // The C++ compiler converts this into an indirect tail-call jump.
+    //     // Zero stack growth. Zero return-to-loop overhead.
+    //     return nextJob; 
+    // }
 
+    // 2. Return noop to safely hand control back to the scheduler's main loop.
+    // The main loop will immediately cycle, pop the next void* job, and safely 
+    // route it through ExecuteTask() regardless of whether it is a Fiber or Coroutine.
     // 3. If the queue is empty, return noop to safely hand control back to the scheduler loop.
     return std::noop_coroutine(); 
 }
