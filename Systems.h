@@ -91,13 +91,12 @@ public:
 class ParticleSystem {
 public:
     void Update(ECS& ecs, float dt) {
-        auto& emitters = ecs.GetArray<ParticleEmitterComponent>();
+        // Grab the raw contiguous array directly
+        auto& emitters = ecs.GetDenseArray<ParticleEmitterComponent>();
         
         // Grab the raw contiguous array of components
-        for (uint32_t e = 0; e < ecs.GetMaxEntities(); ++e) {
-            if (!ecs.HasComponent<ParticleEmitterComponent>(e)) continue;
-            
-            auto& emitter = emitters[e];
+        // Iterate ONLY over the active components. If there are 50 emitters, this loop runs exactly 50 times. Zero cache misses.
+        for (auto& emitter : emitters) {
             if (!emitter.isAwake || !emitter.physicsEngine) continue;
 
             // The ECS triggers the massive AVX2 Job-System integration!
@@ -111,22 +110,20 @@ public:
 class AISystem {
 public:
     void Update(ECS& ecs, float dt) {
-        auto& aiComponents = ecs.GetArray<AIComponent>();
-        uint32_t entityCount = ecs.GetMaxEntities();
+        auto& aiComponents = ecs.GetDenseArray<AIComponent>();
+        uint32_t activeAICount = static_cast<uint32_t>(aiComponents.size());
+
+        if (activeAICount == 0) return;
 
         // 1. Ask the Job System for threads
         uint32_t threadCount = g_JobSystem.nextWorkerId.load(std::memory_order_relaxed);
-        uint32_t chunkSize = std::max(256u, entityCount / threadCount);
+        uint32_t chunkSize = std::max(64u, activeAICount / threadCount);
 
-        // 2. Multithread the entire AI logic step!
-        g_JobSystem.DispatchAndWait(entityCount, chunkSize, [&](uint32_t start, uint32_t end) {
-            for (uint32_t e = start; e < end; ++e) {
-                // Skip dead or irrelevant entities
-                if (!ecs.HasComponent<AIComponent>(e)) continue;
-
-                auto& ai = aiComponents[e];
+        // 2. Multithread the entire AI logic step! Dispatch based on active component count, not max entities
+        g_JobSystem.DispatchAndWait(activeAICount, chunkSize, [&](uint32_t start, uint32_t end) {
+            for (uint32_t i = start; i < end; ++i) {
                 // Execute standard scalar C++ AI logic across all CPU cores...
-                ai.ProcessState(dt);
+                aiComponents[i].ProcessState(dt);
             }
         });
     }
