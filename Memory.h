@@ -127,6 +127,20 @@ template <typename T>
 using AlignedVector64 = std::vector<T, AlignedAllocator<T, 64>>; // AVX-512 (64-byte aligned vector)
 
 // ==================================================================================
+// EXPLICIT CAPACITY PADDING (Explicit Control)
+// ==================================================================================
+/*
+    - Guarantees that the total number of entries allocated is a multiple of the SIMD width, so it does not read past the end of the allocation.
+    - Mathematical rounding logic used to ensure the OS gives us ghost entries to round to the the nearest multiple of the SIMD width.
+    - Prevents multiplying by NaN or uninitialized garbage.
+    - AVX2 [__m256]: 8-Width.
+*/
+
+ENGINE_FORCE_INLINE size_t GetPaddedCount(size_t count, size_t simdWidth = 8) {
+    return (count + simdWidth - 1) & ~(simdWidth - 1);
+}
+
+// ==================================================================================
 // C++26 DYNAMIC HARDWARE ALIGNMENT (Portable SIMD)
 // ==================================================================================
 
@@ -209,6 +223,45 @@ public:
 
         // C++20/26: Prove to the compiler that the memory boundary is safe for AVX
         return std::assume_aligned<Align>(reinterpret_cast<T*>(alignedAddress));
+    }
+
+    // --- BARE-METAL ALLOCATION WITH SIMD CAPACITY PADDING ---
+    // simdWidth: 8 for AVX2 (float), 16 for AVX-512 (float)
+    template <typename T, size_t Align = alignof(T)>
+    [[nodiscard]] ENGINE_FORCE_INLINE T* AllocatePadded(size_t count, size_t simdWidthElements = 8) {
+        static_assert((Align & (Align - 1)) == 0, "Alignment must be a power of 2");
+        
+        // 1. CAPACITY PADDING: Round the requested count UP to the nearest multiple of the SIMD width (e.g., 8 for AVX2), so it does not read past the end of the allocation preventing memory corruption.
+        // If count is 1021 and simdWidth is 8, paddedCount becomes 1024.
+        size_t paddedCount = (count + simdWidthElements - 1) & ~(simdWidthElements - 1);
+
+        // 2. Where are we currently in memory?
+        uintptr_t currentAddress = reinterpret_cast<uintptr_t>(m_memory + m_offset);
+        
+        // 3. Bitwise Alignment Calculation
+        size_t padding = (Align - (currentAddress & (Align - 1))) & (Align - 1);
+        size_t totalAllocationSize = padding + (paddedCount * sizeof(T)); // Use paddedCount!
+
+        // 4. Out of Memory Guard
+        if (m_offset + totalAllocationSize > m_capacity) {
+            std::println(stderr, "[FATAL] LinearArena Exhausted! Capacity: {} bytes", m_capacity);
+            std::println(stderr, "{}", std::to_string(std::stacktrace::current()));
+            std::abort();
+        }
+
+        // 5. Calculate the final aligned pointer and bump the offset
+        uintptr_t alignedAddress = currentAddress + padding;
+        m_offset += totalAllocationSize;
+
+        T* result = std::assume_aligned<Align>(reinterpret_cast<T*>(alignedAddress));
+
+        // 6. ZERO-INITIALIZE THE GHOST ELEMENTS!
+        // This is strictly required so that SIMD math on the padded tail doesn't result in NaNs or subnormals.
+        for(size_t i = count; i < paddedCount; ++i) {
+            new (&result[i]) T(); // Placement new initializes to 0 / default constructor
+        }
+
+        return result;
     }
 
     // --- THE MAGIC O(1) FREE ---
