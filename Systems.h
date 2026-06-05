@@ -1,7 +1,32 @@
 #pragma once
 
-#include "ECS.h"
+#include "EntityComponentSystem.h"
 #include "PhysicsSystem.h"
+
+#include <cstdint>
+#include <immintrin.h>
+
+// 256 Entities per chunk. Must be a multiple of the SIMD width (8 for AVX2).
+constexpr uint32_t ENTITIES_PER_CHUNK = 256; 
+
+// alignas(64) ensures the chunk starts on a hardware cache-line boundary
+struct alignas(64) PhysicsChunk {
+    // How many entities in this specific chunk are currently alive? (0 to 256)
+    uint32_t activeCount = 0; 
+
+    // --- The Internal SoA Data ---
+    // Because ENTITIES_PER_CHUNK is 256 (a multiple of 8), we don't need to worry about the SIMD Padding Trap!
+    
+    // Position (Vector3)
+    alignas(32) float posX[ENTITIES_PER_CHUNK];
+    alignas(32) float posY[ENTITIES_PER_CHUNK];
+    alignas(32) float posZ[ENTITIES_PER_CHUNK];
+
+    // Velocity (Vector3)
+    alignas(32) float velX[ENTITIES_PER_CHUNK];
+    alignas(32) float velY[ENTITIES_PER_CHUNK];
+    alignas(32) float velZ[ENTITIES_PER_CHUNK];
+};
 
 // The System that bridges the ECS to the Silicon
 class ParticleSystem {
