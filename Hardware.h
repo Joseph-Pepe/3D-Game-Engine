@@ -12,9 +12,20 @@
     #include <x86intrin.h> // For GCC/Clang
 #endif
 
-// ========================================
-// HARDWARE DETECTION & DYNAMIC DISPATCH
-// ========================================
+// ============================================================
+// HARDWARE DETECTION & DYNAMIC DISPATCH : BMI2 MICROCODE TRAP 
+// ============================================================
+/*
+    - On Intel (Haswell and newer) and AMD Zen 3 (Ryzen 5000+), the BMI2 _pdep_u32 instruction is wired directly into a dedicated execution port in the silicon.
+    - It executes in ~3 clock cycles.
+
+    - On AMD Zen 1, Zen+, Zen 2 (Ryzen 1000, 2000, and 3000 series), its implemented in microcode instead of a dedicated circuit.
+    - Executes this instruction in ~18 to 50 clock cycles to complete.
+    - When processing 100,000 particles it wastes ~3 to 4.5 million clock cycles per frame on older Ryzen processors.
+    - Need to detect this hardware to not use BMI2 _pdep_u32, so we can reclaim 1.0 to 1.5 milliseconds of frame time.
+    - This guarantees this engine runs deterministically across all x86 architectures.
+*/
+
 struct HardwareCapabilities {
     bool hasAVX = false;
     bool hasAVX2 = false;
@@ -24,14 +35,14 @@ struct HardwareCapabilities {
     bool hasAVX512DQ = false; // Double/Quadword (Needed for certain float conversions)
     bool hasAVX512VL = false; // Vector Length Extensions (Allows using AVX-512 instructions on 256-bit registers)
     
-    // The specific AMD microcode trap you already identified
+    // The specific AMD microcode trap identified
     bool isLegacyAMD_BMI2 = false; 
 
     static HardwareCapabilities Detect() {
         HardwareCapabilities caps;
         int cpuInfo[4] = {0};
 
-        // 1. Get Maximum Supported Function Info
+        // 1. Get Maximum Supported Function Info (Get Vendor String)
         #ifdef _MSC_VER
             __cpuid(cpuInfo, 0);
         #else
@@ -39,7 +50,7 @@ struct HardwareCapabilities {
         #endif
         int maxFunction = cpuInfo[0];
 
-        // Check if vendor is "AuthenticAMD"
+        // Check if vendor is "AuthenticAMD" (ebx, edx, ecx), [False = Not AMD. Intel's BMI2 is fast in silicon]
         bool isAMD = (cpuInfo[1] == 0x68747541 && cpuInfo[3] == 0x69746E65 && cpuInfo[2] == 0x444D4163);
 
         if (maxFunction >= 1) {
@@ -60,11 +71,12 @@ struct HardwareCapabilities {
                 // Read the Extended Control Register (XCR0)
                 unsigned long long xcrFeatureMask = _xgetbv(0);
                 
-                // Bit 1 = XMM (128-bit), Bit 2 = YMM (256-bit)
-                osSavesYMM = (xcrFeatureMask & 0x6) == 0x6; 
+                // [C++14/26 Modernization]: Use binary literals instead of Hex for bitmask clarity
+                // Bit 1 = XMM (128-bit), Bit 2 = YMM (256-bit). Mask: 0000_0110
+                osSavesYMM = (xcrFeatureMask & 0b00000110) == 0b00000110; 
                 
-                // Bits 5, 6, 7 = OPMASK and ZMM (512-bit)
-                osSavesZMM = (xcrFeatureMask & 0xE6) == 0xE6; 
+                // Bits 5, 6, 7 = OPMASK and ZMM (512-bit). Mask: 1110_0110
+                osSavesZMM = (xcrFeatureMask & 0b11100110) == 0b11100110;
             }
 
             // CPU supports AVX natively
@@ -94,6 +106,7 @@ struct HardwareCapabilities {
 
             // AMD Microcode check for slow BMI2
             if (isAMD && caps.hasBMI2) {
+                // 2. Get CPU Family
                 #ifdef _MSC_VER
                     __cpuid(cpuInfo, 1);
                 #else
@@ -103,59 +116,32 @@ struct HardwareCapabilities {
                 int extendedFamily = (cpuInfo[0] >> 20) & 0xFF;
                 int family = baseFamily + (baseFamily == 0xF ? extendedFamily : 0);
                 
-                // Zen 1, Zen+, Zen 2 (Family <= 23) have microcoded BMI2
+                // ===============================================
+                // HARDWARE | MICROCODED BMI2 DETECTION 
+                // ===============================================
+                /*
+                    - Zen 1, Zen+, and Zen 2 belong to Family 17h (23 in decimal)
+                    - Zen 1, Zen+, Zen 2 (Family <= 23) have microcoded BMI2
+                    - Zen 3 is Family 19h (25) and has fast hardware BMI2.
+                    - Anything 23 or lower has the slow microcoded _pdep_u32.
+                */
                 caps.isLegacyAMD_BMI2 = (family <= 23);
             }
         }
         return caps;
     }
+
+    // --- C++26 TELEMETRY DUMP ---
+    void PrintTelemetry() const {
+        std::println("=== HARDWARE CAPABILITIES ===");
+        std::println("AVX:        {}", hasAVX ? "YES" : "NO");
+        std::println("AVX2:       {}", hasAVX2 ? "YES" : "NO");
+        std::println("FMA:        {}", hasFMA ? "YES" : "NO");
+        std::println("AVX-512 F:  {}", hasAVX512F ? "YES" : "NO");
+        std::println("BMI2:       {} {}", hasBMI2 ? "YES" : "NO", isLegacyAMD_BMI2 ? "(WARNING: Slow Microcode Detected)" : "");
+        std::println("=============================");
+    }
 };
 
 // Global Instance: C++17 INLINE Prevents linker crashes
 inline HardwareCapabilities g_Hardware = HardwareCapabilities::Detect();
-
-// ========================================
-// HARDWARE DETECTION: BMI2 MICROCODE TRAP 
-// ========================================
-/*
-    - On Intel (Haswell and newer) and AMD Zen 3 (Ryzen 5000+), the BMI2 _pdep_u32 instruction is wired directly into a dedicated execution port in the silicon.
-    - It executes in ~3 clock cycles.
-
-    - On AMD Zen 1, Zen+, Zen 2 (Ryzen 1000, 2000, and 3000 series), its implemented in microcode instead of a dedicated circuit.
-    - Executes this instruction in ~18 to 50 clock cycles to complete.
-    - When processing 100,000 particles it wastes ~3 to 4.5 million clock cycles per frame on older Ryzen processors.
-    - Need to detect this hardware to not use BMI2 _pdep_u32, so we can reclaim 1.0 to 1.5 milliseconds of frame time.
-    - This guarantees this engine runs deterministically across all x86 architectures.
-*/
-
-inline bool detect_hardware_CPUID_BMI2() {
-    int cpuInfo[4] = {0};
-    
-    // 1. Get Vendor String
-    #ifdef _MSC_VER
-        __cpuid(cpuInfo, 0);
-    #else
-        __cpuid(0, cpuInfo[0], cpuInfo[1], cpuInfo[2], cpuInfo[3]);
-    #endif
-
-    // Check if vendor is "AuthenticAMD" (ebx, edx, ecx)
-    if (cpuInfo[1] != 0x68747541 || cpuInfo[3] != 0x69746E65 || cpuInfo[2] != 0x444D4163) {
-        return false; // Not AMD. Intel's BMI2 is fast in silicon.
-    }
-
-    // 2. Get CPU Family
-    #ifdef _MSC_VER
-        __cpuid(cpuInfo, 1);
-    #else
-        __cpuid(1, cpuInfo[0], cpuInfo[1], cpuInfo[2], cpuInfo[3]);
-    #endif
-
-    int baseFamily = (cpuInfo[0] >> 8) & 0xF;
-    int extendedFamily = (cpuInfo[0] >> 20) & 0xFF;
-    int family = baseFamily + (baseFamily == 0xF ? extendedFamily : 0);
-
-    // Zen 1, Zen+, and Zen 2 belong to Family 17h (23 in decimal).
-    // Zen 3 is Family 19h (25) and has fast hardware BMI2.
-    // Anything 23 or lower has the slow microcoded _pdep_u32.
-    return (family <= 23);
-}
