@@ -14,7 +14,7 @@
         // Extremely cache friendly for your SIMD wrappers.
         std::inplace_vector<Vector3D, 64> localCluster;
     */
-    #include <inplace_vector> // C++26 API provides a vector that stores data locally without ever touvching the heap allocator.
+    #include <inplace_vector> // C++26 API provides a vector that stores data locally without ever touching the heap allocator.
 #endif 
 
 
@@ -252,41 +252,46 @@ FORCE_INLINE __m256i getMortonCode_AVX2(__m256i x, __m256i y, __m256i z) {
 }
 
 // ======================================================================
-// C++26: SIMD for MSVC build v14.51 and newer.
+// C++26: NATIVE SIMD ARCHITECTURE for MSVC build v14.51 and newer.
 // ======================================================================
-#if ENGINE_HAS_CXX26_SIMD
-    // --- 1. THE C++26 MATH LAYER (Portable SIMD) ---
-    // Aims to standardize the simd<AnyType> type.
-    namespace simd = std::experimental;
+/*
+    - This now scales to ARM (Apple Silicon M1/M2/M3), NEON, AMD (Playstation/Xbox) and Intel (AVX-512) automatically once compiled without a total rewrite of code (i.e., seamlessly maps those registers, cross-platform).
+    - No need to use bitwise mask hacks (_mm512_cmp_ps_mask, _mm512_maskz_mul_ps) anymore b/c the compiler automatically translates these logical operators into hardware masks.
+    - No more Intel-specific _mm256! 
+*/
 
-    // No more Intel-specific _mm256! This now scales to ARM (Apple Silicon M1/M2/M3), NEON, AMD (Playstation/Xbox) and Intel (AVX-512) automatically once compiled without a total rewrite of code (i.e., seamlessly maps those registers, cross-platform).
-    // Is based on the silicon it detects at compile time.
-    using native_simd = simd::native_simd<float>;
+#if ENGINE_HAS_CXX26_SIMD
+    // --- 1. THE C++26 MATH LAYER (Portable SIMD) --- 
+    // Use the official C++26 P1928 syntax based on the silicon it detects at compile time.
+    using NativeFloatSIMD = std::simd<float, std::simd_abi::native<float>>;
 
     // Use this constant to dynamically align your memory allocators and structs!
-    constexpr std::size_t NATIVE_ALIGN = simd::memory_alignment_v<native_simd>;
+    // Ask the C++26 standard exactly how many bytes the current hardware needs
+    constexpr std::size_t NATIVE_SIMD_ALIGN = alignof(NativeFloatSIMD);
 
-    // [C++26]: No need to use bitwise mask hacks (_mm512_cmp_ps_mask, _mm512_maskz_mul_ps) anymore b/c the compiler automatically translates these logical operators into hardware masks.
-    struct SIMDVectorP {
-        // [native_simd]: Instead of manual __m256 or __m512 loads, you use a template that automatically picks the widest register the hardware supports.
-        native_simd x, y, z;
+    // Dynamic Alignment Wrapper:
+    // If compiling for AVX-512, this guarantees 64-byte alignment. 
+    // If compiling for ARM NEON, it guarantees 16-byte alignment.
+    struct alignas(NATIVE_SIMD_ALIGN) SIMDVectorP {
+        // [NativeFloatSIMD]: Instead of manual __m256 or __m512 loads, you use a template that automatically picks the widest register the hardware supports.
+        NativeFloatSIMD x, y, z;
 
         // Standard Addition
-        FORCE_INLINE void add(const native_simd& bx, const native_simd& by, const native_simd& bz) {
+        FORCE_INLINE void add(const NativeFloatSIMD& bx, const NativeFloatSIMD& by, const NativeFloatSIMD& bz) {
             x += bx; // C++26 SIMD supports standard operators!
             y += by;
             z += bz;
         }
 
         // Standard Subtraction
-        FORCE_INLINE void sub(const native_simd& bx, const native_simd& by, const native_simd& bz) {
+        FORCE_INLINE void sub(const NativeFloatSIMD& bx, const NativeFloatSIMD& by, const NativeFloatSIMD& bz) {
             x -= bx; 
             y -= by; 
             z -= bz;
         }
 
         // Scalar Multiplication
-        FORCE_INLINE void mul(const native_simd& scalar) {
+        FORCE_INLINE void mul(const NativeFloatSIMD& scalar) {
             x *= scalar;
             y *= scalar;
             z *= scalar;
@@ -294,59 +299,59 @@ FORCE_INLINE __m256i getMortonCode_AVX2(__m256i x, __m256i y, __m256i z) {
 
         // Dot Product with FMA (Fused Multiply-Add)
         // C++26 automatically fuses (a * b + c) into a single clock cycle if compiler flags allow it, or you can explicitly use std::fma overloaded for simd.
-        FORCE_INLINE native_simd dot_fma(const native_simd& bx, const native_simd& by, const native_simd& bz) const {
-            native_simd res = x * bx;
+        FORCE_INLINE NativeFloatSIMD dot_fma(const NativeFloatSIMD& bx, const NativeFloatSIMD& by, const NativeFloatSIMD& bz) const {
+            NativeFloatSIMD res = x * bx;
             res = std::fma(y, by, res);
             res = std::fma(z, bz, res);
             return res;
         }
 
         // Standard Dot Product
-        FORCE_INLINE native_simd dot(const native_simd& bx, const native_simd& by, const native_simd& bz) const {
+        FORCE_INLINE NativeFloatSIMD dot(const NativeFloatSIMD& bx, const NativeFloatSIMD& by, const NativeFloatSIMD& bz) const {
             return (x * bx) + (y * by) + (z * bz);
         }
 
         // SOA Cross Product
-        FORCE_INLINE void cross(const native_simd& bx, const native_simd& by, const native_simd& bz) {
+        FORCE_INLINE void cross(const NativeFloatSIMD& bx, const NativeFloatSIMD& by, const NativeFloatSIMD& bz) {
             // Explicitly using std::fma to guarantee hardware Fused Multiply-Subtract (FMS) 
             // Example: (y * bz) - (z * by) -> fma(y, bz, -(z * by))
-            native_simd rx = std::fma(y, bz, -(z * by));
-            native_simd ry = std::fma(z, bx, -(x * bz));
-            native_simd rz = std::fma(x, by, -(y * bx));
+            NativeFloatSIMD rx = std::fma(y, bz, -(z * by));
+            NativeFloatSIMD ry = std::fma(z, bx, -(x * bz));
+            NativeFloatSIMD rz = std::fma(x, by, -(y * bx));
             x = rx; y = ry; z = rz;
         }
 
         // Magnitude Squared
-        FORCE_INLINE native_simd length_sq() const {
+        FORCE_INLINE NativeFloatSIMD length_sq() const {
             // return (x * x) + (y * y) + (z * z);
 
             // Nudging compiler to use FMA
-            native_simd sq = x * x;
+            NativeFloatSIMD sq = x * x;
             sq = std::fma(y, y, sq);
             sq = std::fma(z, z, sq);
             return sq;
         }
 
         // Magnitude
-        FORCE_INLINE native_simd length() const {
+        FORCE_INLINE NativeFloatSIMD length() const {
             return std::sqrt(length_sq()); // std::sqrt is overloaded for simd types!
         }
 
         // --- C++26 PORTABLE OPMASK LOGIC ---
         FORCE_INLINE void normalize() {
-            native_simd sqLen = length_sq();
-            native_simd epsilon = 1e-8f;
+            NativeFloatSIMD sqLen = length_sq();
+            NativeFloatSIMD epsilon = 1e-8f;
             
             // 1. Create the hardware mask
             auto validMask = sqLen > epsilon;
 
             // 2. Prevent NaN/Inf generation by patching invalid lengths to 1.0f BEFORE division.
             // If sqLen is 0, we temporarily pretend it is 1.0f so division succeeds gracefully.
-            native_simd safeSqLen = sqLen;
-            simd::where(!validMask, safeSqLen) = 1.0f; 
+            NativeFloatSIMD safeSqLen = sqLen;
+            std::simd::where(!validMask, safeSqLen) = 1.0f; 
 
             // 3. Fast-math will translate this to a hardware rsqrt instruction.
-            native_simd invLen = 1.0f / std::sqrt(safeSqLen);
+            NativeFloatSIMD invLen = 1.0f / std::sqrt(safeSqLen);
 
             // 4. Apply math
             x *= invLen;
@@ -354,9 +359,9 @@ FORCE_INLINE __m256i getMortonCode_AVX2(__m256i x, __m256i y, __m256i z) {
             z *= invLen;
 
             // 5. Zero-mask the invalid lanes
-            simd::where(!validMask, x) = 0.0f;
-            simd::where(!validMask, y) = 0.0f;
-            simd::where(!validMask, z) = 0.0f;
+            std::simd::where(!validMask, x) = 0.0f;
+            std::simd::where(!validMask, y) = 0.0f;
+            std::simd::where(!validMask, z) = 0.0f;
         }
     };
 #endif
