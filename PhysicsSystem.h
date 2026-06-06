@@ -90,20 +90,20 @@ public:
 
         // 1. Allocate from the Arena
         uint32_t totalThreadLocalSize = g_JobSystem.maxQueues * TOTAL_CELLS;
-        threadLocalCounts = std::span<uint32_t>(g_EngineArena.Allocate<uint32_t, 64>(totalThreadLocalSize), totalThreadLocalSize);
+        threadLocalCounts = std::span<uint32_t>(t_PhysicsTransientArena.Allocate<uint32_t, 64>(totalThreadLocalSize), totalThreadLocalSize);
         
-        cellCounts = std::span<uint32_t>(g_EngineArena.Allocate<uint32_t, 64>(TOTAL_CELLS), TOTAL_CELLS);
-        currentInsertPos = std::span<uint32_t>(g_EngineArena.Allocate<uint32_t, 64>(TOTAL_CELLS), TOTAL_CELLS);
+        cellCounts = std::span<uint32_t>(t_PhysicsTransientArena.Allocate<uint32_t, 64>(TOTAL_CELLS), TOTAL_CELLS);
+        currentInsertPos = std::span<uint32_t>(t_PhysicsTransientArena.Allocate<uint32_t, 64>(TOTAL_CELLS), TOTAL_CELLS);
 
         
         // --- // ALLOCATE DIRECTLY FROM THE ARENA IN O(1) TIME! --- AVX2 32-byte alignment
-        pX = std::span<float>(g_EngineArena.Allocate<float, 32>(paddedCount), paddedCount);
-        pY = std::span<float>(g_EngineArena.Allocate<float, 32>(paddedCount), paddedCount);
-        pZ = std::span<float>(g_EngineArena.Allocate<float, 32>(paddedCount), paddedCount);
+        pX = std::span<float>(t_PhysicsTransientArena.Allocate<float, 32>(paddedCount), paddedCount);
+        pY = std::span<float>(t_PhysicsTransientArena.Allocate<float, 32>(paddedCount), paddedCount);
+        pZ = std::span<float>(t_PhysicsTransientArena.Allocate<float, 32>(paddedCount), paddedCount);
 
-        vX = std::span<float>(g_EngineArena.Allocate<float, 32>(paddedCount), paddedCount);
-        vY = std::span<float>(g_EngineArena.Allocate<float, 32>(paddedCount), paddedCount);
-        vZ = std::span<float>(g_EngineArena.Allocate<float, 32>(paddedCount), paddedCount);
+        vX = std::span<float>(t_PhysicsTransientArena.Allocate<float, 32>(paddedCount), paddedCount);
+        vY = std::span<float>(t_PhysicsTransientArena.Allocate<float, 32>(paddedCount), paddedCount);
+        vZ = std::span<float>(t_PhysicsTransientArena.Allocate<float, 32>(paddedCount), paddedCount);
         
         // pX.resize(paddedCount, 0.0f);
         // pY.resize(paddedCount, 0.0f);
@@ -118,23 +118,23 @@ public:
         // cellStartOffset.resize(TOTAL_CELLS, 0);
         // cellOccupancyMask.resize(TOTAL_CELLS / 64, 0); // 4,096 elements
 
-        particleCellIndices = std::span<uint32_t>(g_EngineArena.Allocate<uint32_t, 32>(paddedCount), paddedCount);
+        particleCellIndices = std::span<uint32_t>(t_PhysicsTransientArena.Allocate<uint32_t, 32>(paddedCount), paddedCount);
         
         // Setup Grid
-        cellStartOffset = std::span<uint32_t>(g_EngineArena.Allocate<uint32_t, 64>(TOTAL_CELLS), TOTAL_CELLS);
-        cellOccupancyMask = std::span<uint64_t>(g_EngineArena.Allocate<uint64_t, 64>(TOTAL_CELLS / 64), TOTAL_CELLS / 64);
+        cellStartOffset = std::span<uint32_t>(t_PhysicsTransientArena.Allocate<uint32_t, 64>(TOTAL_CELLS), TOTAL_CELLS);
+        cellOccupancyMask = std::span<uint64_t>(t_PhysicsTransientArena.Allocate<uint64_t, 64>(TOTAL_CELLS / 64), TOTAL_CELLS / 64);
 
         // --- ALLOCATE TEMPORARY BUFFERS FROM THE ARENA ---
-        temp_pX = std::span<float>(g_EngineArena.Allocate<float, 32>(paddedCount), paddedCount);
-        temp_pY = std::span<float>(g_EngineArena.Allocate<float, 32>(paddedCount), paddedCount);
-        temp_pZ = std::span<float>(g_EngineArena.Allocate<float, 32>(paddedCount), paddedCount);
+        temp_pX = std::span<float>(t_PhysicsTransientArena.Allocate<float, 32>(paddedCount), paddedCount);
+        temp_pY = std::span<float>(t_PhysicsTransientArena.Allocate<float, 32>(paddedCount), paddedCount);
+        temp_pZ = std::span<float>(t_PhysicsTransientArena.Allocate<float, 32>(paddedCount), paddedCount);
 
-        temp_vX = std::span<float>(g_EngineArena.Allocate<float, 32>(paddedCount), paddedCount);
-        temp_vY = std::span<float>(g_EngineArena.Allocate<float, 32>(paddedCount), paddedCount);
-        temp_vZ = std::span<float>(g_EngineArena.Allocate<float, 32>(paddedCount), paddedCount);
+        temp_vX = std::span<float>(t_PhysicsTransientArena.Allocate<float, 32>(paddedCount), paddedCount);
+        temp_vY = std::span<float>(t_PhysicsTransientArena.Allocate<float, 32>(paddedCount), paddedCount);
+        temp_vZ = std::span<float>(t_PhysicsTransientArena.Allocate<float, 32>(paddedCount), paddedCount);
 
-        temp_cellIndices = std::span<uint32_t>(g_EngineArena.Allocate<uint32_t, 32>(paddedCount), paddedCount);
-        temp_destIndices = std::span<uint32_t>(g_EngineArena.Allocate<uint32_t, 32>(paddedCount), paddedCount);
+        temp_cellIndices = std::span<uint32_t>(t_PhysicsTransientArena.Allocate<uint32_t, 32>(paddedCount), paddedCount);
+        temp_destIndices = std::span<uint32_t>(t_PhysicsTransientArena.Allocate<uint32_t, 32>(paddedCount), paddedCount);
 
         // Pre-allocate the working buffers ONCE
         // cellCounts.resize(TOTAL_CELLS, 0);
