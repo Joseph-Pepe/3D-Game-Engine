@@ -12,6 +12,14 @@
     #include <x86intrin.h> // For GCC/Clang
 #endif
 
+// C++26 Static Reflections to have the compiler automatically loop over the variables in the struct and generate print statements (i.e., scales automatically when new boolean fields are added in the struct).
+#if __has_include(<meta>) && (defined(__cplusplus) && __cplusplus > 202302L || defined(_MSVC_LANG) && _MSVC_LANG > 202302L)
+    #include <meta>
+    #define ENGINE_HAS_CXX26_META_REFLECTION 1
+#else
+    #define ENGINE_HAS_CXX26_META_REFLECTION 0
+#endif
+
 // ============================================================
 // HARDWARE DETECTION & DYNAMIC DISPATCH : BMI2 MICROCODE TRAP 
 // ============================================================
@@ -34,9 +42,8 @@ struct HardwareCapabilities {
     bool hasAVX512F = false;  // Foundation (The base 512-bit instructions)
     bool hasAVX512DQ = false; // Double/Quadword (Needed for certain float conversions)
     bool hasAVX512VL = false; // Vector Length Extensions (Allows using AVX-512 instructions on 256-bit registers)
-    
-    // The specific AMD microcode trap identified
-    bool isLegacyAMD_BMI2 = false; 
+
+    bool isLegacyAMD_BMI2 = false;  // The specific AMD microcode trap identified
 
     static HardwareCapabilities Detect() {
         HardwareCapabilities caps;
@@ -62,7 +69,6 @@ struct HardwareCapabilities {
 
             // OSXSAVE (Bit 27 in ECX): Does the OS know how to handle wide registers?
             bool osUsesXSAVE = (cpuInfo[2] & (1 << 27)) != 0;
-
             bool osSavesYMM = false;
             bool osSavesZMM = false;
 
@@ -131,14 +137,25 @@ struct HardwareCapabilities {
         return caps;
     }
 
-    // --- C++26 TELEMETRY DUMP ---
+    // --- C++26 REFLECTIVE TELEMETRY DUMP ---
     void PrintTelemetry() const {
         std::println("=== HARDWARE CAPABILITIES ===");
-        std::println("AVX:        {}", hasAVX ? "YES" : "NO");
-        std::println("AVX2:       {}", hasAVX2 ? "YES" : "NO");
-        std::println("FMA:        {}", hasFMA ? "YES" : "NO");
-        std::println("AVX-512 F:  {}", hasAVX512F ? "YES" : "NO");
-        std::println("BMI2:       {} {}", hasBMI2 ? "YES" : "NO", isLegacyAMD_BMI2 ? "(WARNING: Slow Microcode Detected)" : "");
+        
+        #if ENGINE_HAS_CXX26_META_REFLECTION
+            // C++26 Reflection: The compiler inspects the struct and generates the print statements automatically!
+            // '^^' gets the meta-info of the struct. '[: :]' splices it back into executable code.
+            [: expand(std::meta::nonstatic_data_members_of(^^HardwareCapabilities)) :] >> [&]<auto m>{
+                std::println("{:<20}: {}", std::meta::identifier_of(m), this->[:m:] ? "YES" : "NO");
+            };
+        #else
+            // C++23 Fallback
+            std::println("AVX:                {}", hasAVX ? "YES" : "NO");
+            std::println("AVX2:               {}", hasAVX2 ? "YES" : "NO");
+            std::println("FMA:                {}", hasFMA ? "YES" : "NO");
+            std::println("AVX-512 F:          {}", hasAVX512F ? "YES" : "NO");
+            std::println("Legacy AMD BMI2:    {}", isLegacyAMD_BMI2 ? "YES (Warning: Microcode Trap)" : "NO");
+        #endif
+        
         std::println("=============================");
     }
 };
