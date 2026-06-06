@@ -35,13 +35,13 @@
 #endif
 
 // ==================================================================================
-// CROSS-PLATFORM CACHE LINE ALIGNMENT
+// CROSS-PLATFORM CACHE CHUNK LINE ALIGNMENT
 // ==================================================================================
 // Prevents compilation errors on strict compilers while maintaining false-sharing protection.
 #if defined(__cpp_lib_hardware_interference_size)
-    constexpr std::size_t CACHE_CHUNK_SIZE = std::hardware_destructive_interference_size;
+    inline constexpr std::size_t ENGINE_CACHE_CHUNK_SIZE = std::hardware_destructive_interference_size;
 #else
-    constexpr std::size_t CACHE_CHUNK_SIZE = 64; // Standard L1 cache line size
+    inline constexpr std::size_t ENGINE_CACHE_CHUNK_SIZE = 64; // Standard L1 cache line size
 #endif
 
 // ==================================================================================
@@ -464,7 +464,7 @@ private:
     size_t   m_capacity;                                      // Total size of the arena in bytes
 
     // Aligned to 64 bytes to prevent false sharing with other class members
-    alignas(CACHE_CHUNK_SIZE) std::atomic<size_t> m_offset;   // The bump pointer (how much we have used), thread-safe! 
+    alignas(ENGINE_CACHE_CHUNK_SIZE) std::atomic<size_t> m_offset;   // The bump pointer (how much we have used), thread-safe! 
 
 public:
     // Ask the OS for a massive chunk of memory upfront, strictly aligned to 64 bytes (AVX-512 ready)
