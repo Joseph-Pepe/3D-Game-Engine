@@ -5,6 +5,19 @@
 #include <print>       // Formatting
 #include <cstdint>
 #include <array>
+#include <mdspan>
+#include <cstddef>
+
+#if __has_include(<inplace_vector>)
+    /*
+        // Replaces (std::vector). Zero heap allocations. Data is perfectly contiguous on the stack.
+        // Extremely cache friendly for your SIMD wrappers.
+        std::inplace_vector<Vector3D, 64> localCluster;
+    */
+    #include <inplace_vector> // C++26 API provides a vector that stores data locally without ever touvching the heap allocator.
+#endif 
+
+
 
 // --- COMPILER MACROS ---
 #ifndef FORCE_INLINE
@@ -23,6 +36,11 @@
 #else
     // Fallback for C++23 and older
     #define ENGINE_HAS_CXX26_SIMD 0
+#endif
+
+// C++26 linear algebra (compiler dependent availability)
+#if __has_include(<linear_algebra>)
+    #include <linear_algebra>
 #endif
 
 // ==================================================================================
@@ -157,7 +175,8 @@ alignas(64) inline constexpr std::array<uint32_t, 1024> g_MortonTableZ = Generat
 // }
 
 // The new blindingly fast scalar fallback
-FORCE_INLINE uint32_t getMortonCodeLUT(uint32_t x, uint32_t y, uint32_t z) {
+// Make this constexpr for C++26 so it can be evaluated entirely at compile-time for static level geometry
+FORCE_INLINE constexpr uint32_t getMortonCodeLUT(uint32_t x, uint32_t y, uint32_t z) {
 
     // 1. Bitwise mask to strictly enforce the [0, 1023] limit (0x3FF is 1023 in hex).
     // This executes in a fraction of a cycle and prevents catastrophic engine crashes.
@@ -792,13 +811,20 @@ public:
 // --- 3D CAMERA & MATRIX MATH ---
 // --- 4x4 MATRIX MATH (Stack Allocated, Column-Major for OpenGL) ---
 struct Matrix4 {
-    float m[16] = {0}; // Initializes to all zeros
+    // std::array for better safety and constexpr support than raw arrays.
+    alignas(64) std::array<float, 16> m{}; // Initializes to all zeros
 
     // Creates an Identity Matrix
     static constexpr Matrix4 Identity() {
         Matrix4 mat;
         mat.m[0] = 1.0f; mat.m[5] = 1.0f; mat.m[10] = 1.0f; mat.m[15] = 1.0f;
         return mat;
+    }
+
+    // C++23 mdspan gives you 2D syntax (mat[row, col]) over a 1D memory block with zero overhead
+    constexpr auto getView() {
+        // std::extents<Type, Rows, Cols> guarantees zero runtime overhead
+        return std::mdspan<float, std::extents<std::size_t, 4, 4>>(m.data());
     }
 
     // Creates a Perspective Projection Matrix
