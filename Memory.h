@@ -8,6 +8,11 @@
 #include <stacktrace>  // Required for std::stacktrace
 #include <atomic>      // Required for thread-safe arena
 
+#include <type_traits>
+#include <concepts>
+#include <span>
+#include <cassert>
+
 #include <iostream>    // Required for std::cerr
 #include <string_view> // Required for C++26 Reflection string views
 
@@ -162,6 +167,128 @@ ENGINE_FORCE_INLINE size_t GetPaddedCount(size_t count, size_t simdWidth = 8) {
 }
 
 // ==================================================================================
+// ARENA ARRAY (Zero-Initialization Container)
+// ==================================================================================
+/*
+    - Replaces std::vector for high-performance engine loops.
+    - Operates directly on top of the LinearArena.
+    - NEVER initializes memory on resize unless explicitly requested.
+    - Automatically propagates SIMD alignment hints to the compiler via std::assume_aligned.
+*/
+
+template <typename T, std::size_t Alignment = alignof(T)>
+class ArenaArray {
+private:
+    T* m_data;
+    std::size_t m_size;
+    std::size_t m_capacity;
+
+public:
+    // Delete default constructor to force explicit arena allocation
+    ArenaArray() = delete;
+    
+    // Disable copying to prevent massive memory duplicates (move semantics only)
+    ArenaArray(const ArenaArray&) = delete;
+    ArenaArray& operator=(const ArenaArray&) = delete;
+
+    // Fast Move Constructor
+    ArenaArray(ArenaArray&& other) noexcept 
+        : m_data(other.m_data), m_size(other.m_size), m_capacity(other.m_capacity) {
+        other.m_data = nullptr;
+        other.m_size = 0;
+        other.m_capacity = 0;
+    }
+
+    // ---------------------------------------------------------
+    // CONSTRUCTOR: Claim Memory, Bypass Constructors
+    // ---------------------------------------------------------
+    // Templated to accept either LocalLinearArena or ConcurrentLinearArena
+    template <typename ArenaType>
+    explicit ArenaArray(ArenaType& arena, std::size_t capacity) 
+        : m_size(0), m_capacity(capacity) {
+        // We claim the raw memory from the arena. 
+        // Zero constructors are called here. It is purely an O(1) pointer bump.
+        // 'template' keyword required here because ArenaType is a dependent type
+        m_data = arena.template Allocate<T, Alignment>(capacity);
+    }
+
+    // ---------------------------------------------------------
+    // O(1) ZERO-INITIALIZATION RESIZE
+    // ---------------------------------------------------------
+    ENGINE_FORCE_INLINE void ResizeUninitialized(std::size_t newSize) {
+        // Safety Guard: We strictly enforce trivial types for this operation.
+        // If someone tries to skip initialization on a struct containing a std::string or a smart pointer,
+        // it will crash the engine when it tries to destruct garbage memory.
+        static_assert(std::is_trivially_default_constructible_v<T>, 
+            "[ArenaArray] Fatal: T must be trivially default constructible to bypass initialization!");
+        
+        assert(newSize <= m_capacity && "ArenaArray exceeded reserved arena capacity!");
+        m_size = newSize;
+    }
+
+    // ---------------------------------------------------------
+    // FAST EMPLACE (For explicit initialization)
+    // ---------------------------------------------------------
+    template <typename... Args>
+    ENGINE_FORCE_INLINE T& EmplaceBack(Args&&... args) {
+        assert(m_size < m_capacity && "ArenaArray capacity overflow!");
+        
+        // Placement new: Construct the object directly into our pre-allocated arena memory
+        T* ptr = new (&m_data[m_size]) T(std::forward<Args>(args)...);
+        m_size++;
+        return *ptr;
+    }
+
+    // ---------------------------------------------------------
+    // FAST PUSH BACK (Uninitialized entry)
+    // ---------------------------------------------------------
+    ENGINE_FORCE_INLINE T& PushBackUninitialized() {
+        static_assert(std::is_trivially_default_constructible_v<T>);
+        assert(m_size < m_capacity && "ArenaArray capacity overflow!");
+        
+        return m_data[m_size++];
+    }
+
+    // ---------------------------------------------------------
+    // ALIGNED HARDWARE ACCESS
+    // ---------------------------------------------------------
+    // By using std::assume_aligned here, every time you loop over this array, 
+    // the C++ compiler knows it can safely emit AVX/AVX-512 instructions without checking for unaligned bounds.
+    [[nodiscard]] ENGINE_FORCE_INLINE T& operator[](std::size_t index) noexcept {
+        assert(index < m_size && "ArenaArray Out of Bounds!");
+        return *(std::assume_aligned<Alignment>(m_data) + index);
+    }
+
+    [[nodiscard]] ENGINE_FORCE_INLINE const T& operator[](std::size_t index) const noexcept {
+        assert(index < m_size && "ArenaArray Out of Bounds!");
+        return *(std::assume_aligned<Alignment>(m_data) + index);
+    }
+
+    // ---------------------------------------------------------
+    // C++20/C++26 STANDARD SPAN COMPATIBILITY
+    // ---------------------------------------------------------
+    // Allows this custom container to be passed directly into standard library algorithms
+    // (e.g., std::sort, std::ranges) without needing custom iterators.
+    [[nodiscard]] operator std::span<T>() noexcept {
+        return std::span<T>(std::assume_aligned<Alignment>(m_data), m_size);
+    }
+    
+    [[nodiscard]] operator std::span<const T>() const noexcept {
+        return std::span<const T>(std::assume_aligned<Alignment>(m_data), m_size);
+    }
+
+    // ---------------------------------------------------------
+    // TELEMETRY & VIEW
+    // ---------------------------------------------------------
+    [[nodiscard]] ENGINE_FORCE_INLINE std::size_t Size() const noexcept { return m_size; }
+    [[nodiscard]] ENGINE_FORCE_INLINE std::size_t Capacity() const noexcept { return m_capacity; }
+    
+    // Iterable range support
+    [[nodiscard]] ENGINE_FORCE_INLINE T* begin() noexcept { return std::assume_aligned<Alignment>(m_data); }
+    [[nodiscard]] ENGINE_FORCE_INLINE T* end() noexcept { return std::assume_aligned<Alignment>(m_data) + m_size; }
+};
+
+// ==================================================================================
 // C++26 DYNAMIC HARDWARE ALIGNMENT (Portable SIMD)
 // ==================================================================================
 
@@ -223,7 +350,7 @@ public:
         static_assert((Align & (Align - 1)) == 0, "Alignment must be a power of 2");
 
         #if ENGINE_HAS_CXX26_META_REFLECTION
-            constexpr std::string_view typeName = std::meta::identifier_of(^T);
+            [[maybe_unused]] constexpr std::string_view typeName = std::meta::identifier_of(^T);
         #endif
 
         // 1. Where are we currently in memory?
@@ -261,7 +388,7 @@ public:
         static_assert((Align & (Align - 1)) == 0, "Alignment must be a power of 2");
 
         #if ENGINE_HAS_CXX26_META_REFLECTION
-            constexpr std::string_view typeName = std::meta::identifier_of(^T);
+            [[maybe_unused]] constexpr std::string_view typeName = std::meta::identifier_of(^T);
         #endif
         
         // 1. CAPACITY PADDING: Round the requested count UP to the nearest multiple of the SIMD width (e.g., 8 for AVX2), so it does not read past the end of the allocation preventing memory corruption.
@@ -354,7 +481,7 @@ public:
 
         #if ENGINE_HAS_CXX26_META_REFLECTION
             // C++26 Reflection: Introspect the type at compile-time to get its string identifier
-            constexpr std::string_view typeName = std::meta::identifier_of(^T);
+            [[maybe_unused]] constexpr std::string_view typeName = std::meta::identifier_of(^T);
         #endif 
 
         size_t oldOffset = m_offset.load(std::memory_order_relaxed);
@@ -404,7 +531,7 @@ public:
 
         #if ENGINE_HAS_CXX26_META_REFLECTION
             // C++26 Reflection: Introspect the type at compile-time to get its string identifier
-            constexpr std::string_view typeName = std::meta::identifier_of(^T);
+            [[maybe_unused]] constexpr std::string_view typeName = std::meta::identifier_of(^T);
         #endif
         
         // 1. CAPACITY PADDING: Round the requested count UP to the nearest multiple of the SIMD width (e.g., 8 for AVX2), so it does not read past the end of the allocation preventing memory corruption.
