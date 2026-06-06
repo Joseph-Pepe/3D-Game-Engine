@@ -515,6 +515,7 @@ public:
             if (totalAllocationSize < 65536) [[unlikely]] {
                 // In a real engine, send this to the telemetry system. 
                 // Threads should be asking for at least 64KB chunks to prevent cache-line bouncing.
+                std::println(std::cerr, "[BOUNCE] Thread Allocated Tiny Amount: {} bytes", totalAllocationSize);
             }
 
             // 3. Out of Memory Guard
