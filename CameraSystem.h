@@ -9,6 +9,36 @@
 
 #include "Math.h"
 
+#if __has_include(<inplace_vector>)
+    /*
+        // Replaces (std::vector). Zero heap allocations. Data is perfectly contiguous on the stack.
+        // Extremely cache friendly for your SIMD wrappers.
+        std::inplace_vector<Vector3D, 64> localCluster;
+    */
+    #include <inplace_vector> // C++26 API provides a vector that stores data locally without ever touching the heap allocator.
+    #define ENGINE_HAS_CXX26_INPLACE_VECTOR 1
+#else
+    #define ENGINE_HAS_CXX26_INPLACE_VECTOR 0
+#endif
+
+#if __has_include(<meta>) && (defined(__cplusplus) && __cplusplus > 202302L || defined(_MSVC_LANG) && _MSVC_LANG > 202302L)
+    #include <meta>        // Required for C++26 reflection
+    #define ENGINE_HAS_CXX26_META_REFLECTION 1
+
+    // C++26 Reflection: Zero-overhead Enum to String
+    template <typename E>
+    constexpr std::string_view EnumToString(E value) {
+        std::string_view result = "<unknown>";
+        // [: :] is the C++26 splice operator, ^^ reflects the type
+        [: expand(std::meta::enumerators_of(^^E)) :] >> [&]<auto e>{
+            if (value == [:e:]) result = std::meta::identifier_of(e);
+        };
+        return result;
+    }
+#else
+    #define ENGINE_HAS_CXX26_META_REFLECTION 0
+#endif
+
 // ==================================================================================
 // 3D CAMERA & Catmull-Rom Spline
 // ==================================================================================
@@ -21,9 +51,17 @@
 // --- CINEMATIC CAMERA SYSTEM ---
 class CinematicCamera {
 private:
-    // Kept as Vector3DStack because CatmullRom uses heavy vector math operations where SSE acceleration actually benefits the 4-point polynomial evaluation.
-    std::vector<Vector3DStack> controlPoints;
-    std::vector<Vector3DStack> lookAtTargets;
+    // C++26 (std::inplace_vector): Stored directly on the stack/arena. Zero heap fragmentation. Replaces std::vector
+    #if ENGINE_HAS_CXX26_INPLACE_VECTOR
+        // Specify the maximum number of waypoints (e.g., 64). This pre-allocates exactly 1024 bytes (64 * 16 bytes) directly inside the class footprint.
+        std::inplace_vector<Vector3DStack, 64> controlPoints;
+        std::inplace_vector<Vector3DStack, 64> lookAtTargets;
+    #else
+        // Kept as Vector3DStack because CatmullRom uses heavy vector math operations where SSE acceleration actually benefits the 4-point polynomial evaluation.
+        std::vector<Vector3DStack> controlPoints;
+        std::vector<Vector3DStack> lookAtTargets;
+    #endif
+
     float currentProgress = 0.0f;  // Global timeline progress (0.0 to 1.0)
     float traversalSpeed = 0.1f;   // Percentage of track completed per second
 
@@ -145,6 +183,11 @@ public:
             - Calcultes an offset based on enum integer and performs a single, direct memory jump to the correct logic.
             - Bypasses branch predictor.
         */
+
+        #if ENGINE_HAS_CXX26_META_REFLECTION
+            // Automatically prints: "Input: FORWARD" without writing a massive switch block
+            std::println("Input: {}", EnumToString(direction));
+        #endif
 
         // Branchless Jump Table via Switch
         switch (direction) {
