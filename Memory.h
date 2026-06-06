@@ -35,6 +35,16 @@
 #endif
 
 // ==================================================================================
+// CROSS-PLATFORM CACHE LINE ALIGNMENT
+// ==================================================================================
+// Prevents compilation errors on strict compilers while maintaining false-sharing protection.
+#if defined(__cpp_lib_hardware_interference_size)
+    constexpr std::size_t CACHE_CHUNK_SIZE = std::hardware_destructive_interference_size;
+#else
+    constexpr std::size_t CACHE_CHUNK_SIZE = 64; // Standard L1 cache line size
+#endif
+
+// ==================================================================================
 // C++26 SIMD DETECTION, NATIVE SIMD ALIGNMENT
 // ==================================================================================
 
@@ -105,7 +115,9 @@ struct AlignedAllocator {
         // --- C++26 COMPILE-TIME EVALUATION ---
         // If the compiler is generating data before the game boots, use standard memory.
         if consteval {
-            return std::allocator<T>{}.allocate(n); // Can declare constexpr AlignedVector<float> which generates the math during compilation and embeds the results directly into the executable binary, and load it into the AVX2-aligned arrays at runtime with zero CPU cycles spent on calculation. 
+            // C++26 standard way to handle constexpr allocation safely
+            std::allocator<T> alloc;
+            return std::allocator_traits<std::allocator<T>>::allocate(alloc, n); // Can declare constexpr AlignedVector<float> which generates the math during compilation and embeds the results directly into the executable binary, and load it into the AVX2-aligned arrays at runtime with zero CPU cycles spent on calculation. 
         } else {
             // Runtime Engine Execution: Strict AVX2 Hardware Alignment
             if (n > std::numeric_limits<std::size_t>::max() / sizeof(T)) throw std::bad_alloc();
@@ -448,9 +460,11 @@ public:
 
 class ConcurrentLinearArena {
 private:
-    uint8_t* m_memory;              // The master pointer to our massive memory block
-    size_t   m_capacity;            // Total size of the arena in bytes
-    std::atomic<size_t> m_offset;   // The bump pointer (how much we have used), thread-safe! 
+    uint8_t* m_memory;                                        // The master pointer to our massive memory block
+    size_t   m_capacity;                                      // Total size of the arena in bytes
+
+    // Aligned to 64 bytes to prevent false sharing with other class members
+    alignas(CACHE_CHUNK_SIZE) std::atomic<size_t> m_offset;   // The bump pointer (how much we have used), thread-safe! 
 
 public:
     // Ask the OS for a massive chunk of memory upfront, strictly aligned to 64 bytes (AVX-512 ready)
@@ -496,6 +510,12 @@ public:
             // Formula pushes the address forward to the nearest multiple of the requested alignment.
             padding = (Align - (currentAddress & (Align - 1))) & (Align - 1);
             totalAllocationSize = padding + (count * sizeof(T));
+
+            // Warn if threads are hammering this for tiny allocations
+            if (totalAllocationSize < 65536) [[unlikely]] {
+                // In a real engine, send this to the telemetry system. 
+                // Threads should be asking for at least 64KB chunks to prevent cache-line bouncing.
+            }
 
             // 3. Out of Memory Guard
             if (oldOffset + totalAllocationSize > m_capacity) [[unlikely]] {
