@@ -77,38 +77,38 @@ struct ParticleEmitterComponent {
 template <typename T>
 void DrawComponentUI(T& component, const char* componentName) {
     if (ImGui::CollapsingHeader(componentName, ImGuiTreeNodeFlags_DefaultOpen)) {
-        
-        // C++26: Get the reflection info object for the struct 'T'
-        constexpr std::meta::info type_info = ^T;
 
-        // C++26: 'template for' unrolls this loop at COMPILE TIME. 
-        // Zero runtime branching. It physically emits the ImGui calls into the binary.
-        template for (constexpr auto member : std::meta::data_members_of(type_info)) {
-            
-            // Get the actual string name of the variable (e.g., "velocity" or "mass")
-            constexpr std::string_view name = std::meta::name_of(member);
-            
-            // Get the type of the variable
-            constexpr std::meta::info member_type = std::meta::type_of(member);
+        #if ENGINE_HAS_CXX26_META_REFLECTION
+            // C++26: Unroll the struct members at compile-time
+            constexpr auto members = std::meta::nonstatic_data_members_of(^T);
 
-            // C++26 SPLICING: [:member:] converts the reflection info back into actual C++ memory access!
-            auto& value = component.[:member:];
+            // Zero runtime branching. It physically emits the ImGui calls into the binary.
+            [: expand(members) :] >> [&]<auto member>{
+                // Get the actual string name of the variable (e.g., "velocity" or "mass")
+                constexpr std::string_view name = std::meta::identifier_of(member);
+                
+                // Get the type of the variable
+                constexpr std::meta::info member_type = std::meta::type_of(member);
 
-            // --- AUTO-DETECT TYPES AND DRAW THE CORRECT UI ---
-            if constexpr (member_type == ^float) {
-                ImGui::DragFloat(name.data(), &value, 0.1f);
-            } 
-            else if constexpr (member_type == ^int) {
-                ImGui::DragInt(name.data(), &value, 1);
-            }
-            else if constexpr (member_type == ^bool) {
-                ImGui::Checkbox(name.data(), &value);
-            }
-            else if constexpr (member_type == ^Vector3DScalar) {
-                // Because ImGui expects a float[3], we can safely cast our POD struct
-                ImGui::DragFloat3(name.data(), &value.x, 0.1f);
-            }
-        }
+                // C++26 SPLICING: [:member:] converts the reflection info back into actual C++ memory access! Access the memory address directly
+                auto& value = component.[:member:];
+
+                // --- AUTO-DETECT TYPES AND DRAW THE CORRECT UI ---
+                if constexpr (member_type == ^float) {
+                    ImGui::DragFloat(name.data(), &value, 0.1f);
+                } 
+                else if constexpr (member_type == ^int) {
+                    ImGui::DragInt(name.data(), &value, 1);
+                }
+                else if constexpr (member_type == ^bool) {
+                    ImGui::Checkbox(name.data(), &value);
+                }
+                else if constexpr (member_type == ^Vector3DScalar) {
+                    // Because ImGui expects a float[3], we can safely cast our POD struct
+                    ImGui::DragFloat3(name.data(), &value.x, 0.1f);
+                }
+            };
+        #endif
     }
 }
 
@@ -325,6 +325,7 @@ struct EntityRecord {
 // Global lookup table
 std::vector<EntityRecord> entityDirectory(MAX_ENTITIES);
 
+// --- FLAT MEMORY CHUNK ---
 // A single block of memory holding 256 entities of the EXACT same signature
 struct ArchetypeChunk {
     uint32_t activeCount = 0;
@@ -332,10 +333,29 @@ struct ArchetypeChunk {
     // REVERSE LOOKUP: Maps Lane Index -> Entity ID
     Entity entities[ENTITIES_PER_CHUNK];
     
+    // 1. ONE single contiguous heap allocation for the entire chunk
+    std::vector<std::byte> rawMemory;
+    
     // Type-erased memory for the components. 
-    // e.g., If this archetype has Transform and Physics, this array contains:
-    // [Transform x 256] followed by [PhysicsChunk8 x 32]
-    std::vector<std::vector<std::byte>> componentBuffers; 
+    // e.g., If this archetype has Transform and Physics, this array contains: [Transform x 256] followed by [PhysicsChunk8 x 32]
+
+    // 2. Zero-cost views into the flat memory block for each component type
+    std::vector<std::span<std::byte>> componentBuffers;
+
+    void AllocateFlatMemory(const std::vector<size_t>& strides) {
+        size_t totalBytes = 0;
+        for (size_t stride : strides) totalBytes += stride * ENTITIES_PER_CHUNK;
+        
+        rawMemory.resize(totalBytes);
+        
+        // Slice the raw memory into spans
+        size_t offset = 0;
+        for (size_t stride : strides) {
+            size_t size = stride * ENTITIES_PER_CHUNK;
+            componentBuffers.emplace_back(rawMemory.data() + offset, size);
+            offset += size;
+        }
+    }
 };
 
 class Archetype {
@@ -368,22 +388,21 @@ public:
         : signature(sig), componentIDs(ids), componentStrides(strides) {}
 };
 
-#include <unordered_map>
 
 class ArchetypeManager {
 private:
     // Owns the memory of all unique archetypes in the engine
     std::vector<std::unique_ptr<Archetype>> allArchetypes;
     
-    // Quick lookup to see if an archetype already exists anywhere in the world
-    std::unordered_map<ComponentMask, Archetype*> archetypeDirectory;
+    // Flat arrays guarantee data is stored contiguously.
+    std::vector<ComponentMask> directoryKeys;
+    std::vector<Archetype*> directoryValues;
 
-    // Archetype based on a bitmask signature
+    // Archetype based on a bitmask signature used to search and append to flat vectors.
     Archetype* GetOrCreateArchetype(ComponentMask targetSignature) {
-        // 1. Does it already exist?
-        auto it = archetypeDirectory.find(targetSignature);
-        if (it != archetypeDirectory.end()) {
-            return it->second;
+        // 1. Does it already exist? (Fast linear scan)
+        for (size_t i = 0; i < directoryKeys.size(); ++i) {
+            if (directoryKeys[i] == targetSignature) return directoryValues[i];
         }
 
         // 2. If not, allocate it, initialize its memory chunks, and register it.
@@ -392,7 +411,10 @@ private:
         
         // (You would initialize componentIDs and Strides here based on the mask)
         
-        archetypeDirectory[targetSignature] = ptr;
+        // 3. Register in our flat directory arrays
+        directoryKeys.push_back(targetSignature);
+        directoryValues.push_back(ptr);
+        
         allArchetypes.push_back(std::move(newArchetype));
         
         return ptr;
@@ -404,13 +426,14 @@ public:
         GetOrCreateArchetype(0);
     }
 
-    // Lookup for the ECS to find an entity's current home
+    // Lookup for the ECS to find an entity's current home using linear scan of vector instead of a map.
     Archetype* GetArchetype(ComponentMask signature) {
-        auto it = archetypeDirectory.find(signature);
-        if (it != archetypeDirectory.end()) {
-            return it->second;
+        // Linear scan of a contiguous vector is significantly faster than std::unordered_map 
+        // node-chasing for datasets under ~500 elements.
+        for (size_t i = 0; i < directoryKeys.size(); ++i) {
+            if (directoryKeys[i] == signature) return directoryValues[i];
         }
-        return nullptr; 
+        return nullptr;
     }
 
     // ==========================================
