@@ -950,6 +950,61 @@ struct alignas(64) Matrix4x4_SIMD {
         mat.col[3] = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f); // { 0, 0, 0, 1 }
         return mat;
     }
+
+    // --- __MM_TRNASPOSE4_PS ---
+    /*
+        - Rendering APIs require matrices to be formatted in column-major order.
+        - Instead of extracting floats sequentially to flip the rows into columns, SSE has a built in macro to transpose a 4x4 matrix across four registers in a few clock cycles.
+    */
+    static FORCE_INLINE Matrix4x4_SIMD LookAtLWC_SIMD(const Vector3DWorld& eye, const Vector3DWorld& target, const Vector3D& upVec) {
+        
+        // 1. Calculate World Difference & Cast to 32-bit SIMD (Vector3D is your SSE wrapper class)
+        Vector3DWorld worldDiff = target - eye;
+        Vector3D f = Vector3D(static_cast<float>(worldDiff.x), 
+                            static_cast<float>(worldDiff.y), 
+                            static_cast<float>(worldDiff.z), 
+                            0.0f); // Ensure W is 0.0f for directional vectors
+        
+        // Normalize Forward
+        float fLenSq = f.dot(f);
+        if (fLenSq > 1e-8f) f = f * (1.0f / std::sqrt(fLenSq));
+
+        // 2. Right Vector (X) - SIMD Cross Product
+        Vector3D r = f.cross(upVec);
+        float rLenSq = r.dot(r);
+        if (rLenSq > 1e-8f) r = r * (1.0f / std::sqrt(rLenSq));
+
+        // 3. Up Vector (Y) - SIMD Cross Product
+        Vector3D u = r.cross(f);
+
+        // 4. Negate the Forward vector (Required for Right-Handed Coordinate Systems)
+        // Flip the sign bit in hardware without multiplication: XOR with -0.0f
+        __m128 negZero = _mm_set1_ps(-0.0f);
+        __m128 negF = _mm_xor_ps(f.reg, negZero);
+
+        // 5. Load our rows. 
+        // We force the W component of these row vectors to 0.0f, except for the bottom row.
+        __m128 row0 = r.reg;     // { Rx, Ry, Rz, 0 }
+        __m128 row1 = u.reg;     // { Ux, Uy, Uz, 0 }
+        __m128 row2 = negF;      // {-Fx,-Fy,-Fz, 0 }
+        __m128 row3 = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f); // { 0, 0, 0, 1 }
+
+        // 6. THE MAGIC TRICK: Hardware Transpose
+        // This flips our rows into Column-Major format in-place!
+        _MM_TRANSPOSE4_PS(row0, row1, row2, row3);
+
+        // 7. Store the transposed registers directly into the matrix columns.
+        Matrix4x4_SIMD mat;
+        mat.col[0] = row0;
+        mat.col[1] = row1;
+        mat.col[2] = row2;
+        mat.col[3] = row3;
+
+        // Notice we do NOT calculate translation (-r.dot(eye), etc.). 
+        // Because we are using Large World Coordinates (LWC), the camera is ALWAYS at (0,0,0)!
+        
+        return mat;
+    }
 };
 
 // --- SIMD MATRIX OPERATORS ---
@@ -1100,61 +1155,6 @@ struct Matrix4 {
         // 5. Now, you build your Model Matrix using `relativeLocalPos` and send it to the GPU!
         Matrix4 treeModelMatrix = BuildTranslationMatrix(relativeLocalPos);
     */
-
-    // --- __MM_TRNASPOSE4_PS ---
-    /*
-        - Rendering APIs require matrices to be formatted in column-major order.
-        - Instead of extracting floats sequentially to flip the rows into columns, SSE has a built in macro to transpose a 4x4 matrix across four registers in a few clock cycles.
-    */
-    static FORCE_INLINE Matrix4x4_SIMD LookAtLWC_SIMD(const Vector3DWorld& eye, const Vector3DWorld& target, const Vector3D& upVec) {
-        
-        // 1. Calculate World Difference & Cast to 32-bit SIMD (Vector3D is your SSE wrapper class)
-        Vector3DWorld worldDiff = target - eye;
-        Vector3D f = Vector3D(static_cast<float>(worldDiff.x), 
-                            static_cast<float>(worldDiff.y), 
-                            static_cast<float>(worldDiff.z), 
-                            0.0f); // Ensure W is 0.0f for directional vectors
-        
-        // Normalize Forward
-        float fLenSq = f.dot(f);
-        if (fLenSq > 1e-8f) f = f * (1.0f / std::sqrt(fLenSq));
-
-        // 2. Right Vector (X) - SIMD Cross Product
-        Vector3D r = f.cross(upVec);
-        float rLenSq = r.dot(r);
-        if (rLenSq > 1e-8f) r = r * (1.0f / std::sqrt(rLenSq));
-
-        // 3. Up Vector (Y) - SIMD Cross Product
-        Vector3D u = r.cross(f);
-
-        // 4. Negate the Forward vector (Required for Right-Handed Coordinate Systems)
-        // Flip the sign bit in hardware without multiplication: XOR with -0.0f
-        __m128 negZero = _mm_set1_ps(-0.0f);
-        __m128 negF = _mm_xor_ps(f.reg, negZero);
-
-        // 5. Load our rows. 
-        // We force the W component of these row vectors to 0.0f, except for the bottom row.
-        __m128 row0 = r.reg;     // { Rx, Ry, Rz, 0 }
-        __m128 row1 = u.reg;     // { Ux, Uy, Uz, 0 }
-        __m128 row2 = negF;      // {-Fx,-Fy,-Fz, 0 }
-        __m128 row3 = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f); // { 0, 0, 0, 1 }
-
-        // 6. THE MAGIC TRICK: Hardware Transpose
-        // This flips our rows into Column-Major format in-place!
-        _MM_TRANSPOSE4_PS(row0, row1, row2, row3);
-
-        // 7. Store the transposed registers directly into the matrix columns.
-        Matrix4x4_SIMD mat;
-        mat.col[0] = row0;
-        mat.col[1] = row1;
-        mat.col[2] = row2;
-        mat.col[3] = row3;
-
-        // Notice we do NOT calculate translation (-r.dot(eye), etc.). 
-        // Because we are using Large World Coordinates (LWC), the camera is ALWAYS at (0,0,0)!
-        
-        return mat;
-    }
 };
 
 // --- MATH UTILITIES FOR CAMERA PATHING (SPLINES & LINEAR ALGEBRA) ---
