@@ -1221,3 +1221,63 @@ FORCE_INLINE Vector3DStack CatmullRom(const Vector3DStack& p0, const Vector3DSta
 
     return (v0 + v1 + v2 + v3) * 0.5f;
 }
+
+// ==================================================================================
+// 5. ENGINE SUBSYSTEMS & PHYSICS
+// ==================================================================================
+#if ENGINE_HAS_CXX26_SIMD
+// --- DATA-ORIENTED PARTICLE SYSTEM (AoSoA PIPELINE) ---
+class ParticleSystem {
+private:
+    // Every element in this vector represents a BATCH of particles 
+    // (4 on ARM, 8 on AVX2, 16 on AVX-512).
+    // Because SIMDVector3D is aligned to NATIVE_SIMD_BATCH_ALIGN, std::vector
+    // will perfectly pack these into sequential CPU cache lines.
+    std::vector<SIMDVector3D> m_positions;
+    std::vector<SIMDVector3D> m_velocities;
+    
+    // We track the exact number of active particles, not just the batch count.
+    size_t m_activeParticleCount = 0;
+
+public:
+    // Pre-allocate memory to avoid heap fragmentation
+    void Initialize(size_t maxParticles) {
+        // Divide by the hardware's native batch size, rounding up.
+        size_t batchCount = (maxParticles + NATIVE_BATCH_SIZE - 1) / NATIVE_BATCH_SIZE;
+        
+        m_positions.resize(batchCount);
+        m_velocities.resize(batchCount);
+    }
+
+    // This loop will chew through millions of particles per millisecond.
+    void Update(float deltaTime) {
+        // 1. Broadcast the scalar delta time into a hardware SIMD register ONCE.
+        NativeFloatSIMDBatch dtBatch = deltaTime; 
+
+        // 2. Iterate over the batches (NOT individual particles)
+        size_t activeBatches = (m_activeParticleCount + NATIVE_BATCH_SIZE - 1) / NATIVE_BATCH_SIZE;
+
+        for (size_t i = 0; i < activeBatches; ++i) {
+            
+            // 3. Load velocities into registers
+            NativeFloatSIMDBatch velX = m_velocities[i].x;
+            NativeFloatSIMDBatch velY = m_velocities[i].y;
+            NativeFloatSIMDBatch velZ = m_velocities[i].z;
+
+            // 4. Calculate movement: Velocity * DeltaTime
+            velX *= dtBatch;
+            velY *= dtBatch;
+            velZ *= dtBatch;
+
+            // 5. Apply Fused Multiply-Add (Position = Position + (Velocity * dt))
+            // Because you built `add()` to accept NativeFloatSIMDBatch, this automatically 
+            // maps to hardware vector addition.
+            m_positions[i].add(velX, velY, velZ);
+
+            // Notice there are NO if-statements, NO branching, and NO function overhead.
+            // The hardware prefetcher will detect this linear memory access pattern 
+            // immediately and stream the L1 cache ahead of the CPU's execution ports.
+        }
+    }
+};
+#endif
