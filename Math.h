@@ -820,6 +820,7 @@ public:
     - The object is now a 32-bit float offset relative to the camera, safely within the zone of high-precision floating-point math (i.e., camera-relative rendering).
     - Allows SIMD to process it at maximum speed.
     - This will replace Vector3DStack only for the absolute position property of the entities and the camera.
+    - Absolute world positions are tracked in 64-bit space, physics and rendering are done in 32-bit floats relative to the camera.
 */
 
 struct Vector3DWorld {
