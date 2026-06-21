@@ -68,6 +68,13 @@ FORCE_INLINE float hsum_avx2(__m256 v) {
 // ===============================================
 // CRYPTOGRAPHIC RANDOM NUMBER GENERATOR & MAPPING
 // ===============================================
+/*
+    - XorShift32 has statistical flaws, low-dimensional equidistribution errors.
+    - For things like procedural generation, terrain noise, or monte carlo raytracing it will eventuallly produce visible banding or artifacting.
+
+    - PCG32 (Permuted Congruential Generator) uses an LCG (Linear Congruential Generator), but applies a bitwise output permutation ot destroy the predictability.
+    - Its just as fast and better than XorShift32.
+*/
 
 // --- FAST STATELESS PRNG ---
 // Executes in ~1-2 clock cycles entirely inside the ALU registers.
@@ -76,6 +83,22 @@ FORCE_INLINE uint32_t XorShift32(uint32_t& state) {
     state ^= state >> 17;
     state ^= state << 5;
     return state;
+}
+
+// --- FAST STATELESS PRNG (PCG32) ---
+// Requires a 64-bit state, returns a perfectly distributed 32-bit random number.
+FORCE_INLINE uint32_t PCG32(uint64_t& state) {
+    uint64_t oldState = state;
+    
+    // 1. Advance internal state (Multiplier and Increment are PCG standards)
+    state = oldState * 6364136223846793005ULL + 1ULL;
+    
+    // 2. Calculate output function (XSH RR - Xorshift High bits, Random Rotate)
+    uint32_t xorshifted = static_cast<uint32_t>(((oldState >> 18u) ^ oldState) >> 27u);
+    uint32_t rot = static_cast<uint32_t>(oldState >> 59u);
+    
+    // 3. Bitwise rotation 
+    return (xorshifted >> rot) | (xorshifted << ((-rot) & 31));
 }
 
 // --- DIVISION-LESS RANGE MAPPING ---
@@ -379,6 +402,28 @@ FORCE_INLINE __m256i getMortonCode_AVX2(__m256i x, __m256i y, __m256i z) {
             std::simd::where(!validMask, z) = 0.0f;
         }
     };
+
+    // Let the compiler dynamically pick 4-wide (NEON), 8-wide (AVX2), or 16-wide (AVX-512) integers
+    using NativeUIntBatch = std::simd<uint32_t, std::simd_abi::native<uint32_t>>;
+
+    // --- C++26 PORTABLE MORTON CODE VECTORIZATION (CROSS-PLATFORM) ---
+    FORCE_INLINE NativeUIntBatch expandBits_SIMD(NativeUIntBatch v) {
+        // The compiler automatically translates these bitwise operators into vector instructions
+        // e.g., _mm256_slli_epi32 and _mm256_and_si256 on Intel!
+        v = (v | (v << 16)) & 0x030000FF;
+        v = (v | (v <<  8)) & 0x0300F00F;
+        v = (v | (v <<  4)) & 0x030C30C3;
+        v = (v | (v <<  2)) & 0x09249249;
+        return v;
+    }
+
+    FORCE_INLINE NativeUIntBatch getMortonCode_SIMD(const NativeUIntBatch& x, const NativeUIntBatch& y, const NativeUIntBatch& z) {
+        NativeUIntBatch ex = expandBits_SIMD(x);
+        NativeUIntBatch ey = expandBits_SIMD(y) << 1;
+        NativeUIntBatch ez = expandBits_SIMD(z) << 2;
+
+        return ex | ey | ez;
+    }
 #endif
 
 // ================================================================================
