@@ -810,6 +810,46 @@ public:
 };
 
 // ==================================================================================
+// LARGE WORLD COORDINATES (LWC)
+// ==================================================================================
+/*
+    - The GPU only ever sees 32-bit floats and SIMD registers only process 32-bit floats.
+    - World Space (64-bit):Entities, Transforms, and the camera track their absolute positions in the universe using doubles.
+    - Local Space (32-bit): Before rendering or running local physics (like collision subtraction), you subtract the camera's world position form the object's world position.
+    - Result: The camera becomes the center of the universe (0, 0, 0).
+    - The object is now a 32-bit float offset relative to the camera, safely within the zone of high-precision floating-point math (i.e., camera-relative rendering).
+    - Allows SIMD to process it at maximum speed.
+    - This will replace Vector3DStack only for the absolute position property of the entities and the camera.
+*/
+
+struct Vector3DWorld {
+    // Dedicated 64-bit scalar vector.
+    double x, y, z;
+
+    constexpr Vector3DWorld(double x = 0.0, double y = 0.0, double z = 0.0) 
+        : x(x), y(y), z(z) {}
+
+    // Standard addition for moving objects in the world
+    FORCE_INLINE constexpr Vector3DWorld operator+(const Vector3DWorld& other) const {
+        return Vector3DWorld(x + other.x, y + other.y, z + other.z);
+    }
+
+    // Subtraction is the most important operator in LWC.
+    // It returns the difference between two massive world coordinates.
+    FORCE_INLINE constexpr Vector3DWorld operator-(const Vector3DWorld& other) const {
+        return Vector3DWorld(x - other.x, y - other.y, z - other.z);
+    }
+
+    // --- THE LWC BRIDGE ---
+    // Safely casts a 64-bit world difference down to your ultra-fast 32-bit SIMD vector.
+    FORCE_INLINE Vector3DStack toFloatVector() const {
+        return Vector3DStack(static_cast<float>(x), static_cast<float>(y), static_cast<float>(z));
+    }
+};
+
+
+
+// ==================================================================================
 // 4. MATRICES & INTERPOLATION
 // ==================================================================================
 
@@ -884,6 +924,112 @@ struct Matrix4 {
         mat.m[14] = f.dot(eye);
         return mat;
     }
+
+    // --- LWC CAMERA-RELATIVE LOOK-AT ---
+    // Notice the inputs are Vector3DWorld (double), but the matrix is float.
+    static Matrix4 LookAtLWC(const Vector3DWorld& eye, const Vector3DWorld& target, const Vector3DStack& upVec) {
+        
+        // 1. Calculate the forward vector in 64-bit space to prevent jitter at massive distances
+        Vector3DWorld worldForward = target - eye;
+        
+        // 2. Cast down to 32-bit float for the math. 
+        // Because it's a directional vector (difference), the cast is perfectly safe!
+        Vector3DStack f = worldForward.toFloatVector();
+        
+        // Use your fast SIMD dot product to normalize
+        float fLenSq = f.dot(f);
+        if (fLenSq > 1e-8f) {
+            f *= (1.0f / std::sqrt(fLenSq));
+        }
+
+        // 3. Right Vector (X)
+        Vector3DStack r = f.cross(upVec);
+        float rLenSq = r.dot(r);
+        if (rLenSq > 1e-8f) {
+            r *= (1.0f / std::sqrt(rLenSq));
+        }
+
+        // 4. Up Vector (Y)
+        Vector3DStack u = r.cross(f);
+
+        // 5. Build Column-Major Matrix
+        Matrix4 mat = Identity();
+        mat.m[0] = r.data[0];  mat.m[4] = r.data[1];  mat.m[8] = r.data[2];
+        mat.m[1] = u.data[0];  mat.m[5] = u.data[1];  mat.m[9] = u.data[2];
+        mat.m[2] = -f.data[0]; mat.m[6] = -f.data[1]; mat.m[10] = -f.data[2];
+        
+        // 6. ZERO TRANSLATION!
+        // Because every object will be rendered relative to the camera, the camera is always at (0,0,0).
+        mat.m[12] = 0.0f; 
+        mat.m[13] = 0.0f; 
+        mat.m[14] = 0.0f; 
+
+        return mat;
+    }
+
+    // --- LWC CAMERA-RELATIVE RENDERING LOOK-AT ---
+    // View Matrix: No longer needs translation with camera-relative rendering, only handles rotation.
+    // Notice the inputs are Vector3DWorld (double), but the matrix is float.
+    static Matrix4 LookAtLWC(const Vector3DWorld& eye, const Vector3DWorld& target, const Vector3DStack& upVec) {
+        
+        // 1. Calculate the forward vector in 64-bit space to prevent jitter at massive distances
+        Vector3DWorld worldForward = target - eye;
+        
+        // 2. Cast down to 32-bit float for the math. 
+        // Because it's a directional vector (difference), the cast is perfectly safe!
+        Vector3DStack f = worldForward.toFloatVector();
+        
+        // Use your fast SIMD dot product to normalize
+        float fLenSq = f.dot(f);
+        if (fLenSq > 1e-8f) {
+            f *= (1.0f / std::sqrt(fLenSq));
+        }
+
+        // 3. Right Vector (X)
+        Vector3DStack r = f.cross(upVec);
+        float rLenSq = r.dot(r);
+        if (rLenSq > 1e-8f) {
+            r *= (1.0f / std::sqrt(rLenSq));
+        }
+
+        // 4. Up Vector (Y)
+        Vector3DStack u = r.cross(f);
+
+        // 5. Build Column-Major Matrix
+        Matrix4 mat = Identity();
+        mat.m[0] = r.data[0];  mat.m[4] = r.data[1];  mat.m[8] = r.data[2];
+        mat.m[1] = u.data[0];  mat.m[5] = u.data[1];  mat.m[9] = u.data[2];
+        mat.m[2] = -f.data[0]; mat.m[6] = -f.data[1]; mat.m[10] = -f.data[2];
+        
+        // 6. ZERO TRANSLATION!
+        // Because every object will be rendered relative to the camera, the camera is always at (0,0,0).
+        mat.m[12] = 0.0f; 
+        mat.m[13] = 0.0f; 
+        mat.m[14] = 0.0f; 
+
+        return mat;
+    }
+    /*
+        - Build entities using its camera relative position.
+        - Don't build entities using its absolute position.
+        - By isolating double purely to a single property (world coordinate) and a single operation (subtraction), the engine gets a large scale and preserves all AVX2/SSE optimizations for physics, culling , and rendering.
+
+        // 1. The player's camera sits 50,000 kilometers away from the origin.
+        Vector3DWorld cameraWorldPos(50000000.0, 10.0, 200000.0);
+
+        // 2. A tree is sitting right next to the player.
+        Vector3DWorld treeWorldPos(50000015.0, 10.0, 200005.0);
+
+        // 3. Right before rendering, we calculate the tree's position relative to the camera.
+        // (treeWorldPos - cameraWorldPos) yields: (15.0, 0.0, 5.0) in double precision.
+        Vector3DWorld relativeWorldPos = treeWorldPos - cameraWorldPos;
+
+        // 4. We safely cast this small difference to 32-bit floats.
+        Vector3DStack relativeLocalPos = relativeWorldPos.toFloatVector();
+
+        // 5. Now, you build your Model Matrix using `relativeLocalPos` and send it to the GPU!
+        Matrix4 treeModelMatrix = BuildTranslationMatrix(relativeLocalPos);
+    */
 };
 
 // --- MATH UTILITIES FOR CAMERA PATHING (SPLINES & LINEAR ALGEBRA) ---
