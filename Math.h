@@ -926,48 +926,6 @@ struct Matrix4 {
         return mat;
     }
 
-    // --- LWC CAMERA-RELATIVE LOOK-AT ---
-    // Notice the inputs are Vector3DWorld (double), but the matrix is float.
-    static Matrix4 LookAtLWC(const Vector3DWorld& eye, const Vector3DWorld& target, const Vector3DStack& upVec) {
-        
-        // 1. Calculate the forward vector in 64-bit space to prevent jitter at massive distances
-        Vector3DWorld worldForward = target - eye;
-        
-        // 2. Cast down to 32-bit float for the math. 
-        // Because it's a directional vector (difference), the cast is perfectly safe!
-        Vector3DStack f = worldForward.toFloatVector();
-        
-        // Use your fast SIMD dot product to normalize
-        float fLenSq = f.dot(f);
-        if (fLenSq > 1e-8f) {
-            f *= (1.0f / std::sqrt(fLenSq));
-        }
-
-        // 3. Right Vector (X)
-        Vector3DStack r = f.cross(upVec);
-        float rLenSq = r.dot(r);
-        if (rLenSq > 1e-8f) {
-            r *= (1.0f / std::sqrt(rLenSq));
-        }
-
-        // 4. Up Vector (Y)
-        Vector3DStack u = r.cross(f);
-
-        // 5. Build Column-Major Matrix
-        Matrix4 mat = Identity();
-        mat.m[0] = r.data[0];  mat.m[4] = r.data[1];  mat.m[8] = r.data[2];
-        mat.m[1] = u.data[0];  mat.m[5] = u.data[1];  mat.m[9] = u.data[2];
-        mat.m[2] = -f.data[0]; mat.m[6] = -f.data[1]; mat.m[10] = -f.data[2];
-        
-        // 6. ZERO TRANSLATION!
-        // Because every object will be rendered relative to the camera, the camera is always at (0,0,0).
-        mat.m[12] = 0.0f; 
-        mat.m[13] = 0.0f; 
-        mat.m[14] = 0.0f; 
-
-        return mat;
-    }
-
     // --- LWC CAMERA-RELATIVE RENDERING LOOK-AT ---
     // View Matrix: No longer needs translation with camera-relative rendering, only handles rotation.
     // Notice the inputs are Vector3DWorld (double), but the matrix is float.
