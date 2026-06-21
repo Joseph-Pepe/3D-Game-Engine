@@ -576,6 +576,11 @@ struct alignas(32) ParticleBlock8 {
 // ==================================================================================
 // 3. SSE Accelerated Vectors 
 // ==================================================================================
+/*  
+    - The w only matters when multiplying a vector with a matrix.
+    - w = 0.0f (Direction): Represents a vector (like gravity or camera's forward axis). When multiplied by a matrix it ignores translation (i.e., you cannot move gravity).
+    - w = 1.0f (Point): Represents a position in space (like a player or vertex). When multiplied by a matrix, the translation is applied.
+*/
 
 // [Vector3D]: Use this version if your creating a very large, persistent buffer where you don't want to blow out the stack. 
 // alignas(16) guarantees that whenever this struct is created, it starts on a 16-byte boundary. No malloc required!
@@ -600,8 +605,23 @@ public:
     union {
         __m128 reg;
         struct { float x, y, z, w; };
-        float data[4];
     };
+
+    // --- HOMOGENEOUS COORDINATE ENFORCEMENT ---
+
+    // Forces W = 0.0f (Treats the vector as a Direction/Normal)
+    // Mask 0x08 (binary 1000) tells the hardware: 
+    // "Take X, Y, Z from 'reg', take W from the zero vector."
+    FORCE_INLINE Vector3D asDirection() const {
+        return Vector3D(_mm_blend_ps(reg, _mm_setzero_ps(), 0x08));
+    }
+
+    // Forces W = 1.0f (Treats the vector as a Position/Point in space)
+    // We blend our register with a vector containing 1.0f in the W lane.
+    FORCE_INLINE Vector3D asPoint() const {
+        __m128 wOne = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f); // Setps takes (W, Z, Y, X)
+        return Vector3D(_mm_blend_ps(reg, wOne, 0x08));
+    }
 
     // Default constructor (Zero initialization)
     FORCE_INLINE Vector3D() : reg(_mm_setzero_ps()) {}
@@ -766,6 +786,37 @@ public:
         __m128 res = _mm_sub_ps(_mm_mul_ps(tmp0, tmp1), _mm_mul_ps(tmp2, tmp3));
         _mm_store_ps(result.data, res);
         
+        return result;
+    }
+
+    // --- HOMOGENEOUS COORDINATE ENFORCEMENT ---
+    /*
+        - Allow addition, cross product, and dot products to generate garbage in the W lane (let the math be dirty). 
+        - Clean it at the boundary where w actually matters when multiplying a vector by a matrix (force it to either a point [w =1], or a direction [w = 0] right before the multiplication).
+    */
+
+    // Forces W = 0.0f (Treats the vector as a Direction/Normal)
+    FORCE_INLINE Vector3DStack asDirection() const {
+        Vector3DStack result;
+        __m128 reg = _mm_load_ps(this->data);
+        
+        // Blend in a 0.0f to the W lane (mask 0x08 = 1000 binary)
+        reg = _mm_blend_ps(reg, _mm_setzero_ps(), 0x08);
+        
+        _mm_store_ps(result.data, reg);
+        return result;
+    }
+
+    // Forces W = 1.0f (Treats the vector as a Position/Point in space)
+    FORCE_INLINE Vector3DStack asPoint() const {
+        Vector3DStack result;
+        __m128 reg = _mm_load_ps(this->data);
+        
+        // Blend in a 1.0f to the W lane
+        __m128 wOne = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f); 
+        reg = _mm_blend_ps(reg, wOne, 0x08);
+        
+        _mm_store_ps(result.data, reg);
         return result;
     }
 
