@@ -1092,26 +1092,6 @@ struct Matrix4 {
         return mat;
     }
 
-    // --- 4x4 SCALAR MATRIX MULTIPLICATION (COLUMN-MAJOR) ---
-    // Multiplies two 4x4 matrices (C = A * B)
-    FORCE_INLINE constexpr Matrix4 operator*(const Matrix4& a, const Matrix4& b) {
-        Matrix4 res{}; // Initializes to zero
-
-        // Standard 4x4 matrix multiplication unrolled for column-major memory layout.
-        // Standard row-by-column multiplication adapted for 1D column-major arrays
-        // m[col * 4 + row]
-        for (int col = 0; col < 4; ++col) {
-            for (int row = 0; row < 4; ++row) {
-                res.m[col * 4 + row] = 
-                    a.m[0 * 4 + row] * b.m[col * 4 + 0] +
-                    a.m[1 * 4 + row] * b.m[col * 4 + 1] +
-                    a.m[2 * 4 + row] * b.m[col * 4 + 2] +
-                    a.m[3 * 4 + row] * b.m[col * 4 + 3];
-            }
-        }
-        return res;
-    }
-
     // C++23 mdspan gives you 2D syntax (mat[row, col]) over a 1D memory block with zero overhead
     constexpr auto getView() {
         // std::extents<Type, Rows, Cols> guarantees zero runtime overhead
@@ -1225,6 +1205,26 @@ struct Matrix4 {
         Matrix4 treeModelMatrix = BuildTranslationMatrix(relativeLocalPos);
     */
 };
+
+// --- 4x4 SCALAR MATRIX MULTIPLICATION (COLUMN-MAJOR) ---
+// Multiplies two 4x4 matrices (C = A * B)
+FORCE_INLINE constexpr Matrix4 operator*(const Matrix4& a, const Matrix4& b) {
+    Matrix4 res{}; // Initializes to zero
+
+    // Standard 4x4 matrix multiplication unrolled for column-major memory layout.
+    // Standard row-by-column multiplication adapted for 1D column-major arrays
+    // m[col * 4 + row]
+    for (int col = 0; col < 4; ++col) {
+        for (int row = 0; row < 4; ++row) {
+            res.m[col * 4 + row] = 
+                a.m[0 * 4 + row] * b.m[col * 4 + 0] +
+                a.m[1 * 4 + row] * b.m[col * 4 + 1] +
+                a.m[2 * 4 + row] * b.m[col * 4 + 2] +
+                a.m[3 * 4 + row] * b.m[col * 4 + 3];
+        }
+    }
+    return res;
+}
 
 // --- MATH UTILITIES FOR CAMERA PATHING (SPLINES & LINEAR ALGEBRA) ---
 FORCE_INLINE Vector3DStack Lerp(const Vector3DStack& a, const Vector3DStack& b, float t) {
