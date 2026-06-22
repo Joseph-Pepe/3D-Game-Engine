@@ -9,6 +9,9 @@
 #include <cstddef>
 #include <span>
 #include <vector>
+#include <algorithm>   // Required for std::min, std::copy, std::swap
+#include <utility>     // Required for std::swap (in some compilers)
+#include <numeric>     // Standard header for std::reduce algorithms
 
 #if __has_include(<inplace_vector>)
     /*
@@ -295,7 +298,7 @@ FORCE_INLINE __m256i getMortonCode_AVX2(__m256i x, __m256i y, __m256i z) {
     using NativeFloatSIMDBatch = std::simd<float, std::simd_abi::native<float>>; // Let the compiler decide the widest register available on the target hardware
 
     // Automatically scales: 4 (SSE/NEON), 8 (AVX2), or 16 (AVX-512)
-    constexpr std::size_t NATIVE_BATCH_SIZE = NativeFloatBatch::size();
+    constexpr std::size_t NATIVE_BATCH_SIZE = NativeFloatSIMDBatch::size();
     constexpr std::size_t NATIVE_SIMD_BATCH_ALIGN = alignof(NativeFloatSIMDBatch);     // Use this constant to dynamically align your memory allocators and structs! Ask the C++26 standard exactly how many bytes the current hardware needs
 
     // ==================================================================================
@@ -1433,6 +1436,127 @@ FORCE_INLINE Vector3DStack CatmullRom(const Vector3DStack& p0, const Vector3DSta
         }
     }
 
+    // Generates a constant SIMD batch representing the layout lanes (e.g., {0, 1, 2, 3...})
+    // Ensures we only check particles "forward" in the array, so they don't collide with themsleves or apply collision forces twice.
+    FORCE_INLINE NativeUIntBatch GetLaneIndices() {
+        alignas(NATIVE_SIMD_BATCH_ALIGN) uint32_t indices[NATIVE_BATCH_SIZE];
+        for (uint32_t i = 0; i < NATIVE_BATCH_SIZE; ++i) {
+            indices[i] = i;
+        }
+        
+        NativeUIntBatch batch;
+        batch.copy_from(indices, std::element_aligned);
+        return batch;
+    }
+
+    // --- 5. LINEAR COLLISION SCAN ---
+    // Extracts a single "reference particle", broadcasts it across a full 128/256/512-bit register, and tests it against entire batches of its neighbors simultaneously.
+    FORCE_INLINE void ResolveCollisions(std::span<SIMDVector3D> positions, 
+                                        size_t activeCount, 
+                                        float particleRadius) {
+        
+        float diameter = particleRadius * 2.0f;
+        NativeFloatSIMDBatch diameterSq = diameter * diameter;
+        NativeFloatSIMDBatch epsilon = 1e-8f;
+
+        // Cache the lane sequence {0, 1, 2, 3...}
+        NativeUIntBatch laneIndices = GetLaneIndices();
+
+        size_t activeBatches = (activeCount + NATIVE_BATCH_SIZE - 1) / NATIVE_BATCH_SIZE;
+
+        // [THE SCAN WINDOW]
+        // Because the array is sorted by spatial proximity (Morton Codes), 
+        // we only need to look ahead a few batches to find all physical neighbors.
+        // Adjust this based on your CELL_SIZE and particle density (2 to 4 is usually plenty).
+        const size_t SCAN_WINDOW = 2; 
+
+        // Outer Loop: Iterate through every particle linearly
+        for (size_t i = 0; i < activeCount; ++i) {
+            
+            // 1. Locate the Reference Particle
+            size_t batchI = i / NATIVE_BATCH_SIZE;
+            size_t laneI  = i % NATIVE_BATCH_SIZE;
+
+            // 2. Broadcast the scalar (X, Y, Z) into full SIMD registers
+            // E.g., refX becomes { X, X, X, X, X, X, X, X }
+            NativeFloatSIMDBatch refX = positions[batchI].x[laneI];
+            NativeFloatSIMDBatch refY = positions[batchI].y[laneI];
+            NativeFloatSIMDBatch refZ = positions[batchI].z[laneI];
+
+            // We accumulate the push-back forces for the reference particle locally
+            float moveX = 0.0f, moveY = 0.0f, moveZ = 0.0f;
+
+            // 3. Inner Loop: Scan Forward through neighbor batches
+            size_t endBatch = std::min(batchI + SCAN_WINDOW + 1, activeBatches);
+
+            for (size_t batchJ = batchI; batchJ < endBatch; ++batchJ) {
+                
+                // --- SIMD DISTANCE CALCULATION ---
+                NativeFloatSIMDBatch dx = positions[batchJ].x - refX;
+                NativeFloatSIMDBatch dy = positions[batchJ].y - refY;
+                NativeFloatSIMDBatch dz = positions[batchJ].z - refZ;
+
+                // FMA Distance Squared
+                NativeFloatSIMDBatch distSq = dx * dx;
+                distSq = std::fma(dy, dy, distSq);
+                distSq = std::fma(dz, dz, distSq);
+
+                // --- THE MASK GENERATOR ---
+                // 1. Are they touching? (distSq < diameterSq)
+                // 2. Prevent division by zero (distSq > epsilon)
+                auto spatialMask = (distSq < diameterSq) && (distSq > epsilon);
+
+                // 1. Calculate the scalar offset and strictly cast it to uint32_t
+                uint32_t batchOffset = static_cast<uint32_t>(batchJ * NATIVE_BATCH_SIZE);
+
+                // 3. Prevent double-resolving and self-resolving! Calculate the absolute index of every particle in Batch J
+                // Broadcast the scalar into a SIMD batch
+                NativeUIntBatch absoluteJ = NativeUIntBatch(batchOffset) + laneIndices;
+                
+                // Only apply physics if the neighbor's index is strictly greater than i
+                auto validCollisionMask = spatialMask && (absoluteJ > static_cast<uint32_t>(i));
+
+                // --- SIMD PENETRATION RESOLUTION ---
+                // If validCollisionMask is false, we set distSq to diameterSq so 
+                // the penetration depth becomes exactly 0.0f (preventing NaN math).
+                std::simd::where(!validCollisionMask, distSq) = diameterSq;
+
+                // Math: penetration = diameter - sqrt(distSq)
+                NativeFloatSIMDBatch actualDist = std::sqrt(distSq);
+                NativeFloatSIMDBatch penetration = diameter - actualDist;
+
+                // Math: pushFactor = (penetration * 0.5f) / actualDist
+                // We push each particle 50% of the way out of the collision.
+                NativeFloatSIMDBatch pushFactor = (penetration * 0.5f) / actualDist;
+
+                // Calculate the exact positional offset
+                NativeFloatSIMDBatch pushX = dx * pushFactor;
+                NativeFloatSIMDBatch pushY = dy * pushFactor;
+                NativeFloatSIMDBatch pushZ = dz * pushFactor;
+
+                // --- APPLY FORCES (NEWTON'S THIRD LAW) ---
+                
+                // 1. Push Batch J away (Masked addition to prevent moving non-colliding lanes)
+                std::simd::where(validCollisionMask, positions[batchJ].x) += pushX;
+                std::simd::where(validCollisionMask, positions[batchJ].y) += pushY;
+                std::simd::where(validCollisionMask, positions[batchJ].z) += pushZ;
+
+                // 2. Accumulate the opposite push for our Reference Particle
+                // We use the portable C++26 reduction (summing up the valid lanes)
+                // std::reduce automatically ignores the lanes where validCollisionMask was false
+                // because pushX/Y/Z are exactly 0.0f in those lanes due to our penetration math.
+                moveX -= std::reduce(pushX);
+                moveY -= std::reduce(pushY);
+                moveZ -= std::reduce(pushZ);
+            }
+
+            // 4. Finally, apply the accumulated movement to the Reference Particle
+            positions[batchI].x[laneI] += moveX;
+            positions[batchI].y[laneI] += moveY;
+            positions[batchI].z[laneI] += moveZ;
+        }
+    }
+
     // Grab the raw memory from std::vector, cast it into a std::span representing only the active particles, and pass it into pure functions.
     void EngineTick(ParticleMemoryBlock& memory, float deltaTime) {
         // 1. Create Views (Spans) for the active data. 
@@ -1447,9 +1571,7 @@ FORCE_INLINE Vector3DStack CatmullRom(const Vector3DStack& p0, const Vector3DSta
 
         // 2. Execute the Pipeline
         UpdateParticles(posSpan, velSpan, memory.activeParticleCount, deltaTime);
-        
         GenerateMortonKeys(posSpan, keySpan, memory.activeParticleCount);
-        
         RadixSortKeys(keySpan, bufferSpan);
 
         // 3. For the reorder, we need a temporary buffer. 
@@ -1462,5 +1584,8 @@ FORCE_INLINE Vector3DStack CatmullRom(const Vector3DStack& p0, const Vector3DSta
         // 4. Commit the sorted data back to main memory
         std::copy(tempPos.begin(), tempPos.end(), memory.positions.begin());
         std::copy(tempVel.begin(), tempVel.end(), memory.velocities.begin());
+
+        // 5. NOW resolve collisions on the perfectly sorted posSpan!
+        ResolveCollisions(posSpan, memory.activeParticleCount, 2.0f);
     }
 #endif
