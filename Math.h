@@ -986,7 +986,6 @@ struct Vector3DWorld {
     - It should be an array of four 128-bit SIMD registers. 
     - This is how AA engines keep camera math on the silicon.
 */
-
 struct alignas(64) Matrix4x4_SIMD {
     // 4 columns, each taking up exactly one 128-bit register
     __m128 col[4];
@@ -1256,6 +1255,8 @@ FORCE_INLINE Vector3DStack CatmullRom(const Vector3DStack& p0, const Vector3DSta
     - std::span is used to make the physics math not care if the memory came from a std::vector, a custom memory arena, or the stack, it just chews through the span.
     - std::span enables us to not have to change a single line of code in the physics or sorting math. 
     - If we want to change std::vector to a custom allocator, you create std::span, over the new memory and feed it into the pipeline.
+    - VFX: When a player's car crashes into a crate, it spawns 10,000 particles.
+    - Don't need the 64-bit world coordinates. Spawned directly into the camera relative buffers (32-bit buffers), immediately Morton sorted, and processed in bulk using radix sort and linear collision scan.
     
     1. Use getMortonCode_SIMD to calculate grid cells in bulk.
     2. Flush those results out of the SIMD registers into a flat, scalar array of 64-bit [MortonCode, OriginalIndex] pairs.
