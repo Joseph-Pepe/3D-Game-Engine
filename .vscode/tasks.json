@@ -1,6 +1,19 @@
 {
     "tasks": [
         {
+            "label": "Assemble FiberContext",
+            "type": "shell",
+            "command": "ml64.exe",
+            "args": [
+                "/c",
+                "/Cx",
+                "/Fo", "${workspaceFolder}\\FiberContext.obj",
+                "${workspaceFolder}\\FiberContext.asm"
+            ],
+            "problemMatcher": ["$msCompile"],
+            "group": "build"
+        },
+        {
             "type": "cppbuild",
             "label": "C/C++: cl.exe build active file",
             "command": "cl.exe",
@@ -25,7 +38,7 @@
         },
         {
             "type": "cppbuild",
-            "label": "C/C++: cl.exe build active file",
+            "label": "C/C++: cl.exe build Engine (High-Performance Release)",
             "command": "cl.exe",
             "args": [
                 // --- HIGH PERFORMANCE FLAGS ---
@@ -48,7 +61,6 @@
                 "/I${workspaceFolder}\\thirdparty\\glad\\include",
 
                 // --- 2. SOURCE FILES (GLAD2 + ImGui logic) ---
-                "${file}",
                 "${workspaceFolder}\\*.cpp",
                 "${workspaceFolder}\\thirdparty\\imgui-master\\imgui.cpp",
                 "${workspaceFolder}\\thirdparty\\imgui-master\\imgui_draw.cpp",
@@ -58,6 +70,7 @@
                 "${workspaceFolder}\\thirdparty\\imgui-master\\backends\\imgui_impl_glfw.cpp",
                 "${workspaceFolder}\\thirdparty\\imgui-master\\backends\\imgui_impl_opengl3.cpp",
                 "${workspaceFolder}\\thirdparty\\glad\\src\\gl.c",
+                "${workspaceFolder}\\FiberContext.obj",
 
                 //--- 3. LINKER SETTINGS (Connecting the .lib files) ---
                 "/link",
@@ -87,6 +100,7 @@
                 "kind": "build",
                 "isDefault": true
             },
+            "dependsOn": ["Assemble FiberContext"],
             "detail": "Release build using cl.exe"
         },
         {
@@ -109,7 +123,7 @@
                 "/I${workspaceFolder}\\thirdparty\\glad\\include",
 
                 // --- 2. SOURCE FILES (GLAD2 + ImGui logic) ---
-                "main.cpp",
+                "${workspaceFolder}\\*.cpp",
                 "${workspaceFolder}\\thirdparty\\imgui-master\\imgui.cpp",
                 "${workspaceFolder}\\thirdparty\\imgui-master\\imgui_draw.cpp",
                 "${workspaceFolder}\\thirdparty\\imgui-master\\imgui_widgets.cpp",
@@ -118,6 +132,7 @@
                 "${workspaceFolder}\\thirdparty\\imgui-master\\backends\\imgui_impl_glfw.cpp",
                 "${workspaceFolder}\\thirdparty\\imgui-master\\backends\\imgui_impl_opengl3.cpp",
                 "${workspaceFolder}\\thirdparty\\glad\\src\\gl.c",
+                "${workspaceFolder}\\FiberContext.obj",
 
                 
                 "/link",
@@ -135,7 +150,8 @@
                 "psapi.lib" // Required for RAM telemetry
             ],
             "problemMatcher": ["$msCompile"],
-            "group": { "kind": "build", "isDefault": true }
+            "group": { "kind": "build", "isDefault": true },
+            "dependsOn": ["Assemble FiberContext"]
         }
     ],
     "version": "2.0.0"
