@@ -150,8 +150,9 @@ struct EngineJob {
             AllocHeader* header = static_cast<AllocHeader*>(ptr) - 1;
             std::size_t totalSize = size + sizeof(AllocHeader);
 
+            // High-Water Mark: Pool Caches 4096 blocks (keeps the core warm and ready for future immediate work).
             // If the frame size matches, ANY thread can safely adopt this memory block!
-            if (totalSize == tl_coroutineFreePool.frameSize) {
+            if (totalSize == tl_coroutineFreePool.frameSize && tl_coroutineFreePool.blocks.size() < 4096) {
                 tl_coroutineFreePool.blocks.push_back(header);
             } else {
                 // Only ask the OS to destroy the memory if it's a completely mismatched size
