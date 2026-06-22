@@ -265,6 +265,8 @@ struct alignas(8) FiberJob {
 
 // --- THE UNIFIED SCHEDULER ---
 // std::hardware_destructive_interference_size: asks the target hardware how large its cache is, so its dynamically scaling to the CPU architecture (Intel/AMD x86, M1/M2/M3 ARM: 128-byte cache).
+// Capacity MUST be a power of 2! Defaulting to 8192.
+template <size_t Capacity = 8192>
 class alignas(CACHE_CHUNK_SIZE) WorkStealingQueue {
     // ======================
     // WorkStealingQueue
@@ -276,22 +278,24 @@ class alignas(CACHE_CHUNK_SIZE) WorkStealingQueue {
 private:
     alignas(CACHE_CHUNK_SIZE) std::atomic<int64_t> top{0};    // Thieves steal from this cache line
     alignas(CACHE_CHUNK_SIZE) std::atomic<int64_t> bottom{0}; // The Owner pushes/pops from this cache line
-    // std::vector<std::coroutine_handle<>> jobs;
-    std::vector<void*> jobs; // Now stores Tagged Pointers!
-    int64_t mask;
+
+    // The array now lives physically inside the padded class structure.
+    // Zero heap allocations. Perfect hardware cache alignment.
+    alignas(CACHE_CHUNK_SIZE) void* jobs[Capacity]; // Stores Tagged Pointers!
+    
+    // We can use the template parameter directly for the bitwise mask (hyper-fast wrapping)
+    static constexpr int64_t mask = Capacity - 1;
 
 public:
     // DEFAULT CAPACITY: 8192 (A fixed-size, lock-free ring buffer must be a power of 2, [4096] or [8192])
     // The work stealing mechanism can pass jobs to any thread, in any order, dynamically, without ever causing a memory overlap.
-    WorkStealingQueue(int64_t capacity = 8192) {
-        assert(std::has_single_bit(static_cast<uint64_t>(capacity)) && "Capacity MUST be a power of 2!");
-        jobs.resize(capacity);
-        mask = capacity - 1; // Bitwise mask for hyper-fast wrapping
+    WorkStealingQueue() {
+        // Enforce the power-of-2 rule at compile time rather than runtime!
+        static_assert(std::has_single_bit(Capacity), "Capacity MUST be a power of 2!");
     }
 
-    // Returns the exact size of the lock-free ring buffer
-    int64_t Capacity() const {
-        return mask + 1;
+    int64_t GetCapacity() const {
+        return Capacity;
     }
 
     // Returns an estimate of pending jobs (Ring Buffer + Overflow)
@@ -311,7 +315,7 @@ public:
 
         // STRICT ASSERTION: Fail fast if we blow past the ring buffer size.
         // This guarantees we never silently trigger a memory overwrite or OS allocation.
-        assert(b - t < (mask + 1) && "FATAL: Job Queue Overflow! Increase queue capacity.");
+        assert(b - t < (mask + 1) && "FATAL: Job Queue Overflow!");
         
         jobs[b & mask] = job;
         
@@ -513,7 +517,7 @@ private:
     }
     
 public:
-    std::vector<std::unique_ptr<WorkStealingQueue>> queues;
+    std::vector<std::unique_ptr<WorkStealingQueue<8192>>> queues;
     // ISOLATED: Read heavily by new threads.
     alignas(CACHE_CHUNK_SIZE) std::atomic<uint32_t> nextWorkerId{0};
     uint32_t maxQueues;
@@ -559,7 +563,7 @@ public:
         maxQueues = hwThreads + 8; 
         
         for (uint32_t i = 0; i < maxQueues; ++i) {
-            queues.push_back(std::make_unique<WorkStealingQueue>());
+            queues.push_back(std::make_unique<WorkStealingQueue<8192>>());
         }
         
         RegisterThread(); // Main UI Thread = Index 0
@@ -935,7 +939,7 @@ public:
         // ==========================================
         // 1. Get the absolute maximum number of jobs this queue can hold.
         // We subtract 128 as a safety buffer just in case there are nested jobs already in the queue.
-        uint32_t safeQueueCapacity = std::max(1u, static_cast<uint32_t>(queues[tl_workerIndex]->Capacity()) - 128);
+        uint32_t safeQueueCapacity = std::max(1u, static_cast<uint32_t>(queues[tl_workerIndex]->GetCapacity()) - 128);
 
         // 2. Mathematically calculate the smallest possible chunk size that prevents an overflow.
         uint32_t absoluteMinChunkSize = (dataCount / safeQueueCapacity) + 1;
