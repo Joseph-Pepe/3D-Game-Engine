@@ -7,6 +7,8 @@
 #include <array>
 #include <mdspan>
 #include <cstddef>
+#include <span>
+#include <vector>
 
 #if __has_include(<inplace_vector>)
     /*
@@ -1225,44 +1227,75 @@ FORCE_INLINE Vector3DStack CatmullRom(const Vector3DStack& p0, const Vector3DSta
 // ==================================================================================
 // 5. ENGINE SUBSYSTEMS & PHYSICS
 // ==================================================================================
-#if ENGINE_HAS_CXX26_SIMD
-// --- DATA-ORIENTED PARTICLE SYSTEM (AoSoA PIPELINE) ---
-class ParticleSystem {
-private:
-    // Every element in this vector represents a BATCH of particles 
-    // (4 on ARM, 8 on AVX2, 16 on AVX-512).
-    // Because SIMDVector3D is aligned to NATIVE_SIMD_BATCH_ALIGN, std::vector
-    // will perfectly pack these into sequential CPU cache lines.
-    std::vector<SIMDVector3D> m_positions;
-    std::vector<SIMDVector3D> m_velocities;
+/*
+    - SIMD registers cannot be directly sorted.
+    - SIMD execution ports are designed for parallel vertical math, not horizontal cross-lane sorting.
+    - std::span is used to make the physics math not care if the memory came from a std::vector, a custom memory arena, or the stack, it just chews through the span.
+    - std::span enables us to not have to change a single line of code in the physics or sorting math. 
+    - If we want to change std::vector to a custom allocator, you create std::span, over the new memory and feed it into the pipeline.
     
-    // We track the exact number of active particles, not just the batch count.
-    size_t m_activeParticleCount = 0;
+    1. Use getMortonCode_SIMD to calculate grid cells in bulk.
+    2. Flush those results out of the SIMD registers into a flat, scalar array of 64-bit [MortonCode, OriginalIndex] pairs.
+    3. Run an O(n) integer radix sort on that flat array.
+    4. Use the sorted indices to physically rewrite the positions and velocities arrays into perfect z-order curve alignment.
+*/
+#if ENGINE_HAS_CXX26_SIMD
 
-public:
-    // Pre-allocate memory to avoid heap fragmentation
-    void Initialize(size_t maxParticles) {
-        // Divide by the hardware's native batch size, rounding up.
-        size_t batchCount = (maxParticles + NATIVE_BATCH_SIZE - 1) / NATIVE_BATCH_SIZE;
+    // --- SPATIAL HASHING BUFFERS ---
+    // 64-bit struct: 32 bits for the Morton Code, 32 bits for the physical particle index.
+    struct ParticleSortKey {
+        uint32_t mortonCode;
+        uint32_t particleIndex;
+    };
+
+    // --- DATA-ORIENTED PARTICLE SYSTEM (AoSoA PIPELINE) ---
+    // Pure Data Container (No Logic)
+    struct ParticleMemoryBlock {
+        // Every element in this vector represents a BATCH of particles 
+        // (4 on ARM, 8 on AVX2, 16 on AVX-512).
+        // Because SIMDVector3D is aligned to NATIVE_SIMD_BATCH_ALIGN, std::vector
+        // will perfectly pack these into sequential CPU cache lines.
+        std::vector<SIMDVector3D> positions;
+        std::vector<SIMDVector3D> velocities;
         
-        m_positions.resize(batchCount);
-        m_velocities.resize(batchCount);
-    }
+        std::vector<ParticleSortKey> sortKeys;
+        std::vector<ParticleSortKey> sortKeysBuffer;  // Required for Radix Sort "Ping-Ponging"
 
+        // We track the exact number of active particles, not just the batch count.
+        size_t activeParticleCount = 0;
+
+        // Pre-allocate memory to avoid heap fragmentation
+        void Initialize(size_t maxParticles) {
+            // Divide by the hardware's native batch size, rounding up.
+            size_t batchCount = (maxParticles + NATIVE_BATCH_SIZE - 1) / NATIVE_BATCH_SIZE;
+
+            positions.resize(batchCount);
+            velocities.resize(batchCount);
+            
+            // Keys are scalar, so we allocate exactly maxParticles
+            sortKeys.resize(maxParticles);
+            sortKeysBuffer.resize(maxParticles);
+        }
+    };
+
+    // --- 1. PHYSICS UPDATE ---
     // This loop will chew through millions of particles per millisecond.
-    void Update(float deltaTime) {
-        // 1. Broadcast the scalar delta time into a hardware SIMD register ONCE.
+    FORCE_INLINE void UpdateParticles(std::span<SIMDVector3D> positions, 
+                                    std::span<SIMDVector3D> velocities, 
+                                    size_t activeCount, 
+                                    float deltaTime) {
+        // 1. Broadcast the scalar delta time into a hardware SIMD register ONCE.                                
         NativeFloatSIMDBatch dtBatch = deltaTime; 
 
         // 2. Iterate over the batches (NOT individual particles)
-        size_t activeBatches = (m_activeParticleCount + NATIVE_BATCH_SIZE - 1) / NATIVE_BATCH_SIZE;
+        size_t activeBatches = (activeCount + NATIVE_BATCH_SIZE - 1) / NATIVE_BATCH_SIZE;
 
+        // We can iterate directly over the span size up to the active batch count
         for (size_t i = 0; i < activeBatches; ++i) {
-            
             // 3. Load velocities into registers
-            NativeFloatSIMDBatch velX = m_velocities[i].x;
-            NativeFloatSIMDBatch velY = m_velocities[i].y;
-            NativeFloatSIMDBatch velZ = m_velocities[i].z;
+            NativeFloatSIMDBatch velX = velocities[i].x;
+            NativeFloatSIMDBatch velY = velocities[i].y;
+            NativeFloatSIMDBatch velZ = velocities[i].z;
 
             // 4. Calculate movement: Velocity * DeltaTime
             velX *= dtBatch;
@@ -1272,12 +1305,162 @@ public:
             // 5. Apply Fused Multiply-Add (Position = Position + (Velocity * dt))
             // Because you built `add()` to accept NativeFloatSIMDBatch, this automatically 
             // maps to hardware vector addition.
-            m_positions[i].add(velX, velY, velZ);
+            positions[i].add(velX, velY, velZ);
 
             // Notice there are NO if-statements, NO branching, and NO function overhead.
             // The hardware prefetcher will detect this linear memory access pattern 
             // immediately and stream the L1 cache ahead of the CPU's execution ports.
         }
     }
-};
+
+    // --- 2. GRID QUANTIZATION ---
+    // Turns a floating-point world position into a Morton code by mapping it to a strictly positive integer grid [0, 1023].
+    FORCE_INLINE void GenerateMortonKeys(std::span<const SIMDVector3D> positions, 
+                                        std::span<ParticleSortKey> outKeys, 
+                                        size_t activeCount) {
+                                            
+        // 1. Grid Parameters
+        // Offset ensures all particles are pushed into positive coordinate space.
+        NativeFloatSIMDBatch offset = 50000.0f; 
+
+        // Grid Cell Size = 4.0 units. Multiplying by 0.25 is drastically faster than dividing by 4.0.
+        NativeFloatSIMDBatch invCellSize = 0.25f; 
+        size_t activeBatches = (activeCount + NATIVE_BATCH_SIZE - 1) / NATIVE_BATCH_SIZE;
+
+        for (size_t i = 0; i < activeBatches; ++i) {
+            // 2. Shift and Scale (FMA)
+            NativeFloatSIMDBatch gridX_f = (positions[i].x + offset) * invCellSize;
+            NativeFloatSIMDBatch gridY_f = (positions[i].y + offset) * invCellSize;
+            NativeFloatSIMDBatch gridZ_f = (positions[i].z + offset) * invCellSize;
+
+            // 3. Cast SIMD Floats to SIMD Integers
+            // C++26 <simd> syntax for parallel type conversion
+            NativeUIntBatch gridX = std::simd_cast<uint32_t>(gridX_f);
+            NativeUIntBatch gridY = std::simd_cast<uint32_t>(gridY_f);
+            NativeUIntBatch gridZ = std::simd_cast<uint32_t>(gridZ_f);
+
+            // 4. Generate Morton Codes across all lanes simultaneously (BMI2 / LUT)
+            NativeUIntBatch mortonBatch = getMortonCode_SIMD(gridX, gridY, gridZ);
+
+            // 5. The Bridge: Flush SIMD register into a temporary aligned array
+            alignas(NATIVE_SIMD_BATCH_ALIGN) uint32_t tempMortons[NATIVE_BATCH_SIZE];
+            mortonBatch.copy_to(tempMortons, std::element_aligned);
+
+            // 6. Write to our flat scalar sorting array
+            for (size_t lane = 0; lane < NATIVE_BATCH_SIZE; ++lane) {
+                uint32_t absoluteIdx = static_cast<uint32_t>(i * NATIVE_BATCH_SIZE + lane);
+                if (absoluteIdx < activeCount) {
+                    outKeys[absoluteIdx] = { tempMortons[lane], absoluteIdx };
+                }
+            }
+        }
+    }
+
+    // --- 3. 8-bit RADIX SORT ---
+    // It looks at the binary bits of the Morton code and drops them into buckets. 
+    // By processing 8-bits at a time, we only need 4 passes to perfectly sort 32-bit integers.
+    FORCE_INLINE void RadixSortKeys(std::span<ParticleSortKey> keys, 
+                                    std::span<ParticleSortKey> buffer) {
+                                        
+        ParticleSortKey* src = keys.data();
+        ParticleSortKey* dst = buffer.data();
+        size_t count = keys.size();
+
+        // 4 passes: 0, 8, 16, 24 (to cover all 32 bits of the Morton Code)
+        for (int shift = 0; shift < 32; shift += 8) {
+            uint32_t counts[256] = {0}; // 8 bits = 256 possible buckets
+
+            // 1. HISTOGRAM PASS: Count how many particles fall into each bucket
+            for (size_t i = 0; i < count; ++i) {
+                uint8_t bucket = (src[i].mortonCode >> shift) & 0xFF;
+                counts[bucket]++;
+            }
+
+            // 2. PREFIX SUM PASS: Calculate the starting memory address for each bucket
+            uint32_t offsets[256];
+            offsets[0] = 0;
+            for (int i = 1; i < 256; ++i) {
+                offsets[i] = offsets[i - 1] + counts[i - 1];
+            }
+
+            // 3. SCATTER PASS: Move the keys to their sorted locations
+            for (size_t i = 0; i < count; ++i) {
+                uint8_t bucket = (src[i].mortonCode >> shift) & 0xFF;
+                dst[offsets[bucket]++] = src[i];
+            }
+
+            // 4. PING-PONG: Swap source and destination buffers for the next pass
+            std::swap(src, dst);
+        }
+
+        // If the final sorted data ended up in the buffer, copy it back to the main array.
+        if (src != keys.data()) {
+            std::copy(buffer.begin(), buffer.end(), keys.begin());
+        }
+    }
+
+    // --- 4. REORDER MEMORY ---
+    // Permutes the AOSOA arrays to match the sorted keys.
+    FORCE_INLINE void ReorderParticleData(std::span<const SIMDVector3D> srcPos, 
+                                        std::span<const SIMDVector3D> srcVel,
+                                        std::span<SIMDVector3D> dstPos,
+                                        std::span<SIMDVector3D> dstVel,
+                                        std::span<const ParticleSortKey> sortedKeys) {
+                                            
+        size_t activeCount = sortedKeys.size();
+
+        // Map the sorted data into perfectly contiguous memory
+        for (size_t sortedIdx = 0; sortedIdx < activeCount; ++sortedIdx) {
+
+            // Where did this particle come from?
+            uint32_t originalIdx = sortedKeys[sortedIdx].particleIndex;
+
+            // Calculate exact Batch and Lane indices
+            size_t oldBatch = originalIdx / NATIVE_BATCH_SIZE;
+            size_t oldLane  = originalIdx % NATIVE_BATCH_SIZE;
+            size_t newBatch = sortedIdx / NATIVE_BATCH_SIZE;
+            size_t newLane  = sortedIdx % NATIVE_BATCH_SIZE;
+
+            // Move the Position data
+            dstPos[newBatch].x[newLane] = srcPos[oldBatch].x[oldLane];
+            dstPos[newBatch].y[newLane] = srcPos[oldBatch].y[oldLane];
+            dstPos[newBatch].z[newLane] = srcPos[oldBatch].z[oldLane];
+
+            // Move the Velocity data
+            dstVel[newBatch].x[newLane] = srcVel[oldBatch].x[oldLane];
+            dstVel[newBatch].y[newLane] = srcVel[oldBatch].y[oldLane];
+            dstVel[newBatch].z[newLane] = srcVel[oldBatch].z[oldLane];
+        }
+    }
+
+    // Grab the raw memory from std::vector, cast it into a std::span representing only the active particles, and pass it into pure functions.
+    void EngineTick(ParticleMemoryBlock& memory, float deltaTime) {
+        // 1. Create Views (Spans) for the active data. 
+        // This costs zero CPU cycles; it's just pointer arithmetic.
+        size_t activeBatches = (memory.activeParticleCount + NATIVE_BATCH_SIZE - 1) / NATIVE_BATCH_SIZE;
+        
+        std::span<SIMDVector3D> posSpan(memory.positions.data(), activeBatches);
+        std::span<SIMDVector3D> velSpan(memory.velocities.data(), activeBatches);
+        
+        std::span<ParticleSortKey> keySpan(memory.sortKeys.data(), memory.activeParticleCount);
+        std::span<ParticleSortKey> bufferSpan(memory.sortKeysBuffer.data(), memory.activeParticleCount);
+
+        // 2. Execute the Pipeline
+        UpdateParticles(posSpan, velSpan, memory.activeParticleCount, deltaTime);
+        
+        GenerateMortonKeys(posSpan, keySpan, memory.activeParticleCount);
+        
+        RadixSortKeys(keySpan, bufferSpan);
+
+        // 3. For the reorder, we need a temporary buffer. 
+        // In a real engine, you'd pull this from a frame-allocator or memory ring buffer.
+        std::vector<SIMDVector3D> tempPos(activeBatches);
+        std::vector<SIMDVector3D> tempVel(activeBatches);
+        
+        ReorderParticleData(posSpan, velSpan, tempPos, tempVel, keySpan);
+
+        // 4. Commit the sorted data back to main memory
+        std::copy(tempPos.begin(), tempPos.end(), memory.positions.begin());
+        std::copy(tempVel.begin(), tempVel.end(), memory.velocities.begin());
+    }
 #endif
