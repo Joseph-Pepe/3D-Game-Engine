@@ -431,20 +431,7 @@ FORCE_INLINE __m256i getMortonCode_AVX2(__m256i x, __m256i y, __m256i z) {
     }
 #endif
 
-// ================================================================================
-// VECTOR3D STRUCTS
-// ================================================================================
 
-struct alignas(16) Vector3DStackAligned {
-    float x, y, z, w; // Total 16 bytes
-};
-
-// This represents 4 vectors at once
-struct Vector3D_SOA_Batch {
-    __m128 x; // [v1.x, v2.x, v3.x, v4.x]
-    __m128 y; // [v1.y, v2.y, v3.y, v4.y]
-    __m128 z; // [v1.z, v2.z, v3.z, v4.z]
-};
 
 // ================================================================================
 // AVX-512: This represents 16 vectors. It doesn't own memory; it just processes it.
