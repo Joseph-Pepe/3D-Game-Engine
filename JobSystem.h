@@ -199,6 +199,7 @@ struct YieldToJobSystem {
     - Used for loading assets from SSD, AI behavior trees, rendering graph evaluations, and anywhere you need to yield deep inside middleware or third-party libraries (like Havok or FMOD).
     - When a job hits a lock, you don't return. 
     - When a fiber yields, the CPU saves its hardware registers (RSP, RIP, etc.) and seamlessly swaps to another fiber's stack.
+    - A fiber's state is only evaluated by the thread that owns them at the moment of the context switch.
     
       1. instead you drop down to assembly.
       2. save the CPU registers .
@@ -211,19 +212,19 @@ struct YieldToJobSystem {
 
 */
 
-enum class FiberState : uint32_t {
-    Ready,
-    Running,
-    Yielded,
-    Finished // The critical safe-to-delete state
-};
+// enum class FiberState : uint32_t {
+//     Ready,
+//     Running,
+//     Yielded,
+//     Finished // The critical safe-to-delete state
+// };
 
 // A custom wrapper for the OS Fiber. In a true engine, you'd pool these just like Coroutines.
 // alignas(8) guarantees the memory address ends in 000, making it safe for Tagged Pointers!
 struct alignas(8) FiberJob {
     void* handle = nullptr;
     FixedFunction<void(), 64> payload; // Zero-allocation, move-only function wrapper.
-    std::atomic<FiberState> state{FiberState::Ready};
+    // std::atomic<FiberState> state{FiberState::Ready};
 
     FiberJob() {
         // Create a Fiber with a 64KB stack
@@ -450,11 +451,6 @@ private:
     // to guarantee it lives completely alone.
     alignas(CACHE_CHUNK_SIZE) std::atomic<int> sleepingThreads{0};
 
-    // --- FIBER TRACKING ---
-    // Thread-local storage so a running Fiber knows which Worker's core it is currently running on.
-    inline static thread_local void* tl_mainWorkerFiber = nullptr;
-    inline static thread_local FiberJob* tl_currentFiber = nullptr;
-
     // --- GLOBAL FIBER POOL ---
     // Pre-allocated storage for the actual fibers
     std::vector<std::unique_ptr<FiberJob>> fiberStorage;
@@ -468,29 +464,42 @@ private:
 
             // 1. Decode to our specific FiberJob wrapper
             FiberJob* fiberJob = static_cast<FiberJob*>(DecodeFiberHandle(job));
-
-            fiberJob->state.store(FiberState::Running, std::memory_order_relaxed);
             tl_currentFiber = fiberJob;
 
             // --- CONTEXT SWITCH ---
-            // Jump to the OS-allocated fiber stack!
+            // Jump into the fiber. We will not return to this line until the fiber 
+            // calls SwitchToFiber(tl_mainWorkerFiber) to jump back to us.
             SwitchToFiber(fiberJob->handle);
 
-            // We resume the Worker Thread here when the Fiber yields!
-            // ----------------------
-
+            // ==========================================
+            // WE ARE BACK (THE HANDOFF PHASE)
+            // ==========================================
+            // The fiber's OS context switch is 100% complete. 
+            // It is now physically impossible to trigger a race condition on this fiber.
             tl_currentFiber = nullptr;
 
-            // 2. Evaluate what happened inside the Fiber
-            FiberState resultingState = fiberJob->state.load(std::memory_order_acquire);
+            // 1. Copy the mailbox locally and clear it for the next execution
+            FiberHandoff handoff = tl_handoff;
+            
+            tl_handoff.fiber = nullptr;
+            tl_handoff.nextTaskToPush = nullptr;
+            tl_handoff.onSuspendCallback = nullptr;
+            tl_handoff.isFinished = false;
 
-            if (resultingState == FiberState::Yielded) {
-                // The fiber yielded mid-execution (e.g., waiting on IO). 
-                // Do NOT recycle it. It will be scheduled again by whatever subsystem it is waiting on.
-            } 
-            else if (resultingState == FiberState::Finished) {
-                // The infinite loop reached the end of the payload. Recycle it!
-                ReleaseFiber(fiberJob);
+            // 2. Process any continuations the fiber wanted us to push
+            if (handoff.nextTaskToPush) {
+                queues[tl_workerIndex]->Push(handoff.nextTaskToPush);
+            }
+
+            // 3. Process Async Callbacks
+            // If the fiber yielded to wait on Async IO, we NOW safely push its pointer to the IO Queue.
+            if (handoff.onSuspendCallback) {
+                handoff.onSuspendCallback(handoff.fiber, handoff.suspendPayload);
+            }
+
+            // 4. Decide the fate of the Fiber
+            if (handoff.isFinished) {
+                ReleaseFiber(handoff.fiber); // Recycle it back to the pool!
             }
         } else { 
             // --- Stackless Coroutine Logic ---
@@ -515,6 +524,29 @@ public:
         std::atomic<uint64_t> totalFlops{0}; // Isolated math tracker!
     };
     std::vector<std::unique_ptr<ThreadMetrics>> threadStats;
+
+    // --- THE FIBER MAILBOX ---
+    // Safely stores instructions from the yielding fiber to the main worker thread.
+    struct FiberHandoff {
+        FiberJob* fiber = nullptr;
+        bool isFinished = false;
+        
+        // Optional: If the fiber wants the worker to immediately push a continuation
+        void* nextTaskToPush = nullptr; 
+
+        // CRITICAL: The Post-Suspend Callback
+        // If the fiber yielded to wait on a Mutex or Async IO, it CANNOT add itself to 
+        // the Mutex/IO wait queue until its OS context switch is completely finished.
+        // We pass a function pointer here that the Main Worker will execute safely.
+        void (*onSuspendCallback)(FiberJob* yieldingFiber, void* payload) = nullptr;
+        void* suspendPayload = nullptr;
+    };
+
+    // --- FIBER TRACKING ---
+    // Thread-local storage so a running Fiber knows which Worker's core it is currently running on.
+    inline static thread_local void* tl_mainWorkerFiber = nullptr;
+    inline static thread_local FiberJob* tl_currentFiber = nullptr;
+    inline static thread_local FiberHandoff tl_handoff;
 
     JobSystem() {
         uint32_t hwThreads = std::thread::hardware_concurrency();
@@ -777,7 +809,6 @@ public:
 
     void ReleaseFiber(FiberJob* job) {
         job->payload = nullptr; // Free any captured variables in the std::function lambda
-        job->state.store(FiberState::Ready, std::memory_order_relaxed);
         
         while (fiberPoolLock.test_and_set(std::memory_order_acquire)) { _mm_pause(); }
         freeFibers.push_back(job);
@@ -810,17 +841,19 @@ public:
     }
 
     // Yield back to the Job System without destroying the Fiber
-    static void YieldFiber(void* nextTaskToRun) {
-        if (nextTaskToRun) {
-            g_JobSystem.queues[tl_workerIndex]->Push(nextTaskToRun);
-        }
+    static void YieldFiber(void* nextTaskToPush = nullptr, 
+                           void (*onSuspend)(FiberJob*, void*) = nullptr, 
+                           void* payload = nullptr) {
+        
+        // 1. Fill the Mailbox
+        tl_handoff.fiber = tl_currentFiber;
+        tl_handoff.isFinished = false;
+        tl_handoff.nextTaskToPush = nextTaskToPush;
+        tl_handoff.onSuspendCallback = onSuspend;
+        tl_handoff.suspendPayload = payload;
 
-        // If we yielded mid-function, ensure the state reflects that so ExecuteTask doesn't recycle us!
-        if (tl_currentFiber && tl_currentFiber->state.load(std::memory_order_relaxed) == FiberState::Running) {
-            tl_currentFiber->state.store(FiberState::Yielded, std::memory_order_release);
-        }
-
-        // Jump OUT of the current fiber, and immediately back into the worker thread's main loop!
+        // 2. Context Switch!
+        // The exact moment this line finishes, our CPU registers are safely saved in OS memory.
         SwitchToFiber(tl_mainWorkerFiber);
     }
 
@@ -1102,12 +1135,16 @@ inline void WINAPI FiberJob::FiberEntryPoint(void* lpParameter) {
             job->payload();
         }
 
-        // 2. Mark this FiberJob as safely completed
-        job->state.store(FiberState::Finished, std::memory_order_release);
+        // 2. Fill the Mailbox
+        // We are completely done with this payload. Tell the worker to recycle us.
+        JobSystem::tl_handoff.fiber = job;
+        JobSystem::tl_handoff.isFinished = true;
+        JobSystem::tl_handoff.nextTaskToPush = nullptr;
+        JobSystem::tl_handoff.onSuspendCallback = nullptr;
 
-        // 3. Yield back to the JobSystem.
-        // Execution literally freezes on this line until the pool assigns new work!
-        JobSystem::YieldFiber(nullptr); 
+        // 3. Jump OUT. 
+        // We do NOT change any atomics. We just safely hand control back to the worker.
+        SwitchToFiber(JobSystem::tl_mainWorkerFiber);
     }
 }
 
