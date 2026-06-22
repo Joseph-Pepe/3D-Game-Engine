@@ -12,6 +12,9 @@
 #include <new>
 #include <immintrin.h>     // REQUIRED for _mm_pause, _mm_prefetch, _mm256_zeroupper
 
+// C linkage header to see assembly.
+extern "C" void* SwapContext(void** current_rsp, void* target_rsp);
+
 // --- HARDWARE INTRINSICS ---
 #ifndef _WIN32_WINNT
     #define _WIN32_WINNT 0x0600 // Vista or later required for modern Fiber APIs
@@ -223,21 +226,59 @@ struct YieldToJobSystem {
 // A custom wrapper for the OS Fiber. In a true engine, you'd pool these just like Coroutines.
 // alignas(8) guarantees the memory address ends in 000, making it safe for Tagged Pointers!
 struct alignas(8) FiberJob {
-    void* handle = nullptr;
-    FixedFunction<void(), 64> payload; // Zero-allocation, move-only function wrapper.
-    // std::atomic<FiberState> state{FiberState::Ready};
+    void* rsp = nullptr;        // The physical Stack Pointer
+    void* stackMemory = nullptr;// The raw allocated memory block
 
+    // std::atomic<FiberState> state{FiberState::Ready};
+    FixedFunction<void(), 64> payload; // Zero-allocation, move-only function wrapper.
+
+    // Create a Fiber by manually allocating 64KB stack memory for our fibers.
     FiberJob() {
-        // Create a Fiber with a 64KB stack
-        handle = CreateFiber(65536, FiberEntryPoint, this);
+        // 1. Manually allocate a 64KB hardware stack
+        size_t stackSize = 65536;
+        
+        // We use aligned_alloc to ensure the stack base is perfectly aligned
+        #ifdef _MSC_VER
+            stackMemory = _aligned_malloc(stackSize, 16);
+        #else
+            stackMemory = std::aligned_alloc(16, stackSize);
+        #endif
+
+        // 2. Stacks grow DOWN in memory. 
+        // We set our initial pointer to the very top (end) of the allocated block.
+        uint8_t* topOfStack = static_cast<uint8_t*>(stackMemory) + stackSize;
+
+        // 3. Align the stack pointer to a 16-byte boundary (Required by x64 ABI)
+        void** sp = reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(topOfStack) & ~15ULL);
+
+        // 4. THE TRAMPOLINE (Simulating a function call)
+        // We push the FiberEntryPoint onto the stack as if it were a return address.
+        // When SwapContext hits its final `ret` instruction, it will pop this address 
+        // and jump to FiberEntryPoint.
+        sp -= 1; 
+        *sp = reinterpret_cast<void*>(FiberEntryPoint);
+
+        // 5. Reserve space for the Registers we push in SwapContext
+        // We pushed 8 integer registers (8 * 8 bytes = 64 bytes)
+        // We pushed 10 XMM registers (10 * 16 bytes = 160 bytes)
+        // Total = 224 bytes
+        sp = reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(sp) - 224);
+
+        // 6. Save the final starting pointer
+        rsp = static_cast<void*>(sp);
     }
 
     ~FiberJob() {
-        if (handle) DeleteFiber(handle);
+        if (stackMemory) {
+            #ifdef _MSC_VER
+                _aligned_free(stackMemory);
+            #else
+                std::free(stackMemory);
+            #endif
+        }
     }
 
-    // DECLARE ONLY: The compiler doesn't need to know what it does yet.
-    static void WINAPI FiberEntryPoint(void* lpParameter);
+    static void FiberEntryPoint();
 
     // This is the static trampoline that the OS calls when the Fiber boots up
     // static void WINAPI FiberEntryPoint(void* lpParameter) {
@@ -471,10 +512,10 @@ private:
             FiberJob* fiberJob = static_cast<FiberJob*>(DecodeFiberHandle(job));
             tl_currentFiber = fiberJob;
 
-            // --- CONTEXT SWITCH ---
-            // Jump into the fiber. We will not return to this line until the fiber 
-            // calls SwitchToFiber(tl_mainWorkerFiber) to jump back to us.
-            SwitchToFiber(fiberJob->handle);
+            // --- BARE-METAL CONTEXT SWITCH ---
+            // 1. Saves the current Thread's stack pointer into tl_mainWorkerRSP
+            // 2. Loads the target Fiber's stack pointer into the CPU
+            SwapContext(&tl_mainWorkerRSP, fiberJob->rsp);
 
             // ==========================================
             // WE ARE BACK (THE HANDOFF PHASE)
@@ -549,7 +590,7 @@ public:
 
     // --- FIBER TRACKING ---
     // Thread-local storage so a running Fiber knows which Worker's core it is currently running on.
-    inline static thread_local void* tl_mainWorkerFiber = nullptr;
+    inline static thread_local void* tl_mainWorkerRSP = nullptr;
     inline static thread_local FiberJob* tl_currentFiber = nullptr;
     inline static thread_local FiberHandoff tl_handoff;
 
@@ -576,11 +617,6 @@ public:
             fiberStorage.push_back(std::move(job));
         }
 
-        // The Main thread must also be a Fiber so it can context-switch!
-        #if defined(_WIN32)
-            tl_mainWorkerFiber = ConvertThreadToFiber(nullptr);
-        #endif
-
         // Manually allocate the metrics structs
         for (uint32_t i = 0; i < maxQueues; ++i) {
             threadStats.push_back(std::make_unique<ThreadMetrics>());
@@ -589,14 +625,6 @@ public:
         for (uint32_t i = 1; i <= hwThreads; ++i) {
             workers.emplace_back([this, i]() {
                 RegisterThread();
-                
-                // #ifdef _WIN32
-                //     // Crucial: Pin workers to cores to keep caches hot
-                //     SetThreadAffinityMask(GetCurrentThread(), (1ull << i));
-                // #endif
-
-                // Convert this standard OS Thread into a Fiber so it can context switch!
-                tl_mainWorkerFiber = ConvertThreadToFiber(nullptr);
                 
                 // --- Initialize our lightweight 4-byte state ---
                 // We use a simple hash of the worker index to ensure different starting seeds
@@ -857,9 +885,10 @@ public:
         tl_handoff.onSuspendCallback = onSuspend;
         tl_handoff.suspendPayload = payload;
 
-        // 2. Context Switch!
-        // The exact moment this line finishes, our CPU registers are safely saved in OS memory.
-        SwitchToFiber(tl_mainWorkerFiber);
+        // 2. Bare-Metal Context Switch!
+        // Saves the Yielding Fiber's stack pointer into its own struct, 
+        // and jumps back to the Main Worker's stack pointer.
+        SwapContext(&tl_currentFiber->rsp, tl_mainWorkerRSP);
     }
 
     // ==================================================================================
@@ -1130,8 +1159,10 @@ inline void DispatchAwaiter<F>:: await_suspend(std::coroutine_handle<> parentCon
 }
 
 // Define the Fiber's entry point after the JobSystem is fully defined
-inline void WINAPI FiberJob::FiberEntryPoint(void* lpParameter) {
-    FiberJob* job = static_cast<FiberJob*>(lpParameter);
+inline void FiberJob::FiberEntryPoint() {
+    // Grab our identity from the thread-local tracking variable 
+    // set by ExecuteTask right before it called SwapContext.
+    FiberJob* job = JobSystem::tl_currentFiber;
 
     // The OS Fiber context never dies. It just loops, waits for work, and yields.
     while (true) {
@@ -1149,7 +1180,7 @@ inline void WINAPI FiberJob::FiberEntryPoint(void* lpParameter) {
 
         // 3. Jump OUT. 
         // We do NOT change any atomics. We just safely hand control back to the worker.
-        SwitchToFiber(JobSystem::tl_mainWorkerFiber);
+        SwapContext(&job->rsp, JobSystem::tl_mainWorkerRSP);
     }
 }
 
