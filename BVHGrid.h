@@ -7,6 +7,7 @@
 #include <algorithm> // Required for std::partition and std::min
 #include <limits>    // Required for std::numeric_limits<float>::infinity()
 #include <cmath>     // Required for std::abs()
+#include <immintrin.h> // Required for AVX/SSE intrinsics
 #include <cassert>   // Required for the assert() macro
 
 
@@ -16,6 +17,7 @@
 /*
     - When loading a massive city into the level, we calculate the BVHNode bounds relative to the center of the city block using 32-bit floats.
     - LinearBVH is pre-baked and saved to the hard drive.
+    - 3D raytracing and physics collision engine.
 
     1. Player fires a bullet.
     2. Take player's LWC 64-bit Vector3DWorld position and bullet position.
@@ -393,7 +395,7 @@ FORCE_INLINE HitResult IntersectTriangle_MT(const Vector3D& rayOrigin, const Vec
 // SURFACE AREA HEURITSIC (SAH)
 // ==================================================================================
 /*  
-    - Is an algorithm used to feed the 3D geometry for ray casting.
+    - Is an algorithm used to feed the 3D static geometry for ray casting.
     - Is the probability that a ray will hit (or collide) with a box. 
     - When a player fires a bullet into empty space, the bullet hits a box, traverse the tree to see what was hit.
     - Calculates the surface area of the bounding box to estimate the statistical likelihood that the ray hit it.
@@ -732,7 +734,7 @@ private:
 };
 
 // =========================================================================
-// PHASE 3: ZERO-BRANCH TRVERSAL 
+// PHASE 3: ZERO-BRANCH TRAVERSAL 
 // =========================================================================
 
 class LinearBVH {
@@ -1010,6 +1012,145 @@ struct alignas(64) BVHInstance {
     }
 };
 
+// ==================================================================================
+// LINEAR BOUNDING VOLUME HIERARCHY (LBVH) & MORTON CODES (Z-CURVE)
+// ==================================================================================
+/*
+    - Use Morton Codes (Z-Curve) to take 3D coordinates of the car's center point (x, y, z) and interleave the binary bits of those numbers into a single 32-bit integer.
+    - This maps a 3D world onto a 1D line called Z-Order Curve.
+    - If two cars are physically close to eachother in the 3D world, their 1D morton code integers will be numerically close to eachother.
+    - Dynamic real-time geometry.
+*/
+
+// Stores the 1D spatial integer and a pointer to the original instance
+struct MortonData {
+    uint32_t mortonCode;
+    uint32_t instanceIndex;
+};
+
+class TLASBuilder {
+private:
+    std::vector<MortonData> m_mortonArray;
+    uint32_t m_nodesUsed = 0;
+
+    // Hardware-level bit manipulation: Expands a 10-bit int to 30 bits by inserting 2 zeros after each bit.
+    FORCE_INLINE uint32_t ExpandBits(uint32_t v) {
+        v = (v * 0x00010001u) & 0xFF0000FFu;
+        v = (v * 0x00000101u) & 0x0F00F00Fu;
+        v = (v * 0x00000011u) & 0xC30C30C3u;
+        v = (v * 0x00000005u) & 0x49249249u;
+        return v;
+    }
+
+    // Calculates a 30-bit Morton code for a 3D point strictly inside the unit cube [0,1].
+    FORCE_INLINE uint32_t Morton3D(float x, float y, float z) {
+        x = std::min(std::max(x * 1024.0f, 0.0f), 1023.0f);
+        y = std::min(std::max(y * 1024.0f, 0.0f), 1023.0f);
+        z = std::min(std::max(z * 1024.0f, 0.0f), 1023.0f);
+        uint32_t xx = ExpandBits(static_cast<uint32_t>(x));
+        uint32_t yy = ExpandBits(static_cast<uint32_t>(y));
+        uint32_t zz = ExpandBits(static_cast<uint32_t>(z));
+        return xx * 4 + yy * 2 + zz; // Interleave the bits
+    }
+
+    // Recursively splits the 1D array to build the 3D tree
+    AABB GenerateHierarchy(const std::vector<BVHInstance>& instances, std::vector<TLASNode>& outNodes, uint32_t nodeIdx, uint32_t start, uint32_t end) {
+        TLASNode& node = outNodes[nodeIdx];
+
+        // --- LEAF NODE ---
+        if (start == end) {
+            uint32_t instIdx = m_mortonArray[start].instanceIndex;
+            node.minBounds = instances[instIdx].worldBounds.bmin;
+            node.maxBounds = instances[instIdx].worldBounds.bmax;
+            
+            // Set MSB to 1 to flag as leaf, lower 31 bits hold instance index
+            node.leftFirst = instIdx | 0x80000000; 
+            
+            return { node.minBounds, node.maxBounds };
+        }
+
+        // --- INTERNAL NODE (Z-CURVE MEDIAN SPLIT) ---
+        // Because the array is sorted by 3D spatial Morton Codes, a simple array bisection
+        // statistically guarantees the two halves are spatially separated in the world.
+        uint32_t split = start + (end - start) / 2;
+
+        uint32_t leftChildIdx = m_nodesUsed++;
+        uint32_t rightChildIdx = m_nodesUsed++;
+
+        node.leftFirst = leftChildIdx; // MSB is 0, indicating an internal node
+
+        // Recurse down both sides
+        AABB leftBounds = GenerateHierarchy(instances, outNodes, leftChildIdx, start, split);
+        AABB rightBounds = GenerateHierarchy(instances, outNodes, rightChildIdx, split + 1, end);
+
+        // Calculate and store this node's bounds by merging the children
+        AABB combinedBounds;
+        combinedBounds.Grow(leftBounds);
+        combinedBounds.Grow(rightBounds);
+
+        node.minBounds = combinedBounds.bmin;
+        node.maxBounds = combinedBounds.bmax;
+
+        return combinedBounds;
+    }
+
+public:
+    void Build(const std::vector<BVHInstance>& instances, std::vector<TLASNode>& outNodes) {
+        uint32_t N = static_cast<uint32_t>(instances.size());
+        if (N == 0) return;
+
+        // 1. Pre-allocate exact node count (A perfectly balanced binary tree has 2N - 1 nodes)
+        outNodes.resize(N * 2);
+        m_mortonArray.resize(N);
+        m_nodesUsed = 1; // Root is at index 0
+
+        // 2. Find the global bounding box of all instances to normalize the centroids
+        AABB globalBounds;
+        for (const auto& inst : instances) {
+            globalBounds.Grow(inst.worldBounds);
+        }
+
+        // 3. Calculate Morton Codes for all instances
+        float extentX = globalBounds.bmax.x - globalBounds.bmin.x;
+        float extentY = globalBounds.bmax.y - globalBounds.bmin.y;
+        float extentZ = globalBounds.bmax.z - globalBounds.bmin.z;
+        
+        // Prevent division by zero if the entire scene is perfectly flat
+        if (extentX == 0.0f) extentX = 1e-5f;
+        if (extentY == 0.0f) extentY = 1e-5f;
+        if (extentZ == 0.0f) extentZ = 1e-5f;
+
+        float invExtentX = 1.0f / extentX;
+        float invExtentY = 1.0f / extentY;
+        float invExtentZ = 1.0f / extentZ;
+
+        for (uint32_t i = 0; i < N; i++) {
+            // Find the center of the instance
+            float cx = (instances[i].worldBounds.bmin.x + instances[i].worldBounds.bmax.x) * 0.5f;
+            float cy = (instances[i].worldBounds.bmin.y + instances[i].worldBounds.bmax.y) * 0.5f;
+            float cz = (instances[i].worldBounds.bmin.z + instances[i].worldBounds.bmax.z) * 0.5f;
+
+            // Normalize the center to a [0.0, 1.0] scale relative to the global scene bounds
+            float nx = (cx - globalBounds.bmin.x) * invExtentX;
+            float ny = (cy - globalBounds.bmin.y) * invExtentY;
+            float nz = (cz - globalBounds.bmin.z) * invExtentZ;
+            
+            m_mortonArray[i].instanceIndex = i;
+            m_mortonArray[i].mortonCode = Morton3D(nx, ny, nz);
+        }
+
+        // 4. Sort the instances along the Space-Filling Z-Curve
+        // For standard games (< 20,000 moving dynamic objects), std::sort runs in < 1 millisecond.
+        // If you ever push beyond 100,000 dynamic objects, swap this for a custom Radix Sort to maintain AAA speeds.
+        std::sort(m_mortonArray.begin(), m_mortonArray.end(), [](const MortonData& a, const MortonData& b) {
+            return a.mortonCode < b.mortonCode;
+        });
+
+        // 5. Recursively build the tree using the sorted array
+        GenerateHierarchy(instances, outNodes, 0, 0, N - 1);
+    }
+};
+
 class SceneTLAS {
 private:
     std::vector<BVHInstance> m_instances;
@@ -1018,13 +1159,11 @@ public:
     // Call this every frame after physics/animations update your car matrices
     void RebuildTLAS() {
         if (m_instances.empty()) return;
-        
-        m_tlasNodes.clear();
-        m_tlasNodes.resize(m_instances.size() * 2);
-        
+    
         // You would run a high-speed SAH or Morton Code builder here over m_instances.
         // It populates m_tlasNodes, nesting the instance AABBs perfectly.
-        // FastBuilder(m_instances, m_tlasNodes); 
+        TLASBuilder builder;
+        builder.Build(m_instances, m_tlasNodes);
     }
 
     // The Master Raycast Entry Point
@@ -1108,3 +1247,4 @@ public:
         return transposeInverse.MultiplyDirection(localNormal).Normalized();
     }
 };
+
