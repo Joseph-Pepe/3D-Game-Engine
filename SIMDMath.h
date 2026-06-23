@@ -324,6 +324,98 @@
 // ======================================================================
 
 #if ENGINE_HAS_CXX26_SIMD
+
+    // ======================================================================
+    // 1. HARDWARE PROBING
+    // ======================================================================
+    // Let the compiler determine the optimal register width and memory alignment 
+    // for the target platform (e.g., 16 bytes for ARM NEON, 32 for AVX2, 64 for AVX-512).
+    using NativeFloatSIMD = std::simd<float, std::simd_abi::native<float>>;
+    constexpr size_t NATIVE_BATCH_SIZE = NativeFloatSIMD::size();
+    constexpr size_t NATIVE_ALIGNMENT = alignof(NativeFloatSIMD);
+
+    // ======================================================================
+    // 2. THE AOSOA BLOCK (The Cache-Friendly Data Chunk)
+    // ======================================================================
+    // This perfectly sizes itself to the hardware. The alignas tag guarantees 
+    // it never straddles a cache-line boundary, preventing CPU stalling.
+    struct alignas(NATIVE_ALIGNMENT) PortableParticleBlock {
+        NativeFloatSIMD x;
+        NativeFloatSIMD y;
+        NativeFloatSIMD z;
+        NativeFloatSIMD w; // Padding: Forces the struct to a power-of-2 size for optimal L1 cache streaming.
+
+        // Built-in Math Functions (Keeps the processing loop clean)
+        FORCE_INLINE void add(const NativeFloatSIMD& bx, const NativeFloatSIMD& by, const NativeFloatSIMD& bz) {
+            x += bx;
+            y += by;
+            z += bz;
+        }
+
+        FORCE_INLINE NativeFloatSIMD dot_fma(const NativeFloatSIMD& bx, const NativeFloatSIMD& by, const NativeFloatSIMD& bz) const {
+            NativeFloatSIMD res = x * bx;
+            res = std::fma(y, by, res);
+            res = std::fma(z, bz, res);
+            return res;
+        }
+
+        FORCE_INLINE void cross(const NativeFloatSIMD& bx, const NativeFloatSIMD& by, const NativeFloatSIMD& bz) {
+            NativeFloatSIMD rx = std::fma(y, bz, -(z * by));
+            NativeFloatSIMD ry = std::fma(z, bx, -(x * bz));
+            NativeFloatSIMD rz = std::fma(x, by, -(y * bx));
+            x = rx; y = ry; z = rz;
+        }
+    };
+
+    // ======================================================================
+    // 3. THE MANAGER (Auto-Vectorizing, Multi-Threaded, Cross-Platform)
+    // ======================================================================
+    class VectorManagerAoSoA_Portable {
+    public:
+        // Automatically enforces the hardware-specific memory boundary!
+        std::vector<PortableParticleBlock, DynamicAlignedAllocator<PortableParticleBlock, NATIVE_ALIGNMENT>> blocks;
+
+        VectorManagerAoSoA_Portable(size_t particleCount) {
+            // Divide total particles by the hardware's native batch size, rounding up.
+            size_t blockCount = (particleCount + NATIVE_BATCH_SIZE - 1) / NATIVE_BATCH_SIZE;
+            blocks.resize(blockCount);
+
+            // Broadcast initialize (std::simd constructor accepts a single float and copies it to all hardware lanes)
+            for (auto& b : blocks) {
+                b.x = 1.0f;
+                b.y = 2.0f;
+                b.z = 3.0f;
+                b.w = 0.0f; 
+            }
+        }
+
+        FORCE_INLINE void processBatch(float stepX, float stepY, float stepZ) {
+            // 1. Broadcast the scalar inputs directly into SIMD registers once
+            NativeFloatSIMD sX = stepX;
+            NativeFloatSIMD sY = stepY;
+            NativeFloatSIMD sZ = stepZ;
+            NativeFloatSIMD smallVal = 0.00001f;
+
+            // 2. The Execution Loop
+            // std::execution::par_unseq maps directly to your CPU's thread pool while 
+            // guaranteeing safety for Instruction-Level Parallelism (SIMD).
+            std::for_each(std::execution::par_unseq, blocks.begin(), blocks.end(), [=](PortableParticleBlock& batch) {
+                
+                // Math: Notice there are no manual loads (_mm_load_ps) or stores (_mm_store_ps).
+                // Because the struct is perfectly aligned, modifying 'batch.x' triggers the compiler 
+                // to generate the exact same aligned-load/store assembly automatically.
+                
+                batch.add(sX, sY, sZ);
+                
+                NativeFloatSIMD d = batch.dot_fma(sX, sY, sZ);
+                
+                batch.x += d * smallVal;
+                
+                batch.cross(sX, sY, sZ);
+            });
+        }
+    };
+
     // --- THE SYSTEM LAYER (Portable Vector Manager, Portable SIMD, Any Hardware) ---
     class VectorManagerSOA_Portable {
     public:
@@ -389,11 +481,4 @@
             });
         }
     };
-
-    // This block perfectly sizes itself to the hardware cache lines.
-    struct PortableParticleBlock {
-        native_simd x, y, z, w; // w used as padding to hit power-of-2 cache sizes
-    };
-
-    using PortableAoSoAVector = std::vector<PortableParticleBlock, DynamicAlignedAllocator<PortableParticleBlock, NATIVE_ALIGN>>;
 #endif
