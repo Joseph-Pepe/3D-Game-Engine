@@ -17,42 +17,79 @@
     5. Run the bvh.Raycast(localRay) using pure SIMD.
 */
 
-// Exactly 32 Bytes. Fits perfectly into half a CPU Cache Line.
-struct BVHNode {
-    float minX, minY, minZ;
-    uint32_t leftFirst;     // If internal: index of Left Child. If leaf: index of first primitive.
+// alignas(128): forces the struct to sit perfectly inside exactly two 64-byte L1 CPU cache lines without straddling boundaries.
+struct alignas(128) BVH4Node {
+    // We use anonymous unions. This costs zero extra memory but allows us to access
+    // the registers as arrays when building the BVH, and as SIMD during the raycast.
+    union { __m128 minX; float minX_f[4]; };
+    union { __m128 minY; float minY_f[4]; };
+    union { __m128 minZ; float minZ_f[4]; };
     
-    float maxX, maxY, maxZ;
-    uint32_t primitiveCount;// If 0, this is an internal node. If > 0, this is a leaf node.
+    union { __m128 maxX; float maxX_f[4]; };
+    union { __m128 maxY; float maxY_f[4]; };
+    union { __m128 maxZ; float maxZ_f[4]; };
 
-    FORCE_INLINE bool IsLeaf() const { return primitiveCount > 0; }
+    // 4x 4-byte integers = 16 Bytes
+    // If MSB (Most Significant Bit) is 1, it's a leaf. Lower 31 bits are the index.
+    uint32_t children[4]; 
+
+    // 16 Bytes of padding to hit exactly 128 Bytes
+    uint32_t padding[4]; 
+    
+    FORCE_INLINE bool IsLeaf(int childIndex) const { 
+        return (children[childIndex] & 0x80000000) != 0; 
+    }
+    
+    FORCE_INLINE uint32_t GetIndex(int childIndex) const { 
+        return children[childIndex] & 0x7FFFFFFF; 
+    }
+
+    // Gotcha 1 FIXED: Call this inside your BVH Builder for any unused lanes
+    void SetDegenerateLane(int laneIndex) {
+        constexpr float INF = std::numeric_limits<float>::infinity();
+        
+        // Setting Min to +INF and Max to -INF guarantees tNear <= tFar will fail
+        minX_f[laneIndex] = INF;
+        minY_f[laneIndex] = INF;
+        minZ_f[laneIndex] = INF;
+
+        maxX_f[laneIndex] = -INF;
+        maxY_f[laneIndex] = -INF;
+        maxZ_f[laneIndex] = -INF;
+
+        // Nullify the child pointer just to be safe
+        children[laneIndex] = 0;
+    }
 };
 
 // Represents a mathematical Ray for intersection testing
-struct Ray {
-    Vector3D origin;
-    Vector3D direction;
-    Vector3D invDirection; // 1.0f / direction (Pre-calculated to prevent slow divisions)
-    
-    Ray(const Vector3D& o, const Vector3D& d) {
-        origin = o.asPoint();         // w = 1.0
-        direction = d.asDirection();  // w = 0.0
-        
-        // Prevent division by zero using a tiny epsilon
-        __m128 epsilon = _mm_set1_ps(1e-8f);
-        __m128 dirReg = direction.reg;
-        
-        // Replace 0.0 with epsilon before division
-        __m128 mask = _mm_cmp_ps(dirReg, _mm_setzero_ps(), _CMP_EQ_OQ);
-        dirReg = _mm_blendv_ps(dirReg, epsilon, mask);
-        
-        invDirection = Vector3D(_mm_div_ps(_mm_set1_ps(1.0f), dirReg)).asDirection();
+struct Ray4 {
+    // Each register holds four identical copies of the X, Y, or Z component
+    __m128 origX, origY, origZ;
+    __m128 invDirX, invDirY, invDirZ;
+
+    Ray4(const Vector3D& o, const Vector3D& d) {
+        // Broadcast a single float to all 4 lanes
+        origX = _mm_set1_ps(o.x);
+        origY = _mm_set1_ps(o.y);
+        origZ = _mm_set1_ps(o.z);
+
+        // Pre-calculate inverse direction
+        const float epsilon = 1e-8f;
+        Vector3D invD(
+            1.0f / (std::abs(d.x) < epsilon ? epsilon : d.x),
+            1.0f / (std::abs(d.y) < epsilon ? epsilon : d.y),
+            1.0f / (std::abs(d.z) < epsilon ? epsilon : d.z)
+        );
+        invDirX = _mm_set1_ps(invD.x);
+        invDirY = _mm_set1_ps(invD.y);
+        invDirZ = _mm_set1_ps(invD.z);
     }
 };
 
 class LinearBVH {
 private:
-    std::vector<BVHNode> m_nodes;
+    std::vector<BVH4Node> m_nodes;
     std::vector<uint32_t> m_primitiveIndices; // Sorted indices of triangles/static meshes
     uint32_t m_rootNodeIndex = 0;
 
@@ -61,84 +98,93 @@ public:
     // You would implement a Surface Area Heuristic (SAH) or Median Split builder here.
     // void Build(std::span<Triangle> geometry) { ... }
 
-    // --- SIMD RAY-AABB INTERSECTION (THE SLAB METHOD) ---
-    // Tests a ray against a bounding box completely branchlessly.
-    FORCE_INLINE bool IntersectNode(const BVHNode& node, const Ray& ray, float hitDistanceLimit) const {
+    // --- SIMD RAY-AABB INTERSECTION (DISTANCE RETURNING) ---
+    // Returns a 4-bit mask (0 to 15). 
+    // Bit 0 = Child 0 hit. Bit 1 = Child 1 hit, etc.
+    FORCE_INLINE int IntersectNode4(const BVH4Node& node, const Ray4& ray, float maxDist) const {
         
-        // Load the Box Min and Max into SIMD registers
-        __m128 boxMin = _mm_set_ps(0.0f, node.minZ, node.minY, node.minX);
-        __m128 boxMax = _mm_set_ps(0.0f, node.maxZ, node.maxY, node.maxX);
+        // --- X Axis ---
+        __m128 t1x = _mm_mul_ps(_mm_sub_ps(node.minX, ray.origX), ray.invDirX);
+        __m128 t2x = _mm_mul_ps(_mm_sub_ps(node.maxX, ray.origX), ray.invDirX);
+        __m128 tNear = _mm_min_ps(t1x, t2x);
+        __m128 tFar  = _mm_max_ps(t1x, t2x);
 
-        // Math: t = (Box - RayOrigin) * InvRayDirection
-        __m128 t1 = _mm_mul_ps(_mm_sub_ps(boxMin, ray.origin.reg), ray.invDirection.reg);
-        __m128 t2 = _mm_mul_ps(_mm_sub_ps(boxMax, ray.origin.reg), ray.invDirection.reg);
+        // --- Y Axis ---
+        __m128 t1y = _mm_mul_ps(_mm_sub_ps(node.minY, ray.origY), ray.invDirY);
+        __m128 t2y = _mm_mul_ps(_mm_sub_ps(node.maxY, ray.origY), ray.invDirY);
+        tNear = _mm_max_ps(tNear, _mm_min_ps(t1y, t2y));
+        tFar  = _mm_min_ps(tFar,  _mm_max_ps(t1y, t2y));
 
-        // We want the minimum and maximum distances along the ray
-        __m128 tMin = _mm_min_ps(t1, t2);
-        __m128 tMax = _mm_max_ps(t1, t2);
+        // --- Z Axis ---
+        __m128 t1z = _mm_mul_ps(_mm_sub_ps(node.minZ, ray.origZ), ray.invDirZ);
+        __m128 t2z = _mm_mul_ps(_mm_sub_ps(node.maxZ, ray.origZ), ray.invDirZ);
+        tNear = _mm_max_ps(tNear, _mm_min_ps(t1z, t2z));
+        tFar  = _mm_min_ps(tFar,  _mm_max_ps(t1z, t2z));
 
-        // Find the absolute highest tMin and lowest tMax across X, Y, Z
-        // We use our trusty manual SIMD horizontal shuffle reduction!
+        // --- Logical Checks ---
+        // tNear <= tFar AND tFar > 0.0f AND tNear < maxDist
+        __m128 hitMask = _mm_cmple_ps(tNear, tFar);
+        hitMask = _mm_and_ps(hitMask, _mm_cmpgt_ps(tFar, _mm_setzero_ps()));
+        hitMask = _mm_and_ps(hitMask, _mm_cmplt_ps(tNear, _mm_set1_ps(maxDist)));
 
-        // --- Calculate tNear (Horizontal Max of X, Y, Z) ---
-        
-        // 1. Move Z into the X lane and compare
-        __m128 max1 = _mm_max_ps(tMin, _mm_shuffle_ps(tMin, tMin, _MM_SHUFFLE(0, 0, 3, 2))); 
-        // 2. Move Y into the X lane and compare against the previous result
-        __m128 tNearSIMD = _mm_max_ps(max1, _mm_shuffle_ps(max1, max1, _MM_SHUFFLE(0, 0, 0, 1))); 
-        // 3. Extract the final scalar float from the X lane (0th index)
-        float tNear = _mm_cvtss_f32(tNearSIMD);
-
-        // --- Calculate tFar (Horizontal Min of X, Y, Z) ---
-
-        // 1. Move Z into the X lane and compare
-        __m128 min1 = _mm_min_ps(tMax, _mm_shuffle_ps(tMax, tMax, _MM_SHUFFLE(0, 0, 3, 2))); 
-        // 2. Move Y into the X lane and compare against the previous result
-        __m128 tFarSIMD  = _mm_min_ps(min1, _mm_shuffle_ps(min1, min1, _MM_SHUFFLE(0, 0, 0, 1))); 
-        // 3. Extract the final scalar float from the X lane (0th index)
-        float tFar = _mm_cvtss_f32(tFarSIMD);
-
-        // If tNear <= tFar, the ray hit the box. 
-        // We also check if the hit is physically in front of us (tFar > 0) 
-        // and closer than our maximum cast limit.
-        return tNear <= tFar && tFar > 0.0f && tNear < hitDistanceLimit;
+        // Extract the highest bit from each lane to create a 4-bit integer
+        return _mm_movemask_ps(hitMask);
     }
 
     // --- BVH TRAVERSAL (STACK-BASED) ---
     // We do NOT use recursion. Recursion destroys the call stack and instruction cache.
     // We use a fixed-size local array to simulate a stack.
-    bool Raycast(const Ray& ray, float maxDistance) const {
+    bool Raycast(const Ray4& ray, float maxDistance) const {
         if (m_nodes.empty()) return false;
 
-        uint32_t stack[64]; // Max depth of 64 is enough to hold 18 quintillion nodes
+        // Stack 128 to handle BVH4 worst-case growth
+        uint32_t stack[128];
         uint32_t stackPtr = 0;
         
+        // Push the root node to begin
         stack[stackPtr++] = m_rootNodeIndex;
+        bool hitAnything = false;
 
         while (stackPtr > 0) {
-            // Pop the top node off the stack
+            // Safety rail to prevent silent memory corruption during development
+            assert(stackPtr < 128 && "BVH Traversal Stack Overflow! Tree is dangerously unbalanced.");
+            
+            // Pop the top node
             uint32_t nodeIndex = stack[--stackPtr];
-            const BVHNode& node = m_nodes[nodeIndex];
+            const BVH4Node& node = m_nodes[nodeIndex];
 
-            // SIMD Intersection Test
-            if (IntersectNode(node, ray, maxDistance)) {
+            // Get the 4-bit mask of which of the 4 children were hit
+            int hitMask = IntersectNode4(node, ray, maxDistance);
+
+            // Loop as long as there is at least one bit set to 1 in the mask
+            while (hitMask != 0) {
                 
-                if (node.IsLeaf()) {
+                // Hardware instruction to find the index of the lowest set bit (0, 1, 2, or 3)
+                #ifdef _MSC_VER
+                    unsigned long childIdx;
+                    _BitScanForward(&childIdx, hitMask);
+                #else
+                    int childIdx = __builtin_ctz(hitMask);
+                #endif
+
+                // Clear that bit so we don't process it again on the next loop
+                hitMask &= ~(1 << childIdx);
+
+                if (node.IsLeaf(childIdx)) {
                     // --- NARROW PHASE ---
-                    // We hit a leaf! Now you test the ray against the actual triangles 
-                    // stored in m_primitiveIndices[node.leftFirst]...
-                    // If a hit occurs, return true or record the impact data.
-                    return true; 
+                    // You hit a leaf! Test the triangles using: node.GetIndex(childIdx)
+                    // If you find a closer triangle:
+                    // 1. Record hit data
+                    // 2. maxDistance = new_triangle_t;
+                    // 3. hitAnything = true;
                 } else {
                     // --- INTERNAL NODE ---
-                    // Push children to the stack. 
-                    // OPTIMIZATION: Push the right child first so the left child is popped first 
-                    // (Assuming left children are usually closer).
-                    stack[stackPtr++] = node.leftFirst + 1; // Right Child
-                    stack[stackPtr++] = node.leftFirst;     // Left Child
+                    // Push the valid child node to the stack
+                    stack[stackPtr++] = node.GetIndex(childIdx);
                 }
             }
         }
-        return false;
+        
+        return hitAnything;
     }
 };
