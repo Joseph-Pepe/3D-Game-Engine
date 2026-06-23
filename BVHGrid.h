@@ -78,9 +78,25 @@ public:
         __m128 tMax = _mm_max_ps(t1, t2);
 
         // Find the absolute highest tMin and lowest tMax across X, Y, Z
-        // We use our trusty manual horizontal shuffle reduction!
-        float tNear = std::max({ tMin.m128_f32[0], tMin.m128_f32[1], tMin.m128_f32[2] });
-        float tFar  = std::min({ tMax.m128_f32[0], tMax.m128_f32[1], tMax.m128_f32[2] });
+        // We use our trusty manual SIMD horizontal shuffle reduction!
+
+        // --- Calculate tNear (Horizontal Max of X, Y, Z) ---
+        
+        // 1. Move Z into the X lane and compare
+        __m128 max1 = _mm_max_ps(tMin, _mm_shuffle_ps(tMin, tMin, _MM_SHUFFLE(0, 0, 3, 2))); 
+        // 2. Move Y into the X lane and compare against the previous result
+        __m128 tNearSIMD = _mm_max_ps(max1, _mm_shuffle_ps(max1, max1, _MM_SHUFFLE(0, 0, 0, 1))); 
+        // 3. Extract the final scalar float from the X lane (0th index)
+        float tNear = _mm_cvtss_f32(tNearSIMD);
+
+        // --- Calculate tFar (Horizontal Min of X, Y, Z) ---
+
+        // 1. Move Z into the X lane and compare
+        __m128 min1 = _mm_min_ps(tMax, _mm_shuffle_ps(tMax, tMax, _MM_SHUFFLE(0, 0, 3, 2))); 
+        // 2. Move Y into the X lane and compare against the previous result
+        __m128 tFarSIMD  = _mm_min_ps(min1, _mm_shuffle_ps(min1, min1, _MM_SHUFFLE(0, 0, 0, 1))); 
+        // 3. Extract the final scalar float from the X lane (0th index)
+        float tFar = _mm_cvtss_f32(tFarSIMD);
 
         // If tNear <= tFar, the ray hit the box. 
         // We also check if the hit is physically in front of us (tFar > 0) 
