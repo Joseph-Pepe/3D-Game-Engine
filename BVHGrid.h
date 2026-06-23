@@ -1031,6 +1031,7 @@ struct MortonData {
 class TLASBuilder {
 private:
     std::vector<MortonData> m_mortonArray;
+    std::vector<MortonData> m_radixBuffer; // Persistent scratch space to avoid allocations per frame
     uint32_t m_nodesUsed = 0;
 
     // Hardware-level bit manipulation: Expands a 10-bit int to 30 bits by inserting 2 zeros after each bit.
@@ -1053,37 +1054,93 @@ private:
         return xx * 4 + yy * 2 + zz; // Interleave the bits
     }
 
+    // --- AAA ENGINE RADIX SORT CORE ---
+    void RadixSortMortonCodes() {
+        const size_t N = m_mortonArray.size();
+        if (N < 2) return;
+
+        // Ensure our scratch buffer is appropriately sized without losing pre-allocated capacity
+        if (m_radixBuffer.size() < N) {
+            m_radixBuffer.resize(N);
+        }
+
+        // 4 passes (8-bits per pass for 32-bit integers), 256 buckets per pass
+        uint32_t histograms[4][256] = { {0} };
+
+        // OPTIMIZATION 1: Fused Histogram Generation
+        // We scan the source data exactly once, pulling all 4 bytes out simultaneously.
+        // This keeps the source data warm in the L1/L2 cache lines.
+        for (size_t i = 0; i < N; ++i) {
+            const uint32_t code = m_mortonArray[i].mortonCode;
+            histograms[0][code & 0xFF]++;
+            histograms[1][(code >> 8) & 0xFF]++;
+            histograms[2][(code >> 16) & 0xFF]++;
+            histograms[3][(code >> 24) & 0xFF]++;
+        }
+
+        // OPTIMIZATION 2: Prefix Sum (Exclusive Scan)
+        // Turn counts into absolute starting array index offsets
+        uint32_t offsets[4][256];
+        for (int pass = 0; pass < 4; ++pass) {
+            uint32_t currentOffset = 0;
+            for (int bucket = 0; bucket < 256; ++bucket) {
+                offsets[pass][bucket] = currentOffset;
+                currentOffset += histograms[pass][bucket];
+            }
+        }
+
+        // OPTIMIZATION 3: Zero-Branch Ping-Pong Scatters
+        // Pass 0: m_mortonArray -> m_radixBuffer (Byte 0)
+        for (size_t i = 0; i < N; ++i) {
+            const uint32_t bucket = m_mortonArray[i].mortonCode & 0xFF;
+            const uint32_t destIdx = offsets[0][bucket]++;
+            m_radixBuffer[destIdx] = m_mortonArray[i];
+        }
+
+        // Pass 1: m_radixBuffer -> m_mortonArray (Byte 1)
+        for (size_t i = 0; i < N; ++i) {
+            const uint32_t bucket = (m_radixBuffer[i].mortonCode >> 8) & 0xFF;
+            const uint32_t destIdx = offsets[1][bucket]++;
+            m_mortonArray[destIdx] = m_radixBuffer[i];
+        }
+
+        // Pass 2: m_mortonArray -> m_radixBuffer (Byte 2)
+        for (size_t i = 0; i < N; ++i) {
+            const uint32_t bucket = (m_mortonArray[i].mortonCode >> 16) & 0xFF;
+            const uint32_t destIdx = offsets[2][bucket]++;
+            m_radixBuffer[destIdx] = m_mortonArray[i];
+        }
+
+        // Pass 3: m_radixBuffer -> m_mortonArray (Byte 3)
+        // Final pass naturally lands the perfectly sorted data back into m_mortonArray
+        for (size_t i = 0; i < N; ++i) {
+            const uint32_t bucket = (m_radixBuffer[i].mortonCode >> 24) & 0xFF;
+            const uint32_t destIdx = offsets[3][bucket]++;
+            m_mortonArray[destIdx] = m_radixBuffer[i];
+        }
+    }
+
     // Recursively splits the 1D array to build the 3D tree
     AABB GenerateHierarchy(const std::vector<BVHInstance>& instances, std::vector<TLASNode>& outNodes, uint32_t nodeIdx, uint32_t start, uint32_t end) {
         TLASNode& node = outNodes[nodeIdx];
 
-        // --- LEAF NODE ---
         if (start == end) {
             uint32_t instIdx = m_mortonArray[start].instanceIndex;
             node.minBounds = instances[instIdx].worldBounds.bmin;
             node.maxBounds = instances[instIdx].worldBounds.bmax;
-            
-            // Set MSB to 1 to flag as leaf, lower 31 bits hold instance index
             node.leftFirst = instIdx | 0x80000000; 
-            
             return { node.minBounds, node.maxBounds };
         }
 
-        // --- INTERNAL NODE (Z-CURVE MEDIAN SPLIT) ---
-        // Because the array is sorted by 3D spatial Morton Codes, a simple array bisection
-        // statistically guarantees the two halves are spatially separated in the world.
         uint32_t split = start + (end - start) / 2;
-
         uint32_t leftChildIdx = m_nodesUsed++;
         uint32_t rightChildIdx = m_nodesUsed++;
 
-        node.leftFirst = leftChildIdx; // MSB is 0, indicating an internal node
+        node.leftFirst = leftChildIdx;
 
-        // Recurse down both sides
         AABB leftBounds = GenerateHierarchy(instances, outNodes, leftChildIdx, start, split);
         AABB rightBounds = GenerateHierarchy(instances, outNodes, rightChildIdx, split + 1, end);
 
-        // Calculate and store this node's bounds by merging the children
         AABB combinedBounds;
         combinedBounds.Grow(leftBounds);
         combinedBounds.Grow(rightBounds);
@@ -1099,23 +1156,19 @@ public:
         uint32_t N = static_cast<uint32_t>(instances.size());
         if (N == 0) return;
 
-        // 1. Pre-allocate exact node count (A perfectly balanced binary tree has 2N - 1 nodes)
         outNodes.resize(N * 2);
         m_mortonArray.resize(N);
-        m_nodesUsed = 1; // Root is at index 0
+        m_nodesUsed = 1; 
 
-        // 2. Find the global bounding box of all instances to normalize the centroids
         AABB globalBounds;
         for (const auto& inst : instances) {
             globalBounds.Grow(inst.worldBounds);
         }
 
-        // 3. Calculate Morton Codes for all instances
         float extentX = globalBounds.bmax.x - globalBounds.bmin.x;
         float extentY = globalBounds.bmax.y - globalBounds.bmin.y;
         float extentZ = globalBounds.bmax.z - globalBounds.bmin.z;
         
-        // Prevent division by zero if the entire scene is perfectly flat
         if (extentX == 0.0f) extentX = 1e-5f;
         if (extentY == 0.0f) extentY = 1e-5f;
         if (extentZ == 0.0f) extentZ = 1e-5f;
@@ -1125,12 +1178,10 @@ public:
         float invExtentZ = 1.0f / extentZ;
 
         for (uint32_t i = 0; i < N; i++) {
-            // Find the center of the instance
             float cx = (instances[i].worldBounds.bmin.x + instances[i].worldBounds.bmax.x) * 0.5f;
             float cy = (instances[i].worldBounds.bmin.y + instances[i].worldBounds.bmax.y) * 0.5f;
             float cz = (instances[i].worldBounds.bmin.z + instances[i].worldBounds.bmax.z) * 0.5f;
 
-            // Normalize the center to a [0.0, 1.0] scale relative to the global scene bounds
             float nx = (cx - globalBounds.bmin.x) * invExtentX;
             float ny = (cy - globalBounds.bmin.y) * invExtentY;
             float nz = (cz - globalBounds.bmin.z) * invExtentZ;
@@ -1139,14 +1190,9 @@ public:
             m_mortonArray[i].mortonCode = Morton3D(nx, ny, nz);
         }
 
-        // 4. Sort the instances along the Space-Filling Z-Curve
-        // For standard games (< 20,000 moving dynamic objects), std::sort runs in < 1 millisecond.
-        // If you ever push beyond 100,000 dynamic objects, swap this for a custom Radix Sort to maintain AAA speeds.
-        std::sort(m_mortonArray.begin(), m_mortonArray.end(), [](const MortonData& a, const MortonData& b) {
-            return a.mortonCode < b.mortonCode;
-        });
+        // SWAP: Old std::sort dropped for custom linear-time Radix Sort
+        RadixSortMortonCodes();
 
-        // 5. Recursively build the tree using the sorted array
         GenerateHierarchy(instances, outNodes, 0, 0, N - 1);
     }
 };
