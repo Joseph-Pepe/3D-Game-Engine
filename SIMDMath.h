@@ -23,7 +23,7 @@
     #define ENGINE_HAS_CXX26_SIMD 0
 #endif
 
-#ifdef __x86_64__
+#if defined(__x86_64__) || defined(_M_X64)
     // ===================================
     // SIMD Intrinsics & Memory Alignment
     // ===================================
