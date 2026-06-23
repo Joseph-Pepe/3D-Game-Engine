@@ -74,6 +74,34 @@ struct alignas(128) BVH4Node {
     }
 };
 
+// Exactly 32 bytes (half a cache line). Built for extreme traversal speed.
+struct alignas(32) TLASNode {
+    Vector3D minBounds;
+    uint32_t leftFirst; // If MSB is 1, this is a leaf and holds the instanceIndex. Otherwise, Left Child.
+    
+    Vector3D maxBounds;
+    uint32_t padding;
+
+    FORCE_INLINE bool IsLeaf() const { return (leftFirst & 0x80000000) != 0; }
+    FORCE_INLINE uint32_t GetIndex() const { return leftFirst & 0x7FFFFFFF; }
+};
+
+struct Ray {
+    Vector3D origin;
+    Vector3D direction;
+    Vector3D invDirection; 
+    
+    Ray(const Vector3D& o, const Vector3D& d) : origin(o), direction(d) {
+        // Prevents division by zero.
+        const float epsilon = 1e-8f;
+        invDirection = Vector3D(
+            1.0f / (std::abs(d.x) < epsilon ? epsilon : d.x),
+            1.0f / (std::abs(d.y) < epsilon ? epsilon : d.y),
+            1.0f / (std::abs(d.z) < epsilon ? epsilon : d.z)
+        );
+    }
+};
+
 // Represents a mathematical Ray for intersection testing
 struct Ray4 {
     // Each register holds four identical copies of the X, Y, or Z component
@@ -149,6 +177,17 @@ struct alignas(64) Tri4 {
 
         indices[lane] = index;
     }
+};
+
+// The ultimate payload that gets passed back to gameplay/rendering
+struct RayHit {
+    float t = std::numeric_limits<float>::infinity();
+    float u = 0.0f;
+    float v = 0.0f;
+    uint32_t instanceIndex = INVALID_INDEX; // Which car did we hit?
+    uint32_t triangleIndex = INVALID_INDEX; // Which triangle on the car?
+
+    FORCE_INLINE bool HasHit() const { return instanceIndex != INVALID_INDEX; }
 };
 
 // A struct to return the best hit out of the 4
@@ -703,13 +742,20 @@ private:
     uint32_t m_rootNodeIndex = 0;
     std::vector<Tri4> m_tri4Geometry;
 
+    AABB m_rootBounds;
+
 public:
+    const AABB& GetRootBounds() const { return m_rootBounds; }
+
     // Builds the BVH (Typically done once on level load, or offline during asset baking)
     // Pipeline that connects Phase 1 and Phase 2
     void Build(std::span<const Triangle> levelGeometry) {
         // Phase 1: Build the perfect SAH Binary Tree
         BVHBuilder builder;
         builder.Build(levelGeometry);
+
+        // Steal the root bounds from Phase 1 before it collapses!
+        m_rootBounds = builder.GetBinaryNodes()[0].bounds;
 
         // Phase 2: Collapse it into the Wide BVH4 SIMD format
         BVHCollapser collapser;
@@ -810,7 +856,7 @@ public:
     // --- BVH TRAVERSAL (STACK-BASED) ---
     // We do NOT use recursion. Recursion destroys the call stack and instruction cache.
     // We use a fixed-size local array to simulate a stack.
-    bool Raycast(const Ray4& ray, float maxDistance) const {
+    bool Raycast(const Ray4& ray, float& maxDistance, Tri4Hit& outBestHit) const {
         if (m_nodes.empty()) return false;
 
         // Stack 128 to handle BVH4 worst-case growth
@@ -862,9 +908,12 @@ public:
                         Tri4Hit hit = IntersectTri4_MT(m_tri4Geometry[startTri4Block + i], ray, maxDistance);
                         
                         // Note: hitIndex is -1 if it missed or hit a degenerate padding lane
-                        if (hit.hitIndex != (uint32_t)-1 && hit.t < maxDistance) {
+                        if (hit.hitIndex != INVALID_INDEX && hit.t < maxDistance) {
                             maxDistance = hit.t; 
                             hitAnything = true;
+
+                            // Record the best hit data to pass up the chain!
+                            outBestHit = hit;
                             
                             // Record hit data here
                             // bestHitData.t = hit.t;
@@ -882,5 +931,180 @@ public:
         }
         
         return hitAnything;
+    }
+};
+
+// ==================================================================================
+// TWO-LEVEL ACCELERATION STRUCTURE (TLAS, BLAS)
+// ==================================================================================
+/*
+    - Handles dynamic moving geometry (like a car driving through a city), entities, characters, doors, etc..
+    - BLAS: Contains raw triangles of a single, specific 3D model (e.g., car, player). Is built once and stored in Local Object Space centered at (0, 0, 0).
+    - TLAS: Only contains instances which is a 3D Transfrom Matrix (Position, Rotation, Scale) and a pointer to a BLAS.
+    - We move the ray, not the car's triangles.
+    - This ensures millions of polygons are moved for the computational cost of a single 4x4 matrix inversion.
+*/
+
+FORCE_INLINE AABB CalculateWorldBounds(const AABB& localBounds, const Matrix4x4& transform) {
+    AABB worldBounds;
+    
+    // Extract the 8 corners of the local AABB
+    Vector3D corners[8] = {
+        Vector3D(localBounds.bmin.x, localBounds.bmin.y, localBounds.bmin.z),
+        Vector3D(localBounds.bmax.x, localBounds.bmin.y, localBounds.bmin.z),
+        Vector3D(localBounds.bmin.x, localBounds.bmax.y, localBounds.bmin.z),
+        Vector3D(localBounds.bmax.x, localBounds.bmax.y, localBounds.bmin.z),
+        Vector3D(localBounds.bmin.x, localBounds.bmin.y, localBounds.bmax.z),
+        Vector3D(localBounds.bmax.x, localBounds.bmin.y, localBounds.bmax.z),
+        Vector3D(localBounds.bmin.x, localBounds.bmax.y, localBounds.bmax.z),
+        Vector3D(localBounds.bmax.x, localBounds.bmax.y, localBounds.bmax.z)
+    };
+
+    // Transform each corner into world space and grow the new box
+    for (int i = 0; i < 8; i++) {
+        worldBounds.Grow(transform.MultiplyPoint(corners[i]));
+    }
+
+    return worldBounds;
+}
+
+FORCE_INLINE bool IntersectAABB(const AABB& bounds, const Ray& ray, float hitDistanceLimit) {
+    float t1 = (bounds.bmin.x - ray.origin.x) * ray.invDirection.x;
+    float t2 = (bounds.bmax.x - ray.origin.x) * ray.invDirection.x;
+    float tNear = std::min(t1, t2);
+    float tFar = std::max(t1, t2);
+
+    t1 = (bounds.bmin.y - ray.origin.y) * ray.invDirection.y;
+    t2 = (bounds.bmax.y - ray.origin.y) * ray.invDirection.y;
+    tNear = std::max(tNear, std::min(t1, t2));
+    tFar = std::min(tFar, std::max(t1, t2));
+
+    t1 = (bounds.bmin.z - ray.origin.z) * ray.invDirection.z;
+    t2 = (bounds.bmax.z - ray.origin.z) * ray.invDirection.z;
+    tNear = std::max(tNear, std::min(t1, t2));
+    tFar = std::min(tFar, std::max(t1, t2));
+
+    return tNear <= tFar && tFar > 0.0f && tNear < hitDistanceLimit;
+}
+
+// Represents the object (e.g., car) existing in the world and stores the pre-calculated inverse matrix.
+struct alignas(64) BVHInstance {
+    // The World-Space bounds of this object (Calculated by transforming the BLAS root bounds)
+    AABB worldBounds;
+    
+    // Pointer/Index to the static, local-space BLAS (The Car Model)
+    const LinearBVH* blas;
+    
+    // The 4x4 Transformation Matrices
+    Matrix4x4 transform;
+    Matrix4x4 inverseTransform;
+
+    // Call this every frame the car moves
+    void UpdateTransform(const Matrix4x4& newTransform) {
+        transform = newTransform;
+        inverseTransform = newTransform.Invert();
+        
+        // Transform the 8 corners of the BLAS root AABB by the new matrix
+        // and create a new worldBounds AABB.
+        worldBounds = CalculateWorldBounds(blas->GetRootBounds(), transform);
+    }
+};
+
+class SceneTLAS {
+private:
+    std::vector<BVHInstance> m_instances;
+    std::vector<TLASNode> m_tlasNodes; // Rebuilt every frame!
+public:
+    // Call this every frame after physics/animations update your car matrices
+    void RebuildTLAS() {
+        if (m_instances.empty()) return;
+        
+        m_tlasNodes.clear();
+        m_tlasNodes.resize(m_instances.size() * 2);
+        
+        // You would run a high-speed SAH or Morton Code builder here over m_instances.
+        // It populates m_tlasNodes, nesting the instance AABBs perfectly.
+        // FastBuilder(m_instances, m_tlasNodes); 
+    }
+
+    // The Master Raycast Entry Point
+    bool Raycast(const Ray& worldRay, RayHit& outHit) const {
+        if (m_tlasNodes.empty()) return false;
+
+        uint32_t stack[64];
+        uint32_t stackPtr = 0;
+        stack[stackPtr++] = 0; // Push TLAS Root
+
+        // --- PHASE 1: TREE TRAVERSAL ---
+        while (stackPtr > 0) {
+            uint32_t nodeIdx = stack[--stackPtr];
+            const TLASNode& node = m_tlasNodes[nodeIdx];
+
+            // Standard scalar AABB intersection
+            AABB nodeBounds { node.minBounds, node.maxBounds };
+
+            // Standard AABB test against the instance's world bounds
+            if (IntersectAABB(nodeBounds, worldRay, outHit.t)) {
+                
+                if (node.IsLeaf()) {
+                    uint32_t instIdx = node.GetIndex();
+                    const BVHInstance& instance = m_instances[instIdx];
+
+                    // --- THE MATRIX JUMP (INVERSE TRANSFORM) ---
+                    // We hit the car's bounding box in the world! 
+                    // Now, teleport the ray into the car's local 0,0,0 space.
+                    Vector3D localOrig = instance.inverseTransform.MultiplyPoint(worldRay.origin);
+                    Vector3D localDir = instance.inverseTransform.MultiplyDirection(worldRay.direction);
+
+                    // If a car is scaled up to be 3x larger than normal, this inverse matrix will shrink localDir to be 3x smaller than a unit vector (no need to normalize it).
+
+                    // Construct the heavy SIMD Ray4 for the BLAS
+                    Ray4 localRay(localOrig, localDir);
+
+                    // --- THE BLAS DIVE ---
+                    // Because BLAS::Raycast now takes maxDistance by reference, 
+                    // outHitDistance will automatically shrink if a triangle is hit!
+                    Tri4Hit localHit;
+                    if (instance.blas->Raycast(localRay, outHit.t, localHit)) {
+                        
+                        // We found a closer hit! Record the payload, but DO NOT do normal math yet.
+                        outHit.u = localHit.u;
+                        outHit.v = localHit.v;
+                        outHit.triangleIndex = localHit.hitIndex;
+                        outHit.instanceIndex = instIdx;
+                    }
+                } else {
+                    // Push children. (For max speed, you could sort these front-to-back here)
+                    stack[stackPtr++] = node.leftFirst + 1;
+                    stack[stackPtr++] = node.leftFirst;
+                }
+            }
+        }
+
+        return outHit.HasHit();
+    }
+
+    // --- PHASE 2: DEFERRED ATTRIBUTE EVALUATION ---
+    // Call this only IF Raycast() returned true, and only for the final pixel/bullet calculation.
+    Vector3D GetWorldNormal(const RayHit& hit, const std::vector<Triangle>& rawLevelGeometry) const {
+        const BVHInstance& inst = m_instances[hit.instanceIndex];
+        
+        // 1. Fetch the exact triangle from RAM (Only happens ONCE per ray!)
+        const Triangle& tri = rawLevelGeometry[hit.triangleIndex];
+
+        // 2. Calculate the local flat normal via cross product 
+        // (Or interpolate vertex normals using hit.u and hit.v for smooth shading)
+        Vector3D e1 = tri.v1 - tri.v0;
+        Vector3D e2 = tri.v2 - tri.v0;
+        Vector3D localNormal = Cross(e1, e2).Normalized();
+
+        // 3. THE AAA MATRIX TRAP: 
+        // To rotate a normal into world space, you CANNOT use the standard transform matrix. 
+        // If the car was scaled (e.g., squashed on the Z axis), the normal will warp.
+        // You MUST multiply the normal by the Transpose of the Inverse Matrix.
+        Matrix4x4 transposeInverse = inst.inverseTransform.Transpose(); // Guarentees that lighting and physics reflections will always behave the same, even if the designer squashes, stretches, or warps the 3D models in the editor.
+        
+        // Return the perfectly scaled, world-space normal.
+        return transposeInverse.MultiplyDirection(localNormal).Normalized();
     }
 };
