@@ -22,8 +22,6 @@
     #include <inplace_vector> // C++26 API provides a vector that stores data locally without ever touching the heap allocator.
 #endif 
 
-
-
 // --- COMPILER MACROS ---
 #ifndef FORCE_INLINE
     #ifdef _MSC_VER
@@ -1567,8 +1565,7 @@ FORCE_INLINE Vector3DStack CatmullRom(const Vector3DStack& p0, const Vector3DSta
 
     // Grab the raw memory from std::vector, cast it into a std::span representing only the active particles, and pass it into pure functions.
     void EngineTick(ParticleMemoryBlock& memory, float deltaTime) {
-        // 1. Create Views (Spans) for the active data. 
-        // This costs zero CPU cycles; it's just pointer arithmetic.
+        // 1. Calculate active batches
         size_t activeBatches = (memory.activeParticleCount + NATIVE_BATCH_SIZE - 1) / NATIVE_BATCH_SIZE;
         
         std::span<SIMDVector3D> posSpan(memory.positions.data(), activeBatches);
@@ -1577,23 +1574,46 @@ FORCE_INLINE Vector3DStack CatmullRom(const Vector3DStack& p0, const Vector3DSta
         std::span<ParticleSortKey> keySpan(memory.sortKeys.data(), memory.activeParticleCount);
         std::span<ParticleSortKey> bufferSpan(memory.sortKeysBuffer.data(), memory.activeParticleCount);
 
-        // 2. Execute the Pipeline
+        // 2. Execute the Pipeline (Updates & Sorting)
         UpdateParticles(posSpan, velSpan, memory.activeParticleCount, deltaTime);
         GenerateMortonKeys(posSpan, keySpan, memory.activeParticleCount);
         RadixSortKeys(keySpan, bufferSpan);
 
-        // 3. For the reorder, we need a temporary buffer. 
-        // In a real engine, you'd pull this from a frame-allocator or memory ring buffer.
-        std::vector<SIMDVector3D> tempPos(activeBatches);
-        std::vector<SIMDVector3D> tempVel(activeBatches);
+        // =========================================================================
+        // ZERO-ALLOCATION TEMPORARY WORKSPACE
+        // =========================================================================
         
+        // 3. Drop the ArenaMarker. 
+        // This takes a snapshot of the bump pointer (e.g., offset = 0). 
+        // When this function ends, the marker's destructor will instantly reset the memory.
+        ArenaMarker frameMarker(t_PhysicsTransientArena);
+
+        // 4. Ask the arena for aligned memory using your C++26 NativeAlignedArray.
+        // This is an O(1) operation. No OS calls are made.
+        NativeAlignedArray<SIMDVector3D> tempPos(t_PhysicsTransientArena, activeBatches);
+        NativeAlignedArray<SIMDVector3D> tempVel(t_PhysicsTransientArena, activeBatches);
+
+        // 5. Bypass Initialization. 
+        // Since ReorderParticleData will immediately overwrite every single byte, 
+        // zeroing out the memory first would waste CPU cycles.
+        tempPos.ResizeUninitialized(activeBatches);
+        tempVel.ResizeUninitialized(activeBatches);
+
+        // =========================================================================
+
+        // 6. Reorder data into our ultra-fast L1 cache aligned transient memory
         ReorderParticleData(posSpan, velSpan, tempPos, tempVel, keySpan);
 
-        // 4. Commit the sorted data back to main memory
+        // 7. Commit the perfectly sorted data back to main memory
         std::copy(tempPos.begin(), tempPos.end(), memory.positions.begin());
         std::copy(tempVel.begin(), tempVel.end(), memory.velocities.begin());
 
-        // 5. NOW resolve collisions on the perfectly sorted posSpan!
+        // 8. Resolve collisions
         ResolveCollisions(posSpan, memory.activeParticleCount, 2.0f);
+        
+        // 9. SCOPE ENDS HERE.
+        // frameMarker goes out of scope. 
+        // t_PhysicsTransientArena.SetOffset(m_savedOffset) is automatically called.
+        // The memory used by tempPos and tempVel is instantly "freed" in zero clock cycles.
     }
 #endif
