@@ -1216,6 +1216,9 @@ class SceneTLAS {
 private:
     std::vector<BVHInstance> m_instances;
     std::vector<TLASNode> m_tlasNodes; // Rebuilt every frame!
+
+    // The builder and its internal vectors now PERSIST in memory
+    TLASBuilder builder;
 public:
     // Call this every frame after physics/animations update your car matrices
     void RebuildTLAS() {
@@ -1223,7 +1226,6 @@ public:
     
         // You would run a high-speed SAH or Morton Code builder here over m_instances.
         // It populates m_tlasNodes, nesting the instance AABBs perfectly.
-        TLASBuilder builder;
         builder.Build(m_instances, m_tlasNodes);
     }
 
