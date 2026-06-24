@@ -115,13 +115,15 @@ public:
         target = Lerp(lookAtTargets[i1], lookAtTargets[i2], localT);
     }
 
-    // Convert the SSE Vectors to Scalar to interface with the C++26 Matrix Math
-    Matrix4 GetViewMatrix() const {
-        return Matrix4::LookAt(
-            Vector3DScalar(position.data[0], position.data[1], position.data[2]),
-            Vector3DScalar(target.data[0], target.data[1], target.data[2]),
-            Vector3DScalar(0.0f, 1.0f, 0.0f)
-        );
+    // 100% SIMD Matrix Generation
+    Matrix4x4_SIMD GetViewMatrix() const {
+        // 1. Instantly hoist the aligned stack data into SSE registers
+        Vector3D eyeVec(_mm_load_ps(position.data));
+        Vector3D targetVec(_mm_load_ps(target.data));
+        Vector3D upVec(0.0f, 1.0f, 0.0f, 0.0f); // Hardcoded up-vector loads directly to register
+
+        // 2. Generate the matrix purely on the silicon
+        return Matrix4x4_SIMD::LookAt_SIMD(eyeVec, targetVec, upVec);
     }
 
     // Builds the View Matrix to send to your Shader Pipeline
@@ -177,8 +179,21 @@ public:
         UpdateCameraVectors();
     }
 
-    Matrix4 GetViewMatrix() const {
-        return Matrix4::LookAt(Position, Position + Front, Up);
+    // 100% SIMD Matrix Generation
+    Matrix4x4_SIMD GetViewMatrix() const {
+        
+        // 1. Unaligned load directly from the scalar's memory footprint
+        // The CPU reads x, y, z, w sequentially starting from the address of 'x'
+        Vector3D eyeVec(_mm_loadu_ps(&Position.x));
+        Vector3D frontVec(_mm_loadu_ps(&Front.x));
+        Vector3D upVec(_mm_loadu_ps(&Up.x));              // FreeCamera already maintains a perfectly orthogonal Up vector
+        
+        // 2. SIMD Addition (target = position + front)
+        // Mapped operator+ in Vector3D class, this compiles down to a single _mm_add_ps instruction!
+        Vector3D targetVec = eyeVec + frontVec;
+        
+        // 3. Generate the matrix purely on the silicon
+        return Matrix4x4_SIMD::LookAt_SIMD(eyeVec, targetVec, upVec);
     }
 
     // WASD Movement (0=Forward, 1=Backward, 2=Left, 3=Right, 4=Up, 5=Down)
