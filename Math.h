@@ -985,6 +985,58 @@ struct alignas(64) Matrix4x4_SIMD {
         return mat;
     }
 
+    // --- PURE SIMD VIEW MATRIX (NO LOAD-HIT-STORE) ---
+    // Takes native SSE vectors and keeps all math strictly on the silicon.
+    static FORCE_INLINE Matrix4x4_SIMD LookAt_SIMD(const Vector3D& eye, const Vector3D& target, const Vector3D& upVec) {
+        
+        // 1. Forward Vector (Z)
+        Vector3D f = target - eye;
+        f = f.asDirection(); // Force W=0.0f
+        float fLenSq = f.dot(f);
+        if (fLenSq > 1e-8f) f = f * (1.0f / std::sqrt(fLenSq));
+
+        // 2. Right Vector (X)
+        Vector3D r = f.cross(upVec).asDirection();
+        float rLenSq = r.dot(r);
+        if (rLenSq > 1e-8f) r = r * (1.0f / std::sqrt(rLenSq));
+
+        // 3. Up Vector (Y)
+        Vector3D u = r.cross(f).asDirection();
+
+        // 4. Negate the Forward vector (Required for Right-Handed Coordinate Systems like OpenGL)
+        // Flip the sign bit in hardware without multiplication: XOR with -0.0f
+        __m128 negZero = _mm_set1_ps(-0.0f);
+        __m128 negF = _mm_xor_ps(f.reg, negZero);
+
+        // 5. Calculate Translation Vector
+        // Standard View Matrix translation is: [-dot(R, eye), -dot(U, eye), dot(F, eye)]
+        float tx = -r.dot(eye);
+        float ty = -u.dot(eye);
+        float tz = f.dot(eye); 
+        
+        // Pack into a single register for the 4th column. (_mm_set_ps takes args in reverse order: w, z, y, x)
+        __m128 translation = _mm_set_ps(1.0f, tz, ty, tx);
+
+        // 6. Setup rows for Hardware Transposition
+        __m128 row0 = r.reg;                              // { Rx, Ry, Rz, 0 }
+        __m128 row1 = u.reg;                              // { Ux, Uy, Uz, 0 }
+        __m128 row2 = negF;                               // {-Fx,-Fy,-Fz, 0 }
+        __m128 row3 = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f); // { 0,  0,  0,  1 }
+
+        // 7. THE MAGIC TRICK: Hardware Transpose
+        // Flips the 3x3 rotation axes into Column-Major format instantly.
+        _MM_TRANSPOSE4_PS(row0, row1, row2, row3);
+
+        // 8. Store the columns, overwriting the transposed 4th column with our calculated translation.
+        Matrix4x4_SIMD mat;
+        mat.col[0] = row0;
+        mat.col[1] = row1;
+        mat.col[2] = row2;
+        mat.col[3] = translation; 
+
+        return mat;
+    }
+
     // --- __MM_TRNASPOSE4_PS ---
     /*
         - Rendering APIs require matrices to be formatted in column-major order.
@@ -1039,6 +1091,8 @@ struct alignas(64) Matrix4x4_SIMD {
         
         return mat;
     }
+
+
 };
 
 // --- SIMD MATRIX OPERATORS ---
