@@ -1001,7 +1001,10 @@ struct alignas(64) BVHInstance {
     Matrix4x4 transform;
     Matrix4x4 inverseTransform;
 
+    bool hasMovedThisFrame = true; 
+
     // Call this every frame the car moves
+    // Called externally by the Game Loop/Bridge
     void UpdateTransform(const Matrix4x4& newTransform) {
         transform = newTransform;
         inverseTransform = newTransform.Invert();
@@ -1009,6 +1012,9 @@ struct alignas(64) BVHInstance {
         // Transform the 8 corners of the BLAS root AABB by the new matrix
         // and create a new worldBounds AABB.
         worldBounds = CalculateWorldBounds(blas->GetRootBounds(), transform);
+
+        // Flag it so the TLAS knows to process it this frame
+        hasMovedThisFrame = true;
     }
 };
 
@@ -1219,14 +1225,100 @@ private:
 
     // The builder and its internal vectors now PERSIST in memory
     TLASBuilder builder;
+
+    // --- DEGRADATION TRACKING ---
+    float m_optimalRootArea = 0.0f;
+    int m_framesSinceRebuild = 0;
+
+    bool m_treeNeedsRefit = true; // Force build on frame 1
+
+    // Post-order recursive traversal to snap AABBs to new geometry positions
+    AABB RefitNode(uint32_t nodeIdx) {
+        TLASNode& node = m_tlasNodes[nodeIdx];
+
+        // BASE CASE: We hit a leaf (A single Car/Entity)
+        if (node.IsLeaf()) {
+            uint32_t instIdx = node.GetIndex();
+            const BVHInstance& inst = m_instances[instIdx];
+
+            // Snap the leaf node bounds to the newly calculated world bounds of the car
+            node.minBounds = inst.worldBounds.bmin;
+            node.maxBounds = inst.worldBounds.bmax;
+            
+            return { node.minBounds, node.maxBounds };
+        }
+
+        // INTERNAL NODE: Phase 1's builder guarantees that the right child is exactly leftFirst + 1.
+        uint32_t leftChildIdx = node.leftFirst;
+        uint32_t rightChildIdx = node.leftFirst + 1;
+
+        // Traverse down first (Post-Order)
+        AABB leftBounds = RefitNode(leftChildIdx);
+        AABB rightBounds = RefitNode(rightChildIdx);
+
+        // Combine the updated children to form the new parent bounds
+        AABB combinedBounds;
+        combinedBounds.Grow(leftBounds);
+        combinedBounds.Grow(rightBounds);
+
+        node.minBounds = combinedBounds.bmin;
+        node.maxBounds = combinedBounds.bmax;
+
+        return combinedBounds;
+    }
+
 public:
-    // Call this every frame after physics/animations update your car matrices
+    // Call this ONLY when loading a level or when the tree is irreversibly bloated. After physics/animations update your car matrices
     void RebuildTLAS() {
         if (m_instances.empty()) return;
     
         // You would run a high-speed SAH or Morton Code builder here over m_instances.
         // It populates m_tlasNodes, nesting the instance AABBs perfectly.
         builder.Build(m_instances, m_tlasNodes);
+
+        // Record the "perfect" surface area of the newly optimized tree
+        if (!m_tlasNodes.empty()) {
+            AABB rootBounds = { m_tlasNodes[0].minBounds, m_tlasNodes[0].maxBounds };
+            m_optimalRootArea = rootBounds.Area();
+        }
+        
+        m_framesSinceRebuild = 0;
+    }
+
+    // The Game Loop calls this to push new matrices
+    FORCE_INLINE void UpdateInstanceTransform(uint32_t instanceIndex, const Matrix4x4& newTransform) {
+        m_instances[instanceIndex].UpdateTransform(newTransform);
+        m_treeNeedsRefit = true; // Tell the tree something moved!
+    }
+
+    // --- GAMEPLAY LOOP ENTRY POINT ---
+    // Call this every single frame
+    void UpdateTLAS() {
+        if (m_tlasNodes.empty() || !m_treeNeedsRefit) return; // Instantly exit if scene is static!
+
+        // Step 1: Snap the tree boxes to the new object positions
+        AABB newRootBounds = RefitNode(0);
+        float currentRootArea = newRootBounds.Area();
+        m_framesSinceRebuild++;
+
+        // Step 2: Clear the dirty flags for the next frame 
+        for (auto& inst : m_instances) {
+            inst.hasMovedThisFrame = false;
+        }
+
+        // Step 3: Degradation Heuristic
+        // If the tree's surface area has grown by more than 30% (bloated with empty space),
+        // or it has been 120 frames (~2 seconds), force a full Radix Sort bisection rebuild.
+        constexpr float DEGRADATION_TOLERANCE = 1.30f; 
+        constexpr int MAX_FRAMES_BEFORE_REBUILD = 120;
+
+        if (currentRootArea > (m_optimalRootArea * DEGRADATION_TOLERANCE) || 
+            m_framesSinceRebuild > MAX_FRAMES_BEFORE_REBUILD) {
+            RebuildTLAS();  // Trash the refit and calculate a perfect tree next frame
+        }
+
+        // Reset the flag at the end to let it know that nothing is moving (e.g., game paused or player is still)
+        m_treeNeedsRefit = false;
     }
 
     // The Master Raycast Entry Point
@@ -1311,3 +1403,62 @@ public:
     }
 };
 
+
+// =========================================================================
+// GAME LOOP ARCHITECTURE
+// =========================================================================
+/*
+    // 1. To connect the physics system to the Graphics/TLS system, we need an entity registry. It stores IDs linking the different systems together.
+
+    // A simple Entity representation
+    struct Entity {
+        uint32_t physicsID; // Index in the Physics Engine
+        uint32_t tlasID;    // Index in the SceneTLAS
+    };
+
+    // 2. Query the physics engine for what moved, and pushes that data directly to the TLAS.
+
+    class GameEngine {
+    private:
+        PhysicsEngine physics;
+        SceneTLAS tlas;
+        std::vector<Entity> activeEntities;
+
+    public:
+        void Tick(float deltaTime) {
+            
+            // ---------------------------------------------------------
+            // 1. UPDATE PHYSICS
+            // ---------------------------------------------------------
+            // The physics engine solves collisions, gravity, and velocity.
+            physics.StepSimulation(deltaTime);
+
+            // ---------------------------------------------------------
+            // 2. THE SYNCHRONIZATION BRIDGE (The Push)
+            // ---------------------------------------------------------
+            // Iterate through game entities and sync their matrices
+            for (const auto& entity : activeEntities) {
+                
+                // Optimization: Only query awake/moving physics bodies
+                if (physics.IsBodyAwake(entity.physicsID)) {
+                    
+                    // Pull matrix from Physics
+                    Matrix4x4 newMatrix = physics.GetTransformMatrix(entity.physicsID);
+                    
+                    // Push matrix to TLAS
+                    tlas.UpdateInstanceTransform(entity.tlasID, newMatrix);
+                }
+            }
+            // ---------------------------------------------------------
+            // 3. UPDATE SPATIAL HIERARCHY
+            // ---------------------------------------------------------
+            // The TLAS refits itself based ONLY on the instances that 
+            // were flagged as 'hasMovedThisFrame' in Step 2.
+            tlas.UpdateTLAS();
+            // ---------------------------------------------------------
+            // 4. RENDER / LOGIC
+            // ---------------------------------------------------------
+            // Now you can safely cast rays for AI line-of-sight, rendering, etc.
+        }
+    };
+*/
