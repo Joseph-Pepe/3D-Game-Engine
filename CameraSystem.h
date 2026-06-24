@@ -48,93 +48,6 @@
     - P(t) = (1/2) (2P_1 + t(-P_0 + P_2) + t^2(2P_0 - 5P_1 + 4P_2 - P_3) + t^3(-P_0 + 3P_1 - 3P_2 + P_3)), where it evaluates 4 points (P_0, P_1, P_2, P_3)
 */
 
-// --- CINEMATIC CAMERA SYSTEM ---
-class CinematicCamera {
-private:
-    // C++26 (std::inplace_vector): Stored directly on the stack/arena. Zero heap fragmentation. Replaces std::vector
-    #if ENGINE_HAS_CXX26_INPLACE_VECTOR
-        // Specify the maximum number of waypoints (e.g., 64). This pre-allocates exactly 1024 bytes (64 * 16 bytes) directly inside the class footprint.
-        std::inplace_vector<Vector3DStack, 64> controlPoints;
-        std::inplace_vector<Vector3DStack, 64> lookAtTargets;
-    #else
-        // Kept as Vector3DStack because CatmullRom uses heavy vector math operations where SSE acceleration actually benefits the 4-point polynomial evaluation.
-        std::vector<Vector3DStack> controlPoints;
-        std::vector<Vector3DStack> lookAtTargets;
-    #endif
-
-    float currentProgress = 0.0f;  // Global timeline progress (0.0 to 1.0)
-    float traversalSpeed = 0.1f;   // Percentage of track completed per second
-
-public:
-    Vector3DStack position;
-    Vector3DStack target;
-
-    CinematicCamera() : position(0.0f, 0.0f, 0.0f), target(0.0f, 0.0f, -1.0f) {}
-
-    // Add a physical coordinate for the camera to fly through
-    void AddWaypoint(const Vector3DStack& pos, const Vector3DStack& lookAt) {
-        controlPoints.push_back(pos);
-        lookAtTargets.push_back(lookAt);
-    }
-
-    // Set how fast the camera completes the entire track
-    void SetSpeed(float speed) { traversalSpeed = speed; }
-
-    // Runs once per frame on the Main UI/Render Thread
-    FORCE_INLINE void Update(float deltaTime) {
-        size_t count = controlPoints.size();
-        if (count < 2) return;  // Need at least 2 points to Lerp, 4 to perfectly Spline
-
-        // Advance global timeline
-        currentProgress += traversalSpeed * deltaTime;
-        if (currentProgress > 1.0f) currentProgress = 1.0f; 
-
-        // 1. Calculate which segment of the spline we are currently in
-        // A track with 5 points has 4 physical segments.
-        float segmentCount = static_cast<float>(count - 1);
-        float scaledProgress = currentProgress * segmentCount;
-
-        // Truncate float to get the active array index
-        int currentIndex = static_cast<int>(scaledProgress);
-
-        // Local t is the progress strictly between the current node and the next node
-        float localT = scaledProgress - static_cast<float>(currentIndex);
-
-        // 2. Fetch the 4 Control Points (Clamp to bounds to prevent segfaults)
-        int i0 = std::max(0, currentIndex - 1);
-        int i1 = currentIndex;
-        int i2 = std::min(static_cast<int>(count - 1), currentIndex + 1);
-        int i3 = std::min(static_cast<int>(count - 1), currentIndex + 2);
-
-        // 3. Compute Smooth Spline Position
-        position = CatmullRom(controlPoints[i0], controlPoints[i1], controlPoints[i2], controlPoints[i3], localT);
-
-        // 4. Compute Camera Rotation/Target
-        // Look-at targets can usually just be linearly interpolated unless you want 
-        // the camera panning to be distinctly eased.
-        target = Lerp(lookAtTargets[i1], lookAtTargets[i2], localT);
-    }
-
-    // 100% SIMD Matrix Generation
-    Matrix4x4_SIMD GetViewMatrix() const {
-        // 1. Instantly hoist the aligned stack data into SSE registers
-        Vector3D eyeVec(_mm_load_ps(position.data));
-        Vector3D targetVec(_mm_load_ps(target.data));
-        Vector3D upVec(0.0f, 1.0f, 0.0f, 0.0f); // Hardcoded up-vector loads directly to register
-
-        // 2. Generate the matrix purely on the silicon
-        return Matrix4x4_SIMD::LookAt_SIMD(eyeVec, targetVec, upVec);
-    }
-
-    // Builds the View Matrix to send to your Shader Pipeline
-    // (Assuming standard math; easily swapped with GLM if you use it for matrices)
-    void PrintTelemetry() const {
-        std::println("Cam Pos: [{}, {}, {}] | Target: [{}, {}, {}]", 
-                     position.data[0], position.data[1], position.data[2],
-                     target.data[0], target.data[1], target.data[2]);
-    }
-};
-
 // Strongly typed movement strictly prevents invalid input
 // enum class CameraMove {
 //     FORWARD, BACKWARD, LEFT, RIGHT, UP, DOWN
@@ -154,47 +67,75 @@ struct CameraInputAxes {
     }
 };
 
-// --- INTERACTIVE FREE-LOOK CAMERA ---
-class FreeCamera {
-
 // ===============================================
-// PRECISION LOSS PREVENTION 
+// ENTITY COMPONENT SYSTEM (ECS)
 // ===============================================
 /*
-    - Its best to prevent tiny floating-point truncation errors from compounding, causing the camera to slowly drift off its perfect axis.
-    - std::numbers::pi_v<float> means the compiler uses the absolute maximum IEEE-754 floating-point precision available for the specific hardware architecture to represent pi.
-    - This ensures perfect rotational stability no matter how long the player spins the camera.
+    - Is a component based architecture that decouples the data (where it is) from its logic (how it moves).
+    
+      1. Only one camera exists.
+      2. The cinematic system drives it until the cutscene ends.
+      3. The player's input controller dynamically attaches to it and takes over.
 */
 
-public:
+// --- 1. CAMERA COMPONENT (PURE DATA) ---
+// This is attached to your Entity. It has zero movement logic. It knows nothing about splines, keyboards, or gamepads.
+// It only knows its physical properties and how to build its matrices using optimized SIMD functions.
+struct alignas(16) CameraComponent {
     // Converted to Pure Scalar: Eliminates FPU-to-SSE shuffling penalties
-    Vector3DScalar Position, Front, Up, Right, WorldUp;
+    Vector3DScalar Position;
+    Vector3DScalar Front;
+    Vector3DScalar Up;
+    Vector3DScalar Right;
+    Vector3DScalar WorldUp;
 
-    float Yaw = -90.0f, Pitch = 0.0f;
-    float MovementSpeed = 800.0f, MouseSensitivity = 0.15f;
+    float FOV = 90.0f;
+    float AspectRatio = 16.0f / 9.0f;
+    float NearClip = 0.1f;
+    float FarClip = 10000.0f;
 
-    FreeCamera(Vector3DScalar position = Vector3DScalar(0.0f, 200.0f, 1000.0f)) {
-        Position = position;
-        WorldUp = Vector3DScalar(0.0f, 1.0f, 0.0f);  // Assuming Y is up
-        UpdateCameraVectors();
+    // Default initialization
+    CameraComponent(Vector3DScalar startPos = Vector3DScalar(0.0f, 0.0f, 0.0f)) {
+        Position = startPos;
+        Front = Vector3DScalar(0.0f, 0.0f, -1.0f);
+        Up = Vector3DScalar(0.0f, 1.0f, 0.0f);
+        Right = Vector3DScalar(1.0f, 0.0f, 0.0f);
+        WorldUp = Vector3DScalar(0.0f, 1.0f, 0.0f); // Assumes Y is up
     }
 
     // 100% SIMD Matrix Generation
     Matrix4x4_SIMD GetViewMatrix() const {
-        
-        // 1. Unaligned load directly from the scalar's memory footprint
+        // 1. Instantly hoist the aligned stack data into SSE registers
+        // Unaligned load directly from the scalar's memory footprint
         // The CPU reads x, y, z, w sequentially starting from the address of 'x'
         Vector3D eyeVec(_mm_loadu_ps(&Position.x));
-        Vector3D frontVec(_mm_loadu_ps(&Front.x));
-        Vector3D upVec(_mm_loadu_ps(&Up.x));              // FreeCamera already maintains a perfectly orthogonal Up vector
-        
-        // 2. SIMD Addition (target = position + front)
-        // Mapped operator+ in Vector3D class, this compiles down to a single _mm_add_ps instruction!
-        Vector3D targetVec = eyeVec + frontVec;
+
+        // 2. Mapped operator+ in Vector3D class, this compiles down to a single _mm_add_ps instruction! SIMD Addition (target = position + front)
+        Vector3D targetVec = eyeVec + Vector3D(_mm_loadu_ps(&Front.x)); 
+
+        // FreeCamera already maintains a perfectly orthogonal Up vector
+        Vector3D upVec(_mm_loadu_ps(&Up.x)); 
         
         // 3. Generate the matrix purely on the silicon
         return Matrix4x4_SIMD::LookAt_SIMD(eyeVec, targetVec, upVec);
     }
+
+    void PrintTelemetry() const {
+        // Calculate the absolute target position for telemetry (Position + Front)
+        Vector3DScalar absoluteTarget = Position + Front;
+
+        std::println("Cam Pos: [{}, {}, {}] | Target: [{}, {}, {}]", 
+                     Position.x, Position.y, Position.z,
+                     absoluteTarget.x, absoluteTarget.y, absoluteTarget.z);
+    }
+};
+
+// --- 2. SYSTEM: FREE LOOK INPUT CONTROLLER ---
+// Injects input accumulation into a generic CameraComponent. Strictly handles user input and applies mathematical deltas to any CameraComponent you hand it. 
+class FreeLookController {
+public:
+    float Yaw = -90.0f, Pitch = 0.0f;
+    float MovementSpeed = 800.0f, MouseSensitivity = 0.15f;
 
     // WASD Movement (0=Forward, 1=Backward, 2=Left, 3=Right, 4=Up, 5=Down)
     // void ProcessKeyboard(CameraMove direction, float deltaTime) {
@@ -229,13 +170,14 @@ public:
     // }
 
     // Replaces 'ProcessKeyboard' by using normalized vectors to move with a capped maximum speed in all directions.
-    void UpdatePosition(const CameraInputAxes& input, float deltaTime) {
+    // Notice we pass the component by reference. The controller mutates the data.
+    void UpdatePosition(CameraComponent& camera, const CameraInputAxes& input, float deltaTime) {
         // 1. True branchless accumulation
         // If an input axis is 0.0f, that vector component naturally zeroes out.
         Vector3DScalar moveDirection = 
-            (Front   * input.MoveZ) + 
-            (Right   * input.MoveX) + 
-            (WorldUp * input.MoveY);
+            (camera.Front   * input.MoveZ) + 
+            (camera.Right   * input.MoveX) + 
+            (camera.WorldUp * input.MoveY);
 
         // 2. Prevent the "Diagonal Exploit"
         // If a player presses Forward(1) and Right(1), the vector length becomes ~1.414.
@@ -247,26 +189,31 @@ public:
         }
 
         // 3. Apply final scaled velocity
-        float velocity = MovementSpeed * deltaTime;
-        Position = Position + (moveDirection * velocity);
+        camera.Position = camera.Position + (moveDirection * (MovementSpeed * deltaTime));
     }
 
-    void ProcessMouseMovement(float xoffset, float yoffset) {
-        xoffset *= MouseSensitivity;
-        yoffset *= MouseSensitivity;
+    void ProcessMouseMovement(CameraComponent& camera, float xoffset, float yoffset) {
+        Yaw += (xoffset * MouseSensitivity);
+        Pitch += (yoffset * MouseSensitivity);
 
-        Yaw += xoffset;
-        Pitch += yoffset;
-
-        // Constrain pitch to prevent screen-flipping (Gimbal Lock)
+        // Constrain pitch to prevent screen-flipping (Gimbal Lock Prevention)
         if (Pitch > 89.0f) Pitch = 89.0f;
         if (Pitch < -89.0f) Pitch = -89.0f;
 
-        UpdateCameraVectors();
+        // Recompute the camera's directional axes based on the controller's spherical state
+        UpdateCameraVectors(camera);
     }
 
 private:
-    void UpdateCameraVectors() {
+    // ===============================================
+    // PRECISION LOSS PREVENTION 
+    // ===============================================
+    /*
+        - Its best to prevent tiny floating-point truncation errors from compounding, causing the camera to slowly drift off its perfect axis.
+        - std::numbers::pi_v<float> means the compiler uses the absolute maximum IEEE-754 floating-point precision available for the specific hardware architecture to represent pi.
+        - This ensures perfect rotational stability no matter how long the player spins the camera.
+    */
+    void UpdateCameraVectors(CameraComponent& camera) {
         Vector3DScalar front;
 
         // [C++20]: Constants at maximum hardware precision (Convert to radians)
@@ -281,21 +228,21 @@ private:
 
         // Normalize Front
         float lenF = std::sqrt(front.dot(front));
-        Front = front * (1.0f / lenF);
+        camera.Front = front * (1.0f / lenF);
 
         // Re-calculate Right and Up
-        Right = Front.cross(WorldUp);
-        float lenR = std::sqrt(Right.dot(Right));
-        Right = Right * (1.0f / lenR);
+        camera.Right = camera.Front.cross(camera.WorldUp);
+        float lenR = std::sqrt(camera.Right.dot(camera.Right));
+        camera.Right = camera.Right * (1.0f / lenR);
 
-        Up = Right.cross(Front);
-        float lenU = std::sqrt(Up.dot(Up));
-        Up = Up * (1.0f / lenU);
+        camera.Up = camera.Right.cross(camera.Front);
+        float lenU = std::sqrt(camera.Up.dot(camera.Up));
+        camera.Up = camera.Up * (1.0f / lenU);
     }
 };
 
 /*
-    // Main Loop - [Old Way with enums]
+    // Main Loop - OLD WAY [ENUMS]
     // if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
     //     camera.ProcessKeyboard(CameraMove::FORWARD, dt);
     // if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS)
@@ -317,4 +264,130 @@ private:
 
     // Dispatch a single, branchless update
     camera.UpdatePosition(currentInput, dt);
+*/
+
+// --- 3. SYSTEM: CINEMATIC TRACK SPLINE CONTROLLER ---
+// Injects mathematical spline evaluation into a generic CameraComponent. Track that acts as an invisible rail that can hijack any generic CameraComponent and drag it along the Catmull-Rom Spline.
+class CinematicTrackController {
+private:
+    // C++26 (std::inplace_vector): Stored directly on the stack/arena. Zero heap fragmentation. Replaces std::vector
+    #if ENGINE_HAS_CXX26_INPLACE_VECTOR
+        // Specify the maximum number of waypoints (e.g., 64). This pre-allocates exactly 1024 bytes (64 * 16 bytes) directly inside the class footprint.
+        std::inplace_vector<Vector3DStack, 64> controlPoints;
+        std::inplace_vector<Vector3DStack, 64> lookAtTargets;
+    #else
+        // Kept as Vector3DStack because CatmullRom uses heavy vector math operations where SSE acceleration actually benefits the 4-point polynomial evaluation.
+        std::vector<Vector3DStack> controlPoints;
+        std::vector<Vector3DStack> lookAtTargets;
+    #endif
+
+    float currentProgress = 0.0f;  // Global timeline progress (0.0 to 1.0)
+    float traversalSpeed = 0.1f;   // Percentage of track completed per second
+
+public:
+    // Add a physical coordinate for the camera to fly through
+    void AddWaypoint(const Vector3DStack& pos, const Vector3DStack& lookAt) {
+        controlPoints.push_back(pos);
+        lookAtTargets.push_back(lookAt);
+    }
+
+    // Set how fast the camera completes the entire track
+    void SetSpeed(float speed) { traversalSpeed = speed; }
+
+    // Evaluates the spline and overwrites the camera's transform data. Runs once per frame on the Main UI/Render Thread
+    void Update(CameraComponent& camera, float deltaTime) {
+        size_t count = controlPoints.size();
+        if (count < 2) return;  // Need at least 2 points to Lerp, 4 to perfectly Spline
+
+        // Advance global timeline
+        currentProgress += traversalSpeed * deltaTime;
+        if (currentProgress > 1.0f) currentProgress = 1.0f; 
+
+        // 1. Calculate which segment of the spline we are currently in
+        // A track with 5 points has 4 physical segments.
+        float segmentCount = static_cast<float>(count - 1);
+        float scaledProgress = currentProgress * segmentCount;
+
+        // Truncate float to get the active array index
+        int currentIndex = static_cast<int>(scaledProgress);
+
+        // Local t is the progress strictly between the current node and the next node
+        float localT = scaledProgress - static_cast<float>(currentIndex);
+
+        // 2. Fetch the 4 Control Points (Clamp to bounds to prevent segfaults)
+        int i0 = std::max(0, currentIndex - 1);
+        int i1 = currentIndex;
+        int i2 = std::min(static_cast<int>(count - 1), currentIndex + 1);
+        int i3 = std::min(static_cast<int>(count - 1), currentIndex + 2);
+
+        // 3. Compute Smooth Spline Position
+        // Overwrite Component Position via SIMD Spline
+        Vector3DStack splinePos = CatmullRom(controlPoints[i0], controlPoints[i1], controlPoints[i2], controlPoints[i3], localT);
+        camera.Position = Vector3DScalar(splinePos.data[0], splinePos.data[1], splinePos.data[2]);
+
+        // 4. Overwrite Component Direction via Lerp
+        // Compute Camera Rotation/Target
+        // Look-at targets can usually just be linearly interpolated unless you want the camera panning to be distinctly eased.
+        Vector3DStack splineTarget = Lerp(lookAtTargets[i1], lookAtTargets[i2], localT);
+        Vector3DScalar targetScalar(splineTarget.data[0], splineTarget.data[1], splineTarget.data[2]);
+        
+        // Calculate the new Forward vector from the LookAt target
+        Vector3DScalar newFront = targetScalar - camera.Position;
+        float lenSq = newFront.dot(newFront);
+        if (lenSq > 1e-8f) {
+            newFront *= (1.0f / std::sqrt(lenSq));
+            camera.Front = newFront;
+        }
+
+        // Re-orthogonalize the Right and Up vectors
+        camera.Right = camera.Front.cross(camera.WorldUp);
+        float lenR = std::sqrt(camera.Right.dot(camera.Right));
+        camera.Right = camera.Right * (1.0f / lenR);
+
+        camera.Up = camera.Right.cross(camera.Front);
+        float lenU = std::sqrt(camera.Up.dot(camera.Up));
+        camera.Up = camera.Up * (1.0f / lenU);
+    }
+};
+
+/*
+    - Instantiate CameraComponent once.
+    - Can hot swap who owns the camera based on the game state without deleting or allocating any new objects.  
+
+    // 1. Create the singular Entity Data
+    CameraComponent mainCamera(Vector3DScalar(0.0f, 200.0f, 1000.0f));
+
+    // 2. Create the Systems
+    FreeLookController playerController;
+    CinematicTrackController introCutscene;
+    introCutscene.AddWaypoint(...); // Add points
+
+    bool isInCutscene = true;
+
+    // 3. Main Engine Loop
+    while (Engine.IsRunning()) {
+        
+        // Engine State Router
+        if (isInCutscene) {
+            // The Cutscene has full control over the camera
+            introCutscene.Update(mainCamera, dt);
+            
+            // Example check: did we finish the track?
+            if (introCutscene.IsFinished()) {
+                isInCutscene = false; // Seamlessly hand control back to the player
+            }
+        } 
+        else {
+            // Accumulate player input
+            CameraInputAxes currentInput = ProcessHardwareInput(); 
+            
+            // The Player has full control over the camera
+            playerController.ProcessMouseMovement(mainCamera, mouseX, mouseY);
+            playerController.UpdatePosition(mainCamera, currentInput, dt);
+        }
+
+        // 4. Send to Renderer (Completely agnostic to who moved it)
+        Matrix4x4_SIMD viewMat = mainCamera.GetViewMatrix();
+        Renderer::SubmitViewMatrix(viewMat);
+    }
 */
