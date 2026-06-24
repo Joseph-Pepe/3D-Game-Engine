@@ -134,8 +134,22 @@ public:
 };
 
 // Strongly typed movement strictly prevents invalid input
-enum class CameraMove {
-    FORWARD, BACKWARD, LEFT, RIGHT, UP, DOWN
+// enum class CameraMove {
+//     FORWARD, BACKWARD, LEFT, RIGHT, UP, DOWN
+// };
+
+// Replaces 'enum class CameraMove'
+struct CameraInputAxes {
+    float MoveX = 0.0f; // Right (+1.0f) / Left (-1.0f)
+    float MoveY = 0.0f; // Up (+1.0f) / Down (-1.0f)
+    float MoveZ = 0.0f; // Forward (+1.0f) / Backward (-1.0f)
+
+    // Reset every frame before polling hardware input
+    void Clear() {
+        MoveX = 0.0f;
+        MoveY = 0.0f;
+        MoveZ = 0.0f;
+    }
 };
 
 // --- INTERACTIVE FREE-LOOK CAMERA ---
@@ -168,36 +182,58 @@ public:
     }
 
     // WASD Movement (0=Forward, 1=Backward, 2=Left, 3=Right, 4=Up, 5=Down)
-    void ProcessKeyboard(CameraMove direction, float deltaTime) {
-        float velocity = MovementSpeed * deltaTime;
+    // void ProcessKeyboard(CameraMove direction, float deltaTime) {
+    //     float velocity = MovementSpeed * deltaTime;
 
-        // ===============================================
-        // BRANCHLESS JUMP TABLES (SWITCH) 
-        // ===============================================
-        /*
-            - An if-statement used would cause the CPU branch predictor to constantly try to guess which key the user was pressing.
-            - Occassionally it would guess wrong and flush its execution pipeline (a penalty of ~15 cycles).
+    //     // ===============================================
+    //     // BRANCHLESS JUMP TABLES (SWITCH) 
+    //     // ===============================================
+    //     /*
+    //         - An if-statement used would cause the CPU branch predictor to constantly try to guess which key the user was pressing.
+    //         - Occassionally it would guess wrong and flush its execution pipeline (a penalty of ~15 cycles).
             
-            - A switch statement is optimized into a highly efficient jump table.
-            - Executes the exact movement in a single instruction cycle without evaluating the other conditions.
-            - Calcultes an offset based on enum integer and performs a single, direct memory jump to the correct logic.
-            - Bypasses branch predictor.
-        */
+    //         - A switch statement is optimized into a highly efficient jump table.
+    //         - Executes the exact movement in a single instruction cycle without evaluating the other conditions.
+    //         - Calcultes an offset based on enum integer and performs a single, direct memory jump to the correct logic.
+    //     */
 
-        #if ENGINE_HAS_CXX26_META_REFLECTION
-            // Automatically prints: "Input: FORWARD" without writing a massive switch block
-            std::println("Input: {}", EnumToString(direction));
-        #endif
+    //     #if ENGINE_HAS_CXX26_META_REFLECTION
+    //         // Automatically prints: "Input: FORWARD" without writing a massive switch block
+    //         std::println("Input: {}", EnumToString(direction));
+    //     #endif
 
-        // Branchless Jump Table via Switch
-        switch (direction) {
-            case CameraMove::FORWARD:  Position = Position + (Front * velocity); break;
-            case CameraMove::BACKWARD: Position = Position - (Front * velocity); break;
-            case CameraMove::LEFT:     Position = Position - (Right * velocity); break;
-            case CameraMove::RIGHT:    Position = Position + (Right * velocity); break;
-            case CameraMove::UP:       Position = Position + (WorldUp * velocity); break;
-            case CameraMove::DOWN:     Position = Position - (WorldUp * velocity); break;
+    //     // Branchless Jump Table via Switch
+    //     switch (direction) {
+    //         case CameraMove::FORWARD:  Position = Position + (Front * velocity); break;
+    //         case CameraMove::BACKWARD: Position = Position - (Front * velocity); break;
+    //         case CameraMove::LEFT:     Position = Position - (Right * velocity); break;
+    //         case CameraMove::RIGHT:    Position = Position + (Right * velocity); break;
+    //         case CameraMove::UP:       Position = Position + (WorldUp * velocity); break;
+    //         case CameraMove::DOWN:     Position = Position - (WorldUp * velocity); break;
+    //     }
+    // }
+
+    // Replaces 'ProcessKeyboard' by using normalized vectors to move with a capped maximum speed in all directions.
+    void UpdatePosition(const CameraInputAxes& input, float deltaTime) {
+        // 1. True branchless accumulation
+        // If an input axis is 0.0f, that vector component naturally zeroes out.
+        Vector3DScalar moveDirection = 
+            (Front   * input.MoveZ) + 
+            (Right   * input.MoveX) + 
+            (WorldUp * input.MoveY);
+
+        // 2. Prevent the "Diagonal Exploit"
+        // If a player presses Forward(1) and Right(1), the vector length becomes ~1.414.
+        // We must normalize the direction vector if its length exceeds 1.0.
+        float squaredLength = moveDirection.dot(moveDirection);
+        if (squaredLength > 1.0f) {
+            float invLen = 1.0f / std::sqrt(squaredLength);
+            moveDirection = moveDirection * invLen;
         }
+
+        // 3. Apply final scaled velocity
+        float velocity = MovementSpeed * deltaTime;
+        Position = Position + (moveDirection * velocity);
     }
 
     void ProcessMouseMovement(float xoffset, float yoffset) {
@@ -242,3 +278,28 @@ private:
         Up = Up * (1.0f / lenU);
     }
 };
+
+/*
+    // Main Loop - [Old Way with enums]
+    // if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
+    //     camera.ProcessKeyboard(CameraMove::FORWARD, dt);
+    // if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS)
+    //     camera.ProcessKeyboard(CameraMove::BACKWARD, dt);
+
+    // MAIN LOOP - NEW WAY WITH CONTINUOUS STATE ACCUMULATION [BRANCHLESS VECTOR MATH]
+    CameraInputAxes currentInput;
+    currentInput.Clear();
+
+    // Accumulate axes (creates perfectly balanced -1 to 1 scales)
+    if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) currentInput.MoveZ += 1.0f;
+    if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) currentInput.MoveZ -= 1.0f;
+
+    if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) currentInput.MoveX += 1.0f;
+    if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS) currentInput.MoveX -= 1.0f;
+
+    if (glfwGetKey(window, GLFW_KEY_E) == GLFW_PRESS) currentInput.MoveY += 1.0f;
+    if (glfwGetKey(window, GLFW_KEY_Q) == GLFW_PRESS) currentInput.MoveY -= 1.0f;
+
+    // Dispatch a single, branchless update
+    camera.UpdatePosition(currentInput, dt);
+*/
