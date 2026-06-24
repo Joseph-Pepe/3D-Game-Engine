@@ -67,6 +67,129 @@ struct CameraInputAxes {
     }
 };
 
+// ==================================================================================
+// EULER ANGLES (GIMBAL LOCK) & QUATERNIONS
+// ==================================================================================
+/*
+    - Euler Angles: Yaw, Pitch, Roll (requires pitch to be clamped to prevent screen flipping).
+    - Prevents smooth interpolation and complicates multi-axis rotations (gimbal lock).
+
+      // Constrain pitch to prevent screen-flipping (Gimbal Lock Prevention)
+      if (Pitch > 89.0f) Pitch = 89.0f;
+      if (Pitch < -89.0f) Pitch = -89.0f;
+
+    - Quaternions: Represents a rotation in 3D space using a 4D complex number (q = w + xi + yi + zi).
+    - Eradicates gimbal lock entirely because it represents spherical rotation s directly (no snapping or axis flips). 
+    - Allows us to combine rotations using pure SIMD Fused Multiply-Add (FMA) arithmetic.
+    - Maps perfectly to a 128-bit register (Hamiltonian Product) using a handful of insruction cycles. 
+*/
+
+// ==================================================================================
+// SIMD QUATERNION (128-bit)
+// ==================================================================================
+struct alignas(16) Quaternion {
+    union {
+        __m128 reg;
+        struct { float x, y, z, w; };
+    };
+
+    FORCE_INLINE Quaternion() : reg(_mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f)) {} // Identity {0,0,0,1}
+    FORCE_INLINE Quaternion(__m128 m) : reg(m) {}
+    FORCE_INLINE Quaternion(float _x, float _y, float _z, float _w) : reg(_mm_set_ps(_w, _z, _y, _x)) {}
+
+    // --- ANGLE AXIS CONVERSION ---
+    // This is the ONLY time we use Trigonometry. Used when converting mouse/keyboard input to a rotation.
+    static FORCE_INLINE Quaternion AngleAxis(float angleDegrees, const Vector3D& axis) {
+        float halfAngleRad = (angleDegrees * (std::numbers::pi_v<float> / 180.0f)) * 0.5f;
+        float s = std::sin(halfAngleRad);
+        float c = std::cos(halfAngleRad);
+        
+        // Multiply the normalized axis by sin(half_angle)
+        __m128 sinVec = _mm_set1_ps(s);
+        __m128 axisScaled = _mm_mul_ps(axis.reg, sinVec);
+        
+        // Blend the Cosine value into the W lane (mask 0x08 = 1000 binary)
+        __m128 wCos = _mm_set_ps(c, 0.0f, 0.0f, 0.0f);
+        return Quaternion(_mm_blend_ps(axisScaled, wCos, 0x08));
+    }
+
+    // --- THE HAMILTON PRODUCT (SIMD QUATERNION MULTIPLICATION) ---
+    // Combines two rotations into one. Executes in ~6 clock cycles on AVX2.
+    FORCE_INLINE Quaternion operator*(const Quaternion& rhs) const {
+        // Q1 = this (a, b, c, d) | Q2 = rhs (x, y, z, w)
+        __m128 q1 = reg;
+        __m128 q2 = rhs.reg;
+
+        // Shuffle Q1
+        __m128 w1 = _mm_shuffle_ps(q1, q1, _MM_SHUFFLE(3, 3, 3, 3));
+        __m128 x1 = _mm_shuffle_ps(q1, q1, _MM_SHUFFLE(0, 0, 0, 0));
+        __m128 y1 = _mm_shuffle_ps(q1, q1, _MM_SHUFFLE(1, 1, 1, 1));
+        __m128 z1 = _mm_shuffle_ps(q1, q1, _MM_SHUFFLE(2, 2, 2, 2));
+
+        // Shuffle Q2 for the specific Hamilton cross-terms
+        __m128 tmp0 = _mm_shuffle_ps(q2, q2, _MM_SHUFFLE(3, 2, 1, 0)); // w, z, y, x
+        __m128 tmp1 = _mm_shuffle_ps(q2, q2, _MM_SHUFFLE(2, 3, 0, 1)); // z, w, x, y
+        __m128 tmp2 = _mm_shuffle_ps(q2, q2, _MM_SHUFFLE(1, 0, 3, 2)); // y, x, w, z
+
+        // FMA (Fused Multiply-Add/Sub) sequence to resolve the complex numbers
+        __m128 res = _mm_mul_ps(w1, q2);
+        
+        // We use bitwise XOR to flip the signs for the subtraction terms in the Hamilton formula
+        __m128 signX = _mm_castsi128_ps(_mm_set_epi32(0x80000000, 0x80000000, 0, 0x80000000));
+        __m128 signY = _mm_castsi128_ps(_mm_set_epi32(0x80000000, 0, 0x80000000, 0x80000000));
+        __m128 signZ = _mm_castsi128_ps(_mm_set_epi32(0x80000000, 0x80000000, 0x80000000, 0));
+
+        res = _mm_add_ps(res, _mm_xor_ps(_mm_mul_ps(x1, tmp0), signX));
+        res = _mm_add_ps(res, _mm_xor_ps(_mm_mul_ps(y1, tmp1), signY));
+        res = _mm_add_ps(res, _mm_xor_ps(_mm_mul_ps(z1, tmp2), signZ));
+
+        return Quaternion(res);
+    }
+
+    // --- HARDWARE NORMALIZATION ---
+    FORCE_INLINE void Normalize() {
+        __m128 dot = _mm_dp_ps(reg, reg, 0xFF);
+        __m128 invLen = _mm_rsqrt_ps(dot); // Hardware inverse square root
+        reg = _mm_mul_ps(reg, invLen);
+    }
+
+    // --- CONJUGATE (INVERSE ROTATION) ---
+    // Negates X, Y, and Z. Required to generate View Matrices!
+    FORCE_INLINE Quaternion Conjugate() const {
+        __m128 signMask = _mm_castsi128_ps(_mm_set_epi32(0, 0x80000000, 0x80000000, 0x80000000));
+        return Quaternion(_mm_xor_ps(reg, signMask));
+    }
+    
+    // --- ROTATE VECTOR ---
+    // Rotates a 3D vector by this quaternion: V' = Q * V * Q^-1
+    FORCE_INLINE Vector3D RotateVector(const Vector3D& v) const {
+        // Fast path for rotating a vector by a quaternion
+        Vector3D qVec(x, y, z, 0.0f);
+        Vector3D t = qVec.cross(v) * 2.0f;
+        return v + (t * w) + qVec.cross(t);
+    }
+
+    // --- DIRECTION TO QUATERNION ---
+    // Converts a normalized forward vector into a rotation without using Trigonometry.
+    static FORCE_INLINE Quaternion FromDirection(const Vector3D& dir) {
+        Vector3D baseForward(0.0f, 0.0f, -1.0f, 0.0f); 
+        
+        float dot = baseForward.dot(dir);
+        
+        // Edge Case: The camera needs to perfectly turn around 180 degrees
+        if (dot < -0.9999f) {
+            return Quaternion(0.0f, 1.0f, 0.0f, 0.0f); // 180-degree Yaw
+        }
+        
+        // Build the Quaternion using the cross product axis and the half-way dot product
+        Vector3D axis = baseForward.cross(dir);
+        Quaternion q(axis.x, axis.y, axis.z, 1.0f + dot);
+        q.Normalize();
+        
+        return q;
+    }
+};
+
 // ===============================================
 // ENTITY COMPONENT SYSTEM (ECS)
 // ===============================================
@@ -82,12 +205,8 @@ struct CameraInputAxes {
 // This is attached to your Entity. It has zero movement logic. It knows nothing about splines, keyboards, or gamepads.
 // It only knows its physical properties and how to build its matrices using optimized SIMD functions.
 struct alignas(16) CameraComponent {
-    // Converted to Pure Scalar: Eliminates FPU-to-SSE shuffling penalties
-    Vector3DScalar Position;
-    Vector3DScalar Front;
-    Vector3DScalar Up;
-    Vector3DScalar Right;
-    Vector3DScalar WorldUp;
+    Vector3D Position;       // 16 bytes
+    Quaternion Orientation;  // 16 bytes (Identity by default)
 
     float FOV = 90.0f;
     float AspectRatio = 16.0f / 9.0f;
@@ -95,34 +214,51 @@ struct alignas(16) CameraComponent {
     float FarClip = 10000.0f;
 
     // Default initialization
-    CameraComponent(Vector3DScalar startPos = Vector3DScalar(0.0f, 0.0f, 0.0f)) {
+    CameraComponent(Vector3D startPos = Vector3D(0.0f, 0.0f, 0.0f)) {
         Position = startPos;
-        Front = Vector3DScalar(0.0f, 0.0f, -1.0f);
-        Up = Vector3DScalar(0.0f, 1.0f, 0.0f);
-        Right = Vector3DScalar(1.0f, 0.0f, 0.0f);
-        WorldUp = Vector3DScalar(0.0f, 1.0f, 0.0f); // Assumes Y is up
+        Orientation = Quaternion(); // {0,0,0,1}
     }
 
-    // 100% SIMD Matrix Generation
+    // --- PURE SIMD QUATERNION TO VIEW MATRIX (100% SIMD Matrix Generation) ---
+    // Calculating the conjugated rotation and translation directly into columns without branching or extracting to an intermediate transform struct.
     Matrix4x4_SIMD GetViewMatrix() const {
-        // 1. Instantly hoist the aligned stack data into SSE registers
-        // Unaligned load directly from the scalar's memory footprint
-        // The CPU reads x, y, z, w sequentially starting from the address of 'x'
-        Vector3D eyeVec(_mm_loadu_ps(&Position.x));
+        // 1. To get a View Matrix, we need the INVERSE of the camera's rotation.
+        Quaternion invQ = Orientation.Conjugate();
 
-        // 2. Mapped operator+ in Vector3D class, this compiles down to a single _mm_add_ps instruction! SIMD Addition (target = position + front)
-        Vector3D targetVec = eyeVec + Vector3D(_mm_loadu_ps(&Front.x)); 
+        // 2. Precompute Fused terms for the Rotation Matrix
+        float x2 = invQ.x + invQ.x, y2 = invQ.y + invQ.y, z2 = invQ.z + invQ.z;
+        float xx = invQ.x * x2, xy = invQ.x * y2, xz = invQ.x * z2;
+        float yy = invQ.y * y2, yz = invQ.y * z2, zz = invQ.z * z2;
+        float wx = invQ.w * x2, wy = invQ.w * y2, wz = invQ.w * z2;
 
-        // FreeCamera already maintains a perfectly orthogonal Up vector
-        Vector3D upVec(_mm_loadu_ps(&Up.x)); 
-        
-        // 3. Generate the matrix purely on the silicon
-        return Matrix4x4_SIMD::LookAt_SIMD(eyeVec, targetVec, upVec);
+        // 3. Build the Rotation Axes (Right, Up, Forward)
+        Vector3D r(1.0f - (yy + zz), xy - wz, xz + wy, 0.0f);
+        Vector3D u(xy + wz, 1.0f - (xx + zz), yz - wx, 0.0f);
+        Vector3D f(xz - wy, yz + wx, 1.0f - (xx + yy), 0.0f);
+
+        // 4. Calculate SIMD Translation: T = -R * Position
+        float tx = -r.dot(Position);
+        float ty = -u.dot(Position);
+        float tz = -f.dot(Position);
+        __m128 translation = _mm_set_ps(1.0f, tz, ty, tx);
+
+        // 5. Store directly into the Matrix format
+        Matrix4x4_SIMD mat;
+        mat.col[0] = r.reg;
+        mat.col[1] = u.reg;
+        mat.col[2] = f.reg;
+        mat.col[3] = translation;
+
+        return mat;
     }
 
     void PrintTelemetry() const {
-        // Calculate the absolute target position for telemetry (Position + Front)
-        Vector3DScalar absoluteTarget = Position + Front;
+        // Dynamically calculate the Forward vector from the Quaternion
+        Vector3D localForward(0.0f, 0.0f, -1.0f, 0.0f);
+        Vector3D currentFront = Orientation.RotateVector(localForward);
+        
+        // Calculate the absolute target position
+        Vector3D absoluteTarget = Position + currentFront;
 
         std::println("Cam Pos: [{}, {}, {}] | Target: [{}, {}, {}]", 
                      Position.x, Position.y, Position.z,
@@ -134,8 +270,8 @@ struct alignas(16) CameraComponent {
 // Injects input accumulation into a generic CameraComponent. Strictly handles user input and applies mathematical deltas to any CameraComponent you hand it. 
 class FreeLookController {
 public:
-    float Yaw = -90.0f, Pitch = 0.0f;
-    float MovementSpeed = 800.0f, MouseSensitivity = 0.15f;
+    float MovementSpeed = 800.0f;
+    float MouseSensitivity = 0.15f;
 
     // WASD Movement (0=Forward, 1=Backward, 2=Left, 3=Right, 4=Up, 5=Down)
     // void ProcessKeyboard(CameraMove direction, float deltaTime) {
@@ -169,17 +305,30 @@ public:
     //     }
     // }
 
-    // Replaces 'ProcessKeyboard' by using normalized vectors to move with a capped maximum speed in all directions.
+    // 'UpdatePosition' Replaces 'ProcessKeyboard' by using normalized vectors to move with a capped maximum speed in all directions.
     // Notice we pass the component by reference. The controller mutates the data.
-    void UpdatePosition(CameraComponent& camera, const CameraInputAxes& input, float deltaTime) {
-        // 1. True branchless accumulation
-        // If an input axis is 0.0f, that vector component naturally zeroes out.
-        Vector3DScalar moveDirection = 
-            (camera.Front   * input.MoveZ) + 
-            (camera.Right   * input.MoveX) + 
-            (camera.WorldUp * input.MoveY);
 
-        // 2. Prevent the "Diagonal Exploit"
+    // --- TRUE 6-DOF MOVEMENT ---
+    void UpdatePosition(CameraComponent& camera, const CameraInputAxes& input, float deltaTime) {
+        
+        // 1. Define the base coordinate axes
+        Vector3D localRight(1.0f, 0.0f, 0.0f, 0.0f);
+        Vector3D localUp(0.0f, 1.0f, 0.0f, 0.0f);
+        Vector3D localForward(0.0f, 0.0f, -1.0f, 0.0f);
+
+        // 2. Rotate the base axes by the camera's current Quaternion
+        Vector3D camRight   = camera.Orientation.RotateVector(localRight);
+        Vector3D camUp      = camera.Orientation.RotateVector(localUp);
+        Vector3D camForward = camera.Orientation.RotateVector(localForward);
+
+        // 3. True branchless accumulation
+        // If an input axis is 0.0f, that vector component naturally zeroes out.
+        Vector3D moveDirection = 
+            (camForward * input.MoveZ) + 
+            (camRight   * input.MoveX) + 
+            (camUp      * input.MoveY);
+
+        // 4. Prevent the "Diagonal Exploit"
         // If a player presses Forward(1) and Right(1), the vector length becomes ~1.414.
         // We must normalize the direction vector if its length exceeds 1.0.
         float squaredLength = moveDirection.dot(moveDirection);
@@ -188,23 +337,32 @@ public:
             moveDirection = moveDirection * invLen;
         }
 
-        // 3. Apply final scaled velocity
+        // 5. Apply Velocity
         camera.Position = camera.Position + (moveDirection * (MovementSpeed * deltaTime));
     }
 
+    // --- GIMBAL-LOCK FREE ROTATION ---
     void ProcessMouseMovement(CameraComponent& camera, float xoffset, float yoffset) {
-        Yaw += (xoffset * MouseSensitivity);
-        Pitch += (yoffset * MouseSensitivity);
+        float yawAngle   = -xoffset * MouseSensitivity;
+        float pitchAngle = -yoffset * MouseSensitivity;
 
-        // Constrain pitch to prevent screen-flipping (Gimbal Lock Prevention)
-        if (Pitch > 89.0f) Pitch = 89.0f;
-        if (Pitch < -89.0f) Pitch = -89.0f;
+        // 1. Create Delta Quaternions from the mouse input
+        // Pitch rotates around the LOCAL X Axis (1,0,0)
+        Quaternion pitchDelta = Quaternion::AngleAxis(pitchAngle, Vector3D(1.0f, 0.0f, 0.0f, 0.0f));
+        
+        // Yaw rotates around the GLOBAL Y Axis (0,1,0) to prevent the camera from "rolling" diagonally 
+        // If you want a Spaceship/Flight Sim camera, change this to Local Y!
+        Quaternion yawDelta = Quaternion::AngleAxis(yawAngle, Vector3D(0.0f, 1.0f, 0.0f, 0.0f));
 
-        // Recompute the camera's directional axes based on the controller's spherical state
-        UpdateCameraVectors(camera);
+        // 2. Combine the Rotations via Hamilton Product
+        // Order matters! Global Yaw pre-multiplies, Local Pitch post-multiplies.
+        camera.Orientation = yawDelta * camera.Orientation * pitchDelta;
+
+        // 3. Hardware Normalize to prevent floating-point drift over time
+        camera.Orientation.Normalize();
     }
 
-private:
+// private:
     // ===============================================
     // PRECISION LOSS PREVENTION 
     // ===============================================
@@ -213,32 +371,32 @@ private:
         - std::numbers::pi_v<float> means the compiler uses the absolute maximum IEEE-754 floating-point precision available for the specific hardware architecture to represent pi.
         - This ensures perfect rotational stability no matter how long the player spins the camera.
     */
-    void UpdateCameraVectors(CameraComponent& camera) {
-        Vector3DScalar front;
+    // void UpdateCameraVectors(CameraComponent& camera) {
+    //     Vector3DScalar front;
 
-        // [C++20]: Constants at maximum hardware precision (Convert to radians)
-        // [std::numbers::pi_v<float>]: Prevents floating-point truncation issues during rapid camera rotations.
-        float yawRad = Yaw * (std::numbers::pi_v<float> / 180.0f);
-        float pitchRad = Pitch * (std::numbers::pi_v<float> / 180.0f);
+    //     // [C++20]: Constants at maximum hardware precision (Convert to radians)
+    //     // [std::numbers::pi_v<float>]: Prevents floating-point truncation issues during rapid camera rotations.
+    //     float yawRad = Yaw * (std::numbers::pi_v<float> / 180.0f);
+    //     float pitchRad = Pitch * (std::numbers::pi_v<float> / 180.0f);
 
-        // Spherical coordinates to Cartesian coordinates
-        front.x = std::cos(yawRad) * std::cos(pitchRad);
-        front.y = std::sin(pitchRad);
-        front.z = std::sin(yawRad) * std::cos(pitchRad);
+    //     // Spherical coordinates to Cartesian coordinates
+    //     front.x = std::cos(yawRad) * std::cos(pitchRad);
+    //     front.y = std::sin(pitchRad);
+    //     front.z = std::sin(yawRad) * std::cos(pitchRad);
 
-        // Normalize Front
-        float lenF = std::sqrt(front.dot(front));
-        camera.Front = front * (1.0f / lenF);
+    //     // Normalize Front
+    //     float lenF = std::sqrt(front.dot(front));
+    //     camera.Front = front * (1.0f / lenF);
 
-        // Re-calculate Right and Up
-        camera.Right = camera.Front.cross(camera.WorldUp);
-        float lenR = std::sqrt(camera.Right.dot(camera.Right));
-        camera.Right = camera.Right * (1.0f / lenR);
+    //     // Re-calculate Right and Up
+    //     camera.Right = camera.Front.cross(camera.WorldUp);
+    //     float lenR = std::sqrt(camera.Right.dot(camera.Right));
+    //     camera.Right = camera.Right * (1.0f / lenR);
 
-        camera.Up = camera.Right.cross(camera.Front);
-        float lenU = std::sqrt(camera.Up.dot(camera.Up));
-        camera.Up = camera.Up * (1.0f / lenU);
-    }
+    //     camera.Up = camera.Right.cross(camera.Front);
+    //     float lenU = std::sqrt(camera.Up.dot(camera.Up));
+    //     camera.Up = camera.Up * (1.0f / lenU);
+    // }
 };
 
 /*
@@ -321,32 +479,29 @@ public:
         int i3 = std::min(static_cast<int>(count - 1), currentIndex + 2);
 
         // 3. Compute Smooth Spline Position
-        // Overwrite Component Position via SIMD Spline
         Vector3DStack splinePos = CatmullRom(controlPoints[i0], controlPoints[i1], controlPoints[i2], controlPoints[i3], localT);
-        camera.Position = Vector3DScalar(splinePos.data[0], splinePos.data[1], splinePos.data[2]);
-
-        // 4. Overwrite Component Direction via Lerp
-        // Compute Camera Rotation/Target
-        // Look-at targets can usually just be linearly interpolated unless you want the camera panning to be distinctly eased.
-        Vector3DStack splineTarget = Lerp(lookAtTargets[i1], lookAtTargets[i2], localT);
-        Vector3DScalar targetScalar(splineTarget.data[0], splineTarget.data[1], splineTarget.data[2]);
         
-        // Calculate the new Forward vector from the LookAt target
-        Vector3DScalar newFront = targetScalar - camera.Position;
+        // Instantly load the 16-byte aligned stack data into a SIMD Vector3D
+        // .asPoint() ensures W = 1.0f for spatial translation
+        camera.Position = Vector3D(_mm_load_ps(splinePos.data)).asPoint(); 
+
+        // 4. Overwrite Component Direction via Spline Target
+        Vector3DStack splineTarget = Lerp(lookAtTargets[i1], lookAtTargets[i2], localT);
+        
+        // Load target directly into a SIMD register
+        Vector3D targetVec(_mm_load_ps(splineTarget.data));
+        
+        // Calculate the new directional vector purely on the silicon
+        Vector3D newFront = targetVec - camera.Position;
+        newFront = newFront.asDirection(); // Enforce W = 0.0f
+        
         float lenSq = newFront.dot(newFront);
         if (lenSq > 1e-8f) {
-            newFront *= (1.0f / std::sqrt(lenSq));
-            camera.Front = newFront;
+            newFront = newFront * (1.0f / std::sqrt(lenSq));
+            
+            // Instantly snap the camera's quaternion to look down the spline!
+            camera.Orientation = Quaternion::FromDirection(newFront);
         }
-
-        // Re-orthogonalize the Right and Up vectors
-        camera.Right = camera.Front.cross(camera.WorldUp);
-        float lenR = std::sqrt(camera.Right.dot(camera.Right));
-        camera.Right = camera.Right * (1.0f / lenR);
-
-        camera.Up = camera.Right.cross(camera.Front);
-        float lenU = std::sqrt(camera.Up.dot(camera.Up));
-        camera.Up = camera.Up * (1.0f / lenU);
     }
 };
 
