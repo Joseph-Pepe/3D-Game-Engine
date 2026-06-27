@@ -26,6 +26,9 @@ extern "C" void* SwapContext(void** current_rsp, void* target_rsp);
 #else
     #include <x86intrin.h> // REQUIRED for __rdtsc on GCC/Clang
     #error "POSIX ucontext or ASM fiber backend required for non-Windows platforms"
+
+    #include <sys/mman.h>
+    #include <unistd.h>
 #endif
 
 // The Job System needs the fast PRNG from Math.h for the work-stealing logic!
@@ -171,8 +174,8 @@ struct EngineJob {
         // Start paused! The Job System decides when to fire this.
         std::suspend_always initial_suspend() { return {}; } 
         
-        // MAGIC: Auto-destroy the coroutine state frame when the function finishes.
-        std::suspend_never final_suspend() noexcept { return {}; } 
+        // SUSPEND_ALWAYS: This prevents C++ from auto-destroying the memory pool block.
+        std::suspend_always final_suspend() noexcept { return {}; } 
         
         void return_void() {}
         void unhandled_exception() { std::terminate(); }
@@ -228,52 +231,70 @@ struct YieldToJobSystem {
 struct alignas(8) FiberJob {
     void* rsp = nullptr;        // The physical Stack Pointer
     void* stackMemory = nullptr;// The raw allocated memory block
+    size_t totalAllocationSize = 0;
 
     // std::atomic<FiberState> state{FiberState::Ready};
     FixedFunction<void(), 64> payload; // Zero-allocation, move-only function wrapper.
 
     // Create a Fiber by manually allocating 64KB stack memory for our fibers.
     FiberJob() {
-        // 1. Manually allocate a 64KB hardware stack
-        size_t stackSize = 65536;
-        
-        // We use aligned_alloc to ensure the stack base is perfectly aligned
-        #ifdef _MSC_VER
-            stackMemory = _aligned_malloc(stackSize, 16);
+        // 1. Get system page size (Usually 4KB / 4096 bytes)
+        #ifdef _WIN32
+            SYSTEM_INFO sysInfo;
+            GetSystemInfo(&sysInfo);
+            size_t pageSize = sysInfo.dwPageSize;
         #else
-            stackMemory = std::aligned_alloc(16, stackSize);
+            size_t pageSize = sysconf(_SC_PAGESIZE);
         #endif
 
-        // 2. Stacks grow DOWN in memory. 
-        // We set our initial pointer to the very top (end) of the allocated block.
-        uint8_t* topOfStack = static_cast<uint8_t*>(stackMemory) + stackSize;
+        // We want a 64KB usable stack, plus 1 Guard Page
+        size_t usableStackSize = 65536;
+        totalAllocationSize = usableStackSize + pageSize;
 
-        // 3. Align the stack pointer to a 16-byte boundary (Required by x64 ABI)
+        // 2. Ask the OS for page-aligned memory
+        #ifdef _WIN32
+            stackMemory = VirtualAlloc(nullptr, totalAllocationSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+            
+            // Protect the lowest page (Stacks grow downwards!)
+            DWORD oldProtect;
+            VirtualProtect(stackMemory, pageSize, PAGE_NOACCESS, &oldProtect);
+        #else
+            // POSIX / Switch / PS5 Native
+            stackMemory = mmap(nullptr, totalAllocationSize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            
+            // Protect the lowest page
+            mprotect(stackMemory, pageSize, PROT_NONE);
+        #endif
+
+        // 3. Stacks grow DOWN. Point to the very top of the highest valid page.
+        uint8_t* topOfStack = static_cast<uint8_t*>(stackMemory) + totalAllocationSize;
+
+        // 4. Align the stack pointer to a 16-byte boundary (Required by x64 ABI)
         void** sp = reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(topOfStack) & ~15ULL);
 
-        // 4. THE TRAMPOLINE (Simulating a function call)
+        // 5. THE TRAMPOLINE (Simulating a function call)
         // We push the FiberEntryPoint onto the stack as if it were a return address.
         // When SwapContext hits its final `ret` instruction, it will pop this address 
         // and jump to FiberEntryPoint.
         sp -= 1; 
         *sp = reinterpret_cast<void*>(FiberEntryPoint);
 
-        // 5. Reserve space for the Registers we push in SwapContext
+        // 6. Reserve space for the Registers we push in SwapContext
         // We pushed 8 integer registers (8 * 8 bytes = 64 bytes)
         // We pushed 10 XMM registers (10 * 16 bytes = 160 bytes)
         // Total = 224 bytes
         sp = reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(sp) - 224);
 
-        // 6. Save the final starting pointer
+        // 7. Save the final starting pointer
         rsp = static_cast<void*>(sp);
     }
 
     ~FiberJob() {
         if (stackMemory) {
-            #ifdef _MSC_VER
-                _aligned_free(stackMemory);
+            #ifdef _WIN32
+                VirtualFree(stackMemory, 0, MEM_RELEASE);
             #else
-                std::free(stackMemory);
+                munmap(stackMemory, totalAllocationSize);
             #endif
         }
     }
@@ -362,18 +383,20 @@ public:
         jobs[b & mask] = job;
         
         // Ensure the job data is written to RAM before we update the bottom pointer
-        std::atomic_thread_fence(std::memory_order_release); 
-        bottom.store(b + 1, std::memory_order_relaxed);
+        // BAKE the release fence directly into the ARM-optimized store instruction
+        bottom.store(b + 1, std::memory_order_release);
     }
 
     // ONLY the Owner Thread calls Pop()
     void* Pop() {
         int64_t b = bottom.load(std::memory_order_relaxed) - 1;
-        bottom.store(b, std::memory_order_relaxed);
         
-        // Prevent CPU out-of-order execution from reading 'top' before 'bottom' is saved
-        std::atomic_thread_fence(std::memory_order_seq_cst); 
-        int64_t t = top.load(std::memory_order_relaxed);
+        // BAKE THE FENCE INTO THE STORE
+        // This ensures 'bottom' is visibly updated to all ARM cores before we read 'top'
+        bottom.store(b, std::memory_order_seq_cst);
+        
+        // Read 'top' immediately after with Sequential Consistency
+        int64_t t = top.load(std::memory_order_seq_cst);
 
         if (t <= b) {
             // Queue is not empty
@@ -554,7 +577,21 @@ private:
             _mm_prefetch((const char*)job, _MM_HINT_T0);
 
             // It's a Stackless Coroutine! 
-            std::coroutine_handle<>::from_address(job).resume();
+            auto coroHandle = std::coroutine_handle<>::from_address(job);
+
+            // 1. Resume the coroutine
+            coroHandle.resume();
+
+            // 2. CHECK IF DEAD
+            // Because we used final_suspend = suspend_always, the coroutine will 
+            // set 'done() = true' when it hits co_return, but it will NOT delete its memory.
+            if (coroHandle.done()) {
+                // 3. Manually destroy it. 
+                // This safely triggers your custom operator delete, 
+                // pushing the block back into tl_coroutineFreePool safely.
+                coroHandle.destroy();
+            }
+            // If it is NOT done, it means it yielded (co_await). We walk away and leave it alive!
         }
     }
     
