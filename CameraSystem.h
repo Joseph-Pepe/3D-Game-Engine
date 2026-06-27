@@ -270,6 +270,71 @@ struct alignas(16) Quaternion {
       3. The player's input controller dynamically attaches to it and takes over.
 */
 
+// --- 1. CAMERA COMPONENT (PURE DATA) ---
+// This is attached to your Entity. It has zero movement logic. It knows nothing about splines, keyboards, or gamepads.
+// It only knows its physical properties and how to build its matrices using optimized SIMD functions.
+struct alignas(16) CameraComponent {
+    Vector3D Position;       // 16 bytes
+    Quaternion Orientation;  // 16 bytes (Identity by default)
+
+    float FOV = 90.0f;
+    float AspectRatio = 16.0f / 9.0f;
+    float NearClip = 0.1f;
+    float FarClip = 10000.0f;
+
+    // Default initialization
+    CameraComponent(Vector3D startPos = Vector3D(0.0f, 0.0f, 0.0f)) {
+        Position = startPos;
+        Orientation = Quaternion(); // {0,0,0,1}
+    }
+
+    // --- PURE SIMD QUATERNION TO VIEW MATRIX (100% SIMD Matrix Generation) ---
+    // Calculating the conjugated rotation and translation directly into columns without branching or extracting to an intermediate transform struct.
+    Matrix4x4_SIMD GetViewMatrix() const {
+        // 1. To get a View Matrix, we need the INVERSE of the camera's rotation.
+        Quaternion invQ = Orientation.Conjugate();
+
+        // 2. Precompute Fused terms for the Rotation Matrix
+        float x2 = invQ.x + invQ.x, y2 = invQ.y + invQ.y, z2 = invQ.z + invQ.z;
+        float xx = invQ.x * x2, xy = invQ.x * y2, xz = invQ.x * z2;
+        float yy = invQ.y * y2, yz = invQ.y * z2, zz = invQ.z * z2;
+        float wx = invQ.w * x2, wy = invQ.w * y2, wz = invQ.w * z2;
+
+        // 3. Build the Rotation Axes (Right, Up, Forward)
+        Vector3D r(1.0f - (yy + zz), xy - wz, xz + wy, 0.0f);
+        Vector3D u(xy + wz, 1.0f - (xx + zz), yz - wx, 0.0f);
+        Vector3D f(xz - wy, yz + wx, 1.0f - (xx + yy), 0.0f);
+
+        // 4. Calculate SIMD Translation: T = -R * Position
+        float tx = -r.dot(Position);
+        float ty = -u.dot(Position);
+        float tz = -f.dot(Position);
+        __m128 translation = _mm_set_ps(1.0f, tz, ty, tx);
+
+        // 5. Store directly into the Matrix format
+        Matrix4x4_SIMD mat;
+        mat.col[0] = r.reg;
+        mat.col[1] = u.reg;
+        mat.col[2] = f.reg;
+        mat.col[3] = translation;
+
+        return mat;
+    }
+
+    void PrintTelemetry() const {
+        // Dynamically calculate the Forward vector from the Quaternion
+        Vector3D localForward(0.0f, 0.0f, -1.0f, 0.0f);
+        Vector3D currentFront = Orientation.RotateVector(localForward);
+        
+        // Calculate the absolute target position
+        Vector3D absoluteTarget = Position + currentFront;
+
+        std::println("Cam Pos: [{}, {}, {}] | Target: [{}, {}, {}]", 
+                     Position.x, Position.y, Position.z,
+                     absoluteTarget.x, absoluteTarget.y, absoluteTarget.z);
+    }
+};
+
 // ===============================================
 // THIRD-PERSON CAMERA (ECS)
 // ===============================================
@@ -444,71 +509,6 @@ public:
 // ===============================================
 // FIRST-PERSON CAMERA (ECS)
 // ===============================================
-
-// --- 1. CAMERA COMPONENT (PURE DATA) ---
-// This is attached to your Entity. It has zero movement logic. It knows nothing about splines, keyboards, or gamepads.
-// It only knows its physical properties and how to build its matrices using optimized SIMD functions.
-struct alignas(16) CameraComponent {
-    Vector3D Position;       // 16 bytes
-    Quaternion Orientation;  // 16 bytes (Identity by default)
-
-    float FOV = 90.0f;
-    float AspectRatio = 16.0f / 9.0f;
-    float NearClip = 0.1f;
-    float FarClip = 10000.0f;
-
-    // Default initialization
-    CameraComponent(Vector3D startPos = Vector3D(0.0f, 0.0f, 0.0f)) {
-        Position = startPos;
-        Orientation = Quaternion(); // {0,0,0,1}
-    }
-
-    // --- PURE SIMD QUATERNION TO VIEW MATRIX (100% SIMD Matrix Generation) ---
-    // Calculating the conjugated rotation and translation directly into columns without branching or extracting to an intermediate transform struct.
-    Matrix4x4_SIMD GetViewMatrix() const {
-        // 1. To get a View Matrix, we need the INVERSE of the camera's rotation.
-        Quaternion invQ = Orientation.Conjugate();
-
-        // 2. Precompute Fused terms for the Rotation Matrix
-        float x2 = invQ.x + invQ.x, y2 = invQ.y + invQ.y, z2 = invQ.z + invQ.z;
-        float xx = invQ.x * x2, xy = invQ.x * y2, xz = invQ.x * z2;
-        float yy = invQ.y * y2, yz = invQ.y * z2, zz = invQ.z * z2;
-        float wx = invQ.w * x2, wy = invQ.w * y2, wz = invQ.w * z2;
-
-        // 3. Build the Rotation Axes (Right, Up, Forward)
-        Vector3D r(1.0f - (yy + zz), xy - wz, xz + wy, 0.0f);
-        Vector3D u(xy + wz, 1.0f - (xx + zz), yz - wx, 0.0f);
-        Vector3D f(xz - wy, yz + wx, 1.0f - (xx + yy), 0.0f);
-
-        // 4. Calculate SIMD Translation: T = -R * Position
-        float tx = -r.dot(Position);
-        float ty = -u.dot(Position);
-        float tz = -f.dot(Position);
-        __m128 translation = _mm_set_ps(1.0f, tz, ty, tx);
-
-        // 5. Store directly into the Matrix format
-        Matrix4x4_SIMD mat;
-        mat.col[0] = r.reg;
-        mat.col[1] = u.reg;
-        mat.col[2] = f.reg;
-        mat.col[3] = translation;
-
-        return mat;
-    }
-
-    void PrintTelemetry() const {
-        // Dynamically calculate the Forward vector from the Quaternion
-        Vector3D localForward(0.0f, 0.0f, -1.0f, 0.0f);
-        Vector3D currentFront = Orientation.RotateVector(localForward);
-        
-        // Calculate the absolute target position
-        Vector3D absoluteTarget = Position + currentFront;
-
-        std::println("Cam Pos: [{}, {}, {}] | Target: [{}, {}, {}]", 
-                     Position.x, Position.y, Position.z,
-                     absoluteTarget.x, absoluteTarget.y, absoluteTarget.z);
-    }
-};
 
 // --- 2. SYSTEM: FREE LOOK INPUT CONTROLLER ---
 // FreeLookController: Is a first-person (spectator/noclip) camera.
