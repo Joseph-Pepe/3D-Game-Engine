@@ -1,16 +1,16 @@
 #pragma once
 
 #include "Math.h"  
+#include <algorithm>
+#include <cmath>
 
 // ===============================================
-// RENDERING HARDWARE INTERFACE (RHI) STUBS
+// RENDERING HARDWARE INTERFACE (RHI) TYPES
 // ===============================================
-// These are opaque handles. In your actual backend, these will map 
-// to ID3D12Resource* (DX12) or VkBuffer/VkImage (Vulkan).
+
+// Forward declarations for your actual backend (DX12/Vulkan) types that maps to to ID3D12Resource* (DX12) or VkBuffer/VkImage (Vulkan).
 struct RHIBuffer {};
 struct RHITexture {};
-
-// Forward declaration so the CommandList knows about it
 struct RHIBarrier;
 
 // The abstraction layer for your GPU Command Buffer
@@ -58,7 +58,8 @@ public:
 enum RHI_RESOURCE_STATE {
     RHI_RESOURCE_STATE_UNORDERED_ACCESS,
     RHI_RESOURCE_STATE_INDIRECT_ARGUMENT,
-    RHI_RESOURCE_STATE_SHADER_RESOURCE
+    RHI_RESOURCE_STATE_SHADER_RESOURCE,
+    RHI_RESOURCE_STATE_DEPTH_WRITE
 };
 
 struct RHIBarrier {
@@ -71,13 +72,112 @@ struct RHIBarrier {
     }
 };
 
+inline RHIBarrier Transition(RHIBuffer* buffer, RHI_RESOURCE_STATE stateBefore, RHI_RESOURCE_STATE stateAfter) {
+    return RHIBarrier::Transition(buffer, stateBefore, stateAfter);
+}
+inline RHIBarrier Transition(RHITexture* texture, RHI_RESOURCE_STATE stateBefore, RHI_RESOURCE_STATE stateAfter) {
+    return RHIBarrier::Transition(texture, stateBefore, stateAfter);
+}
+
+// Aliases for readability in the command list
+constexpr RHI_RESOURCE_STATE UAV = RHI_RESOURCE_STATE_UNORDERED_ACCESS;
+constexpr RHI_RESOURCE_STATE INDIRECT_ARG = RHI_RESOURCE_STATE_INDIRECT_ARGUMENT;
+constexpr RHI_RESOURCE_STATE SHADER_RESOURCE = RHI_RESOURCE_STATE_SHADER_RESOURCE;
+constexpr RHI_RESOURCE_STATE DEPTH_WRITE = RHI_RESOURCE_STATE_DEPTH_WRITE;
+
+// ===============================================
+// GPU DATA STRUCTURES
+// ===============================================
+
+// A raw, unaligned 4x4 matrix specifically for uploading to VRAM
+// 1. Data-Transfer Matrix
+struct Float4x4 {
+    float m[16];
+};
+
+// 2. Exact 80-byte HLSL Match
+// Perfectly matching 80-byte HLSL struct
+struct GPUInstanceData {
+    Float4x4 ModelMatrix;       // 64 bytes
+    float BoundsCenterX;        // 4 bytes
+    float BoundsCenterY;        // 4 bytes
+    float BoundsCenterZ;        // 4 bytes
+    float BoundsRadius;         // 4 bytes
+};
+
+
+// 3. Exact 20-byte Indirect Args
+// Standard DirectX 12 / Vulkan Indirect Draw Arguments struct (20 bytes)
+struct GPUIndirectDrawArgs {
+    uint32_t IndexCountPerInstance;
+    uint32_t InstanceCount;      // The Compute Shader writes to this!
+    uint32_t StartIndexLocation;
+    int32_t  BaseVertexLocation;
+    uint32_t StartInstanceLocation;
+};
+
+// 4. Exact 112-byte Constant Buffer
+// Constant Buffer for the Camera (Matches HLSL 16-byte array packing)
+struct alignas(16) GPUCameraConstants {
+    // 6 planes: Left, Right, Top, Bottom, Near, Far.
+    struct Plane { float x, y, z, distance; } FrustumPlanes[6]; 
+    
+    // The compute shader needs to know the exact total to prevent reading out of bounds!
+    uint32_t TotalInstances;
+
+    // 0 = Pass 1 (History), 1 = Pass 2 (Refinement)
+    uint32_t IsPhase2;
+    
+    // Explicit padding to ensure the struct ends on a 16-byte boundary
+    uint32_t Padding[2]; 
+};
+
+// ===============================================
+// RENDER SYSTEM
+// ===============================================
+
 class RenderSystem {
 private:
-    // Placeholder for your actual PSO objects
+    // Pipeline State Objects (PSOs)
     void* m_FrustumCullPSO = nullptr;
+    void* m_GPUCullingPSO = nullptr;  
+    void* m_SpdDownsamplePSO = nullptr; 
     void* m_OpaqueMeshPSO = nullptr;
+
+    // Signatures and Constants
     void* m_CommandSignature = nullptr;
-    void* m_CameraConstants = nullptr;
+    GPUCameraConstants m_CullingConstants; // Now instantiated locally
+
+    // Hardware Resources
+    RHIBuffer* m_IndirectArgsBufferPhase1 = nullptr; // Pass 1 Draw args
+    RHIBuffer* m_IndirectArgsBufferPhase2 = nullptr; // Pass 2 Draw args
+    RHIBuffer* m_OcclusionBitmaskBuffer = nullptr;   // Tracks occlusion state between passes
+    RHITexture* m_MainDepthBuffer = nullptr;         // High-res depth target
+    RHITexture* m_HZBTexture[2] = {nullptr, nullptr};// History buffers (Current/Previous)
+
+    // SPD Requirements
+    RHIBuffer* m_SpdGlobalAtomicCounter = nullptr;
+
+    // State Tracking
+    uint32_t m_CurrentFrameIndex = 0;
+    uint32_t m_PreviousFrameIndex = 1;
+    uint32_t m_ScreenWidth = 1920;
+    uint32_t m_ScreenHeight = 1080;
+
+    // ==============================================================
+    // SINGLE PASS DOWNSAMPLER (SPD)
+    // ==============================================================
+    /*
+        - AMD FidelityFX Single Pass Downsampler.
+        - Uses a global atomic counter and Wave intrinsics to generate an entire 12-level mip chain in a single compute dispatch.
+        - Cull -> Draw -> Generate Mips -> Cull -> Draw
+    */
+    uint32_t SpdCalculateThreadGroups(uint32_t width, uint32_t height) {
+        // Standard SPD math: groups are 64x64 tiles
+        uint32_t dispatchX = (width + 63) / 64;
+        uint32_t dispatchY = (height + 63) / 64;
+        return dispatchX * dispatchY;
+    }
 
 public:
     void ExecuteGPUCullingAndDraw(
@@ -95,7 +195,7 @@ public:
         cmdList->SetComputePipelineState(m_FrustumCullPSO);
         
         // Bind Buffers
-        cmdList->SetComputeRootConstantBuffer(0, m_CameraConstants);
+        cmdList->SetComputeRootConstantBuffer(0, &m_CullingConstants);
         cmdList->SetComputeRootShaderResourceView(1, instanceBuffer);
         cmdList->SetComputeRootUnorderedAccessView(2, visibleIndicesBuffer);
         cmdList->SetComputeRootUnorderedAccessView(3, indirectArgsBuffer);
@@ -142,105 +242,111 @@ public:
         cmdList->ResourceBarrier(2, revertBarriers);
     }
 
+    
     // ==============================================================
-    // SINGLE PASS DOWNSAMPLER (SPD)
+    // TWO-PASS HZB OCCLUSION CULLING
     // ==============================================================
-    /*
-        - AMD FidelityFX Single Pass Downsampler.
-        - Uses a global atomic counter and Wave intrinsics to generate an entire 12-level mip chain in a single compute dispatch.
-        - Cull -> Draw -> Generate Mips -> Cull -> Draw
-    */
     void ExecuteTwoPassOcclusion(RHICommandList* cmdList, uint32_t totalInstances) {
         uint32_t threadGroupsX = (totalInstances + 63) / 64;
+
+        m_CullingConstants.TotalInstances = totalInstances;
 
         // ==========================================
         // PHASE 1: HISTORY PASS
         // ==========================================
-        cmdList->ClearUAVUint(m_IndirectArgsBufferPhase1, 4, 0); // Reset InstanceCount to 0
+        cmdList->ClearUAVUint(m_IndirectArgsBufferPhase1, 4, 0); 
         
         m_CullingConstants.IsPhase2 = 0;
-        cmdList->SetComputeRootConstantBuffer(0, &m_CullingConstants);
-        
-        // Bind LAST FRAME's HZB (Using an alternating frame index)
-        cmdList->SetComputeRootShaderResourceView(4, m_HZBTexture[m_PreviousFrameIndex]); 
         
         cmdList->SetComputePipelineState(m_GPUCullingPSO);
+        // Bind Constant Buffer using pointer to local struct
+        cmdList->SetComputeRootConstantBuffer(0, &m_CullingConstants);
+        
+        // Bind LAST FRAME's HZB 
+        cmdList->SetComputeRootShaderResourceView(4, m_HZBTexture[m_PreviousFrameIndex]); 
+        
         cmdList->Dispatch(threadGroupsX, 1, 1);
 
         // Barrier: Wait for Phase 1 Args and Bitmask to finish writing
         RHIBarrier p1Barriers[] = {
-            RHIBarrier::Transition(m_IndirectArgsBufferPhase1, UAV, INDIRECT_ARG),
-            RHIBarrier::Transition(m_OcclusionBitmaskBuffer, UAV, UAV) // UAV barrier ensures bitmask writes complete
+            Transition(m_IndirectArgsBufferPhase1, UAV, INDIRECT_ARG),
+            Transition(m_OcclusionBitmaskBuffer, UAV, UAV) 
         };
         cmdList->ResourceBarrier(2, p1Barriers);
-
 
         // ==========================================
         // DRAW 1: RENDER VISIBLE GEOMETRY
         // ==========================================
-        // This draws all objects that were visible last frame.
         cmdList->SetGraphicsPipelineState(m_OpaqueMeshPSO);
         cmdList->ExecuteIndirect(m_CommandSignature, 1, m_IndirectArgsBufferPhase1, 0);
 
-        // Barrier: Transition the newly written Depth Buffer so the Compute Shader can read it
-        cmdList->ResourceBarrier(Transition(m_MainDepthBuffer, DEPTH_WRITE, SHADER_RESOURCE));
-
+        // Barrier: Transition Depth Buffer from Depth-Write to Shader-Read
+        RHIBarrier depthReadBarrier[] = {
+            Transition(m_MainDepthBuffer, DEPTH_WRITE, SHADER_RESOURCE)
+        };
+        cmdList->ResourceBarrier(1, depthReadBarrier);
 
         // ==========================================
         // BUILD NEW HZB (Single Pass Downsample)
         // ==========================================
         cmdList->SetComputePipelineState(m_SpdDownsamplePSO);
         
-        // Read from the Main Depth Buffer, output all Mip levels to the Current Frame's HZB
+        // CRITICAL: Reset the global atomic counter required by AMD SPD
+        cmdList->ClearUAVUint(m_SpdGlobalAtomicCounter, 0, 0);
+        RHIBarrier atomicBarrier[] = { Transition(m_SpdGlobalAtomicCounter, UAV, UAV) };
+        cmdList->ResourceBarrier(1, atomicBarrier);
+
         cmdList->SetComputeRootShaderResourceView(0, m_MainDepthBuffer);
         cmdList->SetComputeRootUnorderedAccessView(1, m_HZBTexture[m_CurrentFrameIndex]); 
+        cmdList->SetComputeRootUnorderedAccessView(2, m_SpdGlobalAtomicCounter);
         
-        // AMD SPD handles all 12 mips in a single dispatch!
         cmdList->Dispatch(SpdCalculateThreadGroups(m_ScreenWidth, m_ScreenHeight), 1, 1);
 
         // Barrier: Wait for the HZB to finish generating
-        cmdList->ResourceBarrier(Transition(m_HZBTexture[m_CurrentFrameIndex], UAV, SHADER_RESOURCE));
-
+        RHIBarrier hzbReadyBarrier[] = {
+            Transition(m_HZBTexture[m_CurrentFrameIndex], UAV, SHADER_RESOURCE)
+        };
+        cmdList->ResourceBarrier(1, hzbReadyBarrier);
 
         // ==========================================
         // PHASE 2: REFINEMENT PASS
         // ==========================================
-        cmdList->ClearUAVUint(m_IndirectArgsBufferPhase2, 4, 0); // Reset Phase 2 Args
+        cmdList->ClearUAVUint(m_IndirectArgsBufferPhase2, 4, 0); 
         
         m_CullingConstants.IsPhase2 = 1;
+        cmdList->SetComputePipelineState(m_GPUCullingPSO);
         cmdList->SetComputeRootConstantBuffer(0, &m_CullingConstants);
         
         // Bind THIS FRAME's new HZB
         cmdList->SetComputeRootShaderResourceView(4, m_HZBTexture[m_CurrentFrameIndex]); 
         
-        cmdList->SetComputePipelineState(m_GPUCullingPSO);
-        cmdList->Dispatch(threadGroupsX, 1, 1); // Only tests instances flagged in the Bitmask
+        // Dispatch
+        cmdList->Dispatch(threadGroupsX, 1, 1); 
 
-        // Barrier: Wait for Phase 2 Args to finish
-        cmdList->ResourceBarrier(Transition(m_IndirectArgsBufferPhase2, UAV, INDIRECT_ARG));
-
+        // Barrier: Wait for Phase 2 Args
+        RHIBarrier p2Barriers[] = {
+            Transition(m_IndirectArgsBufferPhase2, UAV, INDIRECT_ARG)
+        };
+        cmdList->ResourceBarrier(1, p2Barriers);
 
         // ==========================================
         // DRAW 2: RENDER NEWLY VISIBLE GEOMETRY
         // ==========================================
-        // Render the previously occluded instances that are now visible!
-        // (e.g., The camera walked around a corner, exposing a new hallway).
         cmdList->SetGraphicsPipelineState(m_OpaqueMeshPSO);
         cmdList->ExecuteIndirect(m_CommandSignature, 1, m_IndirectArgsBufferPhase2, 0);
-
 
         // ==========================================
         // CLEANUP FOR NEXT FRAME
         // ==========================================
-        // Swap the frame indices so 'Current' becomes 'Previous' for the next frame.
         std::swap(m_CurrentFrameIndex, m_PreviousFrameIndex);
         
         RHIBarrier revertBarriers[] = {
-            RHIBarrier::Transition(m_MainDepthBuffer, SHADER_RESOURCE, DEPTH_WRITE),
-            RHIBarrier::Transition(m_IndirectArgsBufferPhase1, INDIRECT_ARG, UAV),
-            RHIBarrier::Transition(m_IndirectArgsBufferPhase2, INDIRECT_ARG, UAV)
+            Transition(m_MainDepthBuffer, SHADER_RESOURCE, DEPTH_WRITE),
+            Transition(m_IndirectArgsBufferPhase1, INDIRECT_ARG, UAV),
+            Transition(m_IndirectArgsBufferPhase2, INDIRECT_ARG, UAV),
+            Transition(m_HZBTexture[m_PreviousFrameIndex], SHADER_RESOURCE, UAV) // Prepare old HZB to be overwritten next frame
         };
-        cmdList->ResourceBarrier(3, revertBarriers);
+        cmdList->ResourceBarrier(4, revertBarriers);
     }
 };
 
@@ -252,46 +358,6 @@ public:
     - Shift the workload (loop through scene objects, bounding box checks against the camera frustum, builds a list of visible items to draw) over to the GPU.
     - CPU issues a single compute shader dispatch call, and the GPU dynamically determines visibility and generates its own draw parameters.
 */
-
-// A raw, unaligned 4x4 matrix specifically for uploading to VRAM
-// 1. Data-Transfer Matrix
-struct Float4x4 {
-    float m[16];
-};
-
-// 2. Exact 80-byte HLSL Match
-// Perfectly matching 80-byte HLSL struct
-struct GPUInstanceData {
-    Float4x4 ModelMatrix;       // 64 bytes
-    float BoundsCenterX;        // 4 bytes
-    float BoundsCenterY;        // 4 bytes
-    float BoundsCenterZ;        // 4 bytes
-    float BoundsRadius;         // 4 bytes
-};
-
-
-// 3. Exact 20-byte Indirect Args
-// Standard DirectX 12 / Vulkan Indirect Draw Arguments struct (20 bytes)
-struct GPUIndirectDrawArgs {
-    uint32_t IndexCountPerInstance;
-    uint32_t InstanceCount;      // The Compute Shader writes to this!
-    uint32_t StartIndexLocation;
-    int32_t  BaseVertexLocation;
-    uint32_t StartInstanceLocation;
-};
-
-// 4. Exact 112-byte Constant Buffer
-// Constant Buffer for the Camera (Matches HLSL 16-byte array packing)
-struct alignas(16) GPUCameraConstants {
-    // 6 planes: Left, Right, Top, Bottom, Near, Far.
-    struct Plane { float x, y, z, distance; } FrustumPlanes[6]; 
-    
-    // The compute shader needs to know the exact total to prevent reading out of bounds!
-    uint32_t TotalInstances;
-    
-    // Explicit padding to ensure the struct ends on a 16-byte boundary
-    uint32_t Padding[3]; 
-};
 
 // Runs once on the CPU per frame.
 void ExtractFrustumPlanes(const Matrix4& viewProj, GPUCameraConstants& outCameraData) {
