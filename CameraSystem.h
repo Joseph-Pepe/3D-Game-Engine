@@ -394,6 +394,7 @@ public:
         SpringArmComponent& arm, 
         CameraComponent& camera, 
         const SceneTLAS& physicsScene, 
+        RenderSystem& renderer,
         float deltaTime) 
     {
         // 1. Calculate the actual target focal point (e.g., Character's head)
@@ -457,7 +458,7 @@ public:
                 
                 // Route these hits to the Material System
                 for (uint32_t i = 0; i < hitCount; ++i) {
-                    RenderSystem::RequestOcclusionFade(occludedInstances[i]);
+                    renderer.RequestOcclusionFade(occludedInstances[i]);
                 }
             }
         }
