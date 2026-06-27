@@ -873,6 +873,8 @@ public:
             // Safety rail to prevent silent memory corruption during development
             assert(stackPtr < 128 && "BVH Traversal Stack Overflow! Tree is dangerously unbalanced.");
 
+            if (stackPtr >= 128) break;
+
             // Pop the top node
             uint32_t nodeIndex = stack[--stackPtr];
             const BVH4Node& node = m_nodes[nodeIndex];
@@ -1449,12 +1451,14 @@ public:
                     tlas.UpdateInstanceTransform(entity.tlasID, newMatrix);
                 }
             }
+
             // ---------------------------------------------------------
             // 3. UPDATE SPATIAL HIERARCHY
             // ---------------------------------------------------------
             // The TLAS refits itself based ONLY on the instances that 
             // were flagged as 'hasMovedThisFrame' in Step 2.
             tlas.UpdateTLAS();
+
             // ---------------------------------------------------------
             // 4. RENDER / LOGIC
             // ---------------------------------------------------------
