@@ -3,6 +3,40 @@
 #include "Math.h"  
 
 // ===============================================
+// RENDERING HARDWARE INTERFACE (RHI) STUBS
+// ===============================================
+// These are opaque handles. In your actual backend, these will map 
+// to ID3D12Resource* (DX12) or VkBuffer/VkImage (Vulkan).
+struct RHIBuffer {};
+struct RHITexture {};
+
+// Forward declaration so the CommandList knows about it
+struct RHIBarrier;
+
+// The abstraction layer for your GPU Command Buffer
+class RHICommandList {
+public:
+    void ClearUAVUint(RHIBuffer* buffer, uint32_t offset, uint32_t value) {}
+    
+    void SetComputePipelineState(void* pso) {}
+    void SetGraphicsPipelineState(void* pso) {}
+    
+    void SetComputeRootConstantBuffer(uint32_t rootIndex, void* cbv) {}
+    
+    void SetComputeRootShaderResourceView(uint32_t rootIndex, RHIBuffer* srv) {}
+    void SetComputeRootShaderResourceView(uint32_t rootIndex, RHITexture* srv) {}
+    void SetGraphicsRootShaderResourceView(uint32_t rootIndex, RHIBuffer* srv) {}
+    
+    void SetComputeRootUnorderedAccessView(uint32_t rootIndex, RHIBuffer* uav) {}
+    void SetComputeRootUnorderedAccessView(uint32_t rootIndex, RHITexture* uav) {}
+    
+    void Dispatch(uint32_t x, uint32_t y, uint32_t z) {}
+    void ExecuteIndirect(void* commandSignature, uint32_t maxCommandCount, RHIBuffer* argumentBuffer, uint64_t argumentBufferOffset) {}
+    
+    void ResourceBarrier(uint32_t count, const RHIBarrier* barriers) {}
+};
+
+// ===============================================
 // GPU PIPELINE (Frustum -> Occlusion -> Draw)
 // ===============================================
 /*
@@ -26,8 +60,15 @@ enum RHI_RESOURCE_STATE {
     RHI_RESOURCE_STATE_INDIRECT_ARGUMENT,
     RHI_RESOURCE_STATE_SHADER_RESOURCE
 };
+
 struct RHIBarrier {
-    static RHIBarrier Transition(RHIBuffer*, RHI_RESOURCE_STATE, RHI_RESOURCE_STATE) { return {}; }
+    static RHIBarrier Transition(RHIBuffer* buffer, RHI_RESOURCE_STATE before, RHI_RESOURCE_STATE after) { 
+        return {}; 
+    }
+    // Overload to support transitioning our HZB textures
+    static RHIBarrier Transition(RHITexture* texture, RHI_RESOURCE_STATE before, RHI_RESOURCE_STATE after) { 
+        return {}; 
+    }
 };
 
 class RenderSystem {
