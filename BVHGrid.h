@@ -1323,6 +1323,73 @@ public:
         m_treeNeedsRefit = false;
     }
 
+    // Returns the number of overlapping instances hit
+    uint32_t RaycastMulti(const Ray& worldRay, float maxDistance, std::span<uint32_t> outInstanceIndices) const {
+        if (m_tlasNodes.empty() || outInstanceIndices.empty()) return 0;
+
+        uint32_t hitCount = 0;
+        uint32_t maxCapacity = static_cast<uint32_t>(outInstanceIndices.size());
+
+        // 128 to match primary Raycast and prevent overflows
+        uint32_t stack[128];
+        uint32_t stackPtr = 0;
+        stack[stackPtr++] = 0; // Push TLAS Root
+
+        // --- TREE TRAVERSAL ---
+        while (stackPtr > 0) {
+            // Safety rail
+            assert(stackPtr < 128 && "TLAS Traversal Stack Overflow!");
+
+            if(stackPtr >= 128) break;
+
+            uint32_t nodeIdx = stack[--stackPtr];
+            const TLASNode& node = m_tlasNodes[nodeIdx];
+
+            AABB nodeBounds { node.minBounds, node.maxBounds };
+
+            // Standard AABB test. Notice we pass maxDistance, which NEVER shrinks in a Multi-Cast!
+            float unusedHitDistance = 0.0f;
+            if (IntersectAABB(nodeBounds, worldRay, maxDistance)) {
+                
+                if (node.IsLeaf()) {
+                    uint32_t instIdx = node.GetIndex();
+                    const BVHInstance& instance = m_instances[instIdx];
+
+                    // --- THE MATRIX JUMP (INVERSE TRANSFORM) ---
+                    Vector3D localOrig = instance.inverseTransform.MultiplyPoint(worldRay.origin);
+                    Vector3D localDir = instance.inverseTransform.MultiplyDirection(worldRay.direction);
+
+                    // Construct the heavy SIMD Ray4 for the BLAS
+                    Ray4 localRay(localOrig, localDir);
+
+                    // --- THE BLAS DIVE ---
+                    // We use a local hit variable because we don't want the BLAS to shrink 
+                    // the global maxDistance! We need the ray to keep piercing through.
+                    Tri4Hit localHit;
+                    float localMaxDistance = maxDistance; 
+                    
+                    if (instance.blas->Raycast(localRay, localMaxDistance, localHit)) {
+                        // We hit a triangle inside this instance!
+                        // Record the instance index into the span.
+                        outInstanceIndices[hitCount++] = instIdx;
+
+                        // If we have filled the requested array, bail out immediately 
+                        // to prevent a buffer overrun.
+                        if (hitCount >= maxCapacity) {
+                            return hitCount; 
+                        }
+                    }
+                } else {
+                    // Internal Node: Push children
+                    stack[stackPtr++] = node.leftFirst + 1;
+                    stack[stackPtr++] = node.leftFirst;
+                }
+            }
+        }
+
+        return hitCount;
+    }
+
     // The Master Raycast Entry Point
     bool Raycast(const Ray& worldRay, RayHit& outHit) const {
         if (m_tlasNodes.empty()) return false;
