@@ -188,6 +188,75 @@ struct alignas(16) Quaternion {
         
         return q;
     }
+
+    // --- DOT PRODUCT ---
+    FORCE_INLINE float dot(const Quaternion& other) const {
+        __m128 res = _mm_dp_ps(reg, other.reg, 0xFF);
+        return _mm_cvtss_f32(res);
+    }
+
+    // --- NORMALIZED LERP (N-Lerp) ---
+    // Insanely fast. Used when the angle between quaternions is extremely small.
+    // Lerp draws a straight, linear chord (a line) across a rotation sphere's interior (through the 4D sphere), causing the camera's rotational speed to accelerate and decelerate slightly between waypoints.
+    static FORCE_INLINE Quaternion Lerp(const Quaternion& q1, const Quaternion& q2, float t) {
+        __m128 tReg = _mm_set1_ps(t);
+        __m128 oneMinusT = _mm_sub_ps(_mm_set1_ps(1.0f), tReg);
+
+        // res = (q1 * (1 - t)) + (q2 * t)
+        __m128 res = _mm_add_ps(_mm_mul_ps(q1.reg, oneMinusT), _mm_mul_ps(q2.reg, tReg));
+        
+        Quaternion result(res);
+        result.Normalize();
+        return result;
+    }
+
+    // --- SPHERICAL LINEAR INTERPOLATION (SLERP) ---
+    // Constant velocity rotation along the shortest path of the sphere.
+    // Slerp traces the curve along the surface of a sphere, guarenteeing a perfectly constant velocity for CinematicTrackController.
+    static FORCE_INLINE Quaternion Slerp(const Quaternion& q1, const Quaternion& q2, float t) {
+        float cosOmega = q1.dot(q2);
+        __m128 q2Reg = q2.reg;
+
+        // 1. SHORTEST PATH ENFORCEMENT
+        // If the dot product is negative, the quaternions point to opposite hemispheres.
+        // We flip Q2 to force the camera to take the shortest physical rotation path.
+        if (cosOmega < 0.0f) {
+            cosOmega = -cosOmega;
+            // Flip the sign bit of all 4 floats instantly using XOR
+            __m128 negZero = _mm_set1_ps(-0.0f);
+            q2Reg = _mm_xor_ps(q2Reg, negZero);
+        }
+
+        // 2. GIMBAL / PRECISION FALLBACK
+        // If the quaternions are nearly identical (angle is basically 0), 
+        // division by sin(Omega) will cause a NaN explosion. Fallback to N-Lerp.
+        if (cosOmega > 0.9999f) {
+            __m128 tReg = _mm_set1_ps(t);
+            __m128 oneMinusT = _mm_sub_ps(_mm_set1_ps(1.0f), tReg);
+            __m128 res = _mm_add_ps(_mm_mul_ps(q1.reg, oneMinusT), _mm_mul_ps(q2Reg, tReg));
+            
+            Quaternion result(res);
+            result.Normalize();
+            return result;
+        }
+
+        // 3. THE SPHERICAL MATH
+        // Extract the angle (Omega) and calculate the transcendental weights
+        float omega = std::acos(cosOmega);
+        float invSinOmega = 1.0f / std::sin(omega);
+
+        float weight0 = std::sin((1.0f - t) * omega) * invSinOmega;
+        float weight1 = std::sin(t * omega) * invSinOmega;
+
+        // 4. SIMD RE-ASSEMBLY
+        __m128 w0Reg = _mm_set1_ps(weight0);
+        __m128 w1Reg = _mm_set1_ps(weight1);
+
+        // res = (q1 * w0) + (q2 * w1)
+        __m128 res = _mm_add_ps(_mm_mul_ps(q1.reg, w0Reg), _mm_mul_ps(q2Reg, w1Reg));
+
+        return Quaternion(res);
+    }
 };
 
 // ===============================================
@@ -200,6 +269,181 @@ struct alignas(16) Quaternion {
       2. The cinematic system drives it until the cutscene ends.
       3. The player's input controller dynamically attaches to it and takes over.
 */
+
+// ===============================================
+// THIRD-PERSON CAMERA (ECS)
+// ===============================================
+/*
+    - Use a spring arm that acts like an invisible boom-pole that is no longer attached directly to the player's coordinates.
+    - It evaluates a raycast from the player to the camera.
+    - If a ray hits a wall, the Spring arm instantly pulls the camera forward to prevent it from clipping through the geometry.
+*/
+
+enum class SpringArmOcclusionMode : uint8_t {
+    PullForward,    // Classic: Camera zooms in to prevent clipping
+    FadeOccluders   // Isometric: Camera stays static, walls become transparent
+};
+
+// --- 1. SPRING ARM COMPONENT (PURE DATA) ---
+// Attach this to the Player/Vehicle Entity alongside the CameraComponent
+struct alignas(16) SpringArmComponent {
+    float TargetArmLength = 300.0f;
+    float ProbeRadius = 15.0f; // Size of the camera to prevent clipping through tight corners
+
+    // Offsets
+    Vector3D TargetOffset = Vector3D(0.0f, 50.0f, 0.0f); // e.g., Look at the character's head, not their feet
+    Vector3D SocketOffset = Vector3D(0.0f, 0.0f, 0.0f);  // Over-the-shoulder offset
+
+    // Frame-rate Independent Lag Options
+    bool bEnableCameraLag = true;
+    float CameraLagSpeed = 15.0f; 
+
+    // --- OCCLUSION SETTINGS ---
+    SpringArmOcclusionMode OcclusionMode = SpringArmOcclusionMode::PullForward;
+    
+    // Internal state tracking for the smoothing math
+    Vector3D PreviousDesiredPosition;
+    
+    SpringArmComponent() {
+        PreviousDesiredPosition = Vector3D(0.0f, 0.0f, 0.0f);
+    }
+};
+
+// --- 2. SYSTEM: SPRING ARM INPUT CONTROLLER ---
+class SpringArmController {
+public:
+    // Frame-Rate Independent Exponential Decay Lerp
+    // Mathematically guarantees identical smoothing curves at 30Hz, 60Hz, and 144Hz.
+    static FORCE_INLINE Vector3D DecayLerp(const Vector3D& current, const Vector3D& target, float decaySpeed, float deltaTime) {
+        // formula: current = target + (current - target) * exp2(-decaySpeed * dt)
+        float decayFactor = std::exp2(-decaySpeed * deltaTime);
+        return target + ((current - target) * decayFactor);
+    }
+
+    // Evaluates the Spring Arm and directly mutates the CameraComponent
+    void Update(
+        const Vector3D& playerPosition, 
+        const Quaternion& playerRotation, // Where the player is aiming
+        SpringArmComponent& arm, 
+        CameraComponent& camera, 
+        const SceneTLAS& physicsScene, 
+        float deltaTime) 
+    {
+        // 1. Calculate the actual target focal point (e.g., Character's head)
+        Vector3D worldTargetOffset = playerRotation.RotateVector(arm.TargetOffset);
+        Vector3D aimPoint = playerPosition + worldTargetOffset;
+
+        // 2. Establish the back-vector (Where the camera WANTS to be)
+        // A spring arm extends strictly backwards (-Z) relative to the rotation
+        Vector3D localArmDirection(0.0f, 0.0f, 1.0f, 0.0f); 
+        Vector3D worldArmDirection = playerRotation.RotateVector(localArmDirection);
+
+        // 3. Calculate the over-the-shoulder offset
+        Vector3D worldSocketOffset = playerRotation.RotateVector(arm.SocketOffset);
+
+        // 4. Calculate the desired un-obstructed position
+        Vector3D desiredPosition = aimPoint + (worldArmDirection * arm.TargetArmLength) + worldSocketOffset;
+
+        // --- CAMERA SMOOTHING (LAG) ---
+        if (arm.bEnableCameraLag) {
+            desiredPosition = DecayLerp(arm.PreviousDesiredPosition, desiredPosition, arm.CameraLagSpeed, deltaTime);
+        }
+        arm.PreviousDesiredPosition = desiredPosition;
+
+
+        // --- COLLISION RESOLUTION (BACKFACE CULLING) ---
+        // If we cast from AimPoint (Player) to DesiredPosition (Camera), the ray hits the 
+        // INSIDE of the wall. If your BVH culls backfaces, the ray will miss the wall entirely!
+        // We MUST cast from the Camera to the Player.
+        // Ensure your level geometry uses thick walls so the ray doesn't pass through culled backfaces!
+
+        // 1. Vector pointing FROM Player TO Camera
+        Vector3D rayDirection = desiredPosition - aimPoint;
+        float desiredDistance = std::sqrt(rayDirection.dot(rayDirection));
+
+
+        if (desiredDistance > 1e-4f) {
+            rayDirection = rayDirection * (1.0f / desiredDistance); // Normalize
+
+            // 2. Origin is the Player, shooting toward the Camera
+            Ray cameraRay(aimPoint, rayDirection); // Cast from Camera -> Player
+
+            if (arm.OcclusionMode == SpringArmOcclusionMode::PullForward) {
+                // Single hit closest resolution
+                RayHit hitResult;
+
+                // Probe the BVH! We hit something! Check if the hit is closer than our desired arm length.
+                if (physicsScene.Raycast(cameraRay, hitResult) && hitResult.t < desiredDistance) {
+                    // 3. Pull the camera in to the hit point, moving from the PLAYER outward
+                    float clampedDistance = std::max(0.0f, hitResult.t - arm.ProbeRadius);
+                    desiredPosition = aimPoint + (rayDirection * clampedDistance);
+                }
+            } 
+            else {
+                // --- MULTI-HIT OCCLUSION FADING ---
+                // Camera ignores physics and stays exactly where it is.
+                // We ask the BVH for every mesh between the camera and the player.
+                uint32_t occludedInstances[16]; // Max 16 walls to prevent array bloat
+                std::span<uint32_t> hitSpan(occludedInstances, 16);
+                
+                uint32_t hitCount = physicsScene.RaycastMulti(cameraRay, desiredDistance, hitSpan);
+                
+                // Route these hits to the Material System
+                for (uint32_t i = 0; i < hitCount; ++i) {
+                    RenderSystem::RequestOcclusionFade(occludedInstances[i]);
+                }
+            }
+        }
+
+        // 5. Finalize the Camera State
+        camera.Position = desiredPosition;
+        camera.Orientation = playerRotation; // Lock camera orientation to the arm's drive rotation
+    }
+};
+
+/*
+    - Render / Material System  (Smooth Fading)
+    - The renderer flags that specific mesh instance with a target opacity.
+    - DecayLerps the current opacity toward the target.
+
+
+    struct DitheredFadeState {
+        float CurrentOpacity = 1.0f;
+        bool bWasOccludingThisFrame = false;
+    };
+
+    // Flat array mapping 1:1 with your TLAS BVHInstances
+    std::vector<DitheredFadeState> InstanceFadeStates; 
+
+    // Called by the SpringArmController
+    void RequestOcclusionFade(uint32_t instanceIndex) {
+        InstanceFadeStates[instanceIndex].bWasOccludingThisFrame = true;
+    }
+
+    // Called by the JobSystem right before pushing uniforms to Vulkan/DX12
+    void UpdateFades(float deltaTime) {
+        for (auto& state : InstanceFadeStates) {
+            float targetOpacity = state.bWasOccludingThisFrame ? 0.2f : 1.0f;
+            
+            // Only do math if it isn't fully opaque
+            if (state.CurrentOpacity != targetOpacity) {
+                // DecayLerp ensures it fades smoothly over ~0.2 seconds
+                state.CurrentOpacity = SpringArmController::DecayLerp(state.CurrentOpacity, targetOpacity, 20.0f, deltaTime);
+                
+                // Snap to 1.0 to prevent micro-calculations forever
+                if (state.CurrentOpacity > 0.99f) state.CurrentOpacity = 1.0f; 
+            }
+
+            // Reset the flag for the NEXT frame. If the Spring Arm doesn't 
+            // flag it again next frame, it will organically fade back to 1.0f.
+            state.bWasOccludingThisFrame = false; 
+        }
+    }
+*/
+
+// ===============================================
+// FIRST-PERSON CAMERA (ECS)
+// ===============================================
 
 // --- 1. CAMERA COMPONENT (PURE DATA) ---
 // This is attached to your Entity. It has zero movement logic. It knows nothing about splines, keyboards, or gamepads.
@@ -267,6 +511,7 @@ struct alignas(16) CameraComponent {
 };
 
 // --- 2. SYSTEM: FREE LOOK INPUT CONTROLLER ---
+// FreeLookController: Is a first-person (spectator/noclip) camera.
 // Injects input accumulation into a generic CameraComponent. Strictly handles user input and applies mathematical deltas to any CameraComponent you hand it. 
 class FreeLookController {
 public:
