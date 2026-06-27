@@ -8,6 +8,8 @@
 #include <numbers> // C++20/26 Standardized Math Constants
 
 #include "Math.h"
+#include "BVHGrid.h"
+#include "GPURHI.h"
 
 #if __has_include(<inplace_vector>)
     /*
