@@ -58,7 +58,7 @@ struct alignas(128) BVH4Node {
         return children[childIndex] & 0x7FFFFFFF; 
     }
 
-    // Gotcha 1 FIXED: Call this inside your BVH Builder for any unused lanes
+    // Call this inside your BVH Builder for any unused lanes
     void SetDegenerateLane(int laneIndex) {
         constexpr float INF = std::numeric_limits<float>::infinity();
         
@@ -134,6 +134,57 @@ struct Ray4 {
     }
 };
 
+// The ultimate payload that gets passed back to gameplay/rendering
+struct RayHit {
+    float t = std::numeric_limits<float>::infinity();
+    float u = 0.0f;
+    float v = 0.0f;
+    uint32_t instanceIndex = INVALID_INDEX; // Which car did we hit?
+    uint32_t triangleIndex = INVALID_INDEX; // Which triangle on the car?
+
+    FORCE_INLINE bool HasHit() const { return instanceIndex != INVALID_INDEX; }
+};
+
+// ==================================================================================
+// SURFACE AREA HEURITSIC (SAH)
+// ==================================================================================
+/*  
+    - Is an algorithm used to feed the 3D static geometry for ray casting.
+    - Is the probability that a ray will hit (or collide) with a box. 
+    - When a player fires a bullet into empty space, the bullet hits a box, traverse the tree to see what was hit.
+    - Calculates the surface area of the bounding box to estimate the statistical likelihood that the ray hit it.
+    - i.e., collision detection (physics), and raytracing (rendering / line of sight).
+*/
+
+// A standard 3D Bounding Box for the builder
+struct AABB {
+    Vector3D bmin = Vector3D( 1e30f,  1e30f,  1e30f);
+    Vector3D bmax = Vector3D(-1e30f, -1e30f, -1e30f);
+
+    void Grow(const Vector3D& p) {
+        // Direct SIMD min/max evaluation (1 clock cycle)
+        bmin = Vector3D(_mm_min_ps(bmin.reg, p.reg));
+        bmax = Vector3D(_mm_max_ps(bmax.reg, p.reg));
+    }
+
+    void Grow(const AABB& b) {
+        bmin = Vector3D(_mm_min_ps(bmin.reg, b.bmin.reg));
+        bmax = Vector3D(_mm_max_ps(bmax.reg, b.bmax.reg));
+    }
+
+    float Area() const {
+        Vector3D e = bmax - bmin; // Extents
+        return e.x * e.y + e.y * e.z + e.z * e.x;
+    }
+};
+
+// Represents your raw level geometry
+struct Triangle {
+    Vector3D v0, v1, v2;
+    Vector3D centroid; // Pre-calculated (v0+v1+v2)/3 for fast binning
+    AABB bounds;       // Pre-calculated AABB of this specific triangle
+};
+
 // 192-bytes (three 64-byte chunks) that stores 4 triangles ready for pure parallel execution.
 // alignas(64) ensures it perfectly snaps into 3 CPU cache lines
 struct alignas(64) Tri4 {
@@ -179,17 +230,6 @@ struct alignas(64) Tri4 {
 
         indices[lane] = index;
     }
-};
-
-// The ultimate payload that gets passed back to gameplay/rendering
-struct RayHit {
-    float t = std::numeric_limits<float>::infinity();
-    float u = 0.0f;
-    float v = 0.0f;
-    uint32_t instanceIndex = INVALID_INDEX; // Which car did we hit?
-    uint32_t triangleIndex = INVALID_INDEX; // Which triangle on the car?
-
-    FORCE_INLINE bool HasHit() const { return instanceIndex != INVALID_INDEX; }
 };
 
 // A struct to return the best hit out of the 4
@@ -326,10 +366,10 @@ FORCE_INLINE HitResult IntersectTriangle_MT(const Vector3D& rayOrigin, const Vec
     Vector3D e2 = v2 - v0;
 
     // Begin calculating determinant - also used to calculate U parameter
-    Vector3D pvec = Cross(rayDir, e2);
+    Vector3D pvec = rayDir.cross(e2);
     
     // If determinant is near zero, ray lies in plane of triangle
-    float det = Dot(e1, pvec);
+    float det = pvec.dot(e1);
     constexpr float EPSILON = 1e-8f;
 
     // --- OPTIMIZATION 1: BACKFACE CULLING ---
@@ -342,18 +382,18 @@ FORCE_INLINE HitResult IntersectTriangle_MT(const Vector3D& rayOrigin, const Vec
         Vector3D tvec = rayOrigin - v0;
         
         // Calculate U parameter and test bounds (Notice we compare against 'det', not 1.0f!)
-        result.u = Dot(tvec, pvec);
+        result.u = tvec.dot(pvec);
         if (result.u < 0.0f || result.u > det) return result;
         
         // Prepare to test V parameter
-        Vector3D qvec = Cross(tvec, e1);
+        Vector3D qvec = tvec.cross(e1);
         
         // Calculate V parameter and test bounds
-        result.v = Dot(rayDir, qvec);
+        result.v = qvec.dot(rayDir);
         if (result.v < 0.0f || result.u + result.v > det) return result;
         
         // Calculate T (distance)
-        result.t = Dot(e2, qvec);
+        result.t = qvec.dot(e2);
 
     } else {
         // --- TWO-SIDED GEOMETRY (e.g., foliage, glass) ---
@@ -362,14 +402,14 @@ FORCE_INLINE HitResult IntersectTriangle_MT(const Vector3D& rayOrigin, const Vec
         float invDet_early = 1.0f / det; // Have to divide early for two-sided math
         
         Vector3D tvec = rayOrigin - v0;
-        result.u = Dot(tvec, pvec) * invDet_early;
+        result.u = tvec.dot(pvec) * invDet_early;
         if (result.u < 0.0f || result.u > 1.0f) return result;
         
-        Vector3D qvec = Cross(tvec, e1);
-        result.v = Dot(rayDir, qvec) * invDet_early;
+        Vector3D qvec = tvec.cross(e1);
+        result.v = qvec.dot(rayDir) * invDet_early;
         if (result.v < 0.0f || result.u + result.v > 1.0f) return result;
         
-        result.t = Dot(e2, qvec) * invDet_early;
+        result.t = qvec.dot(e2) * invDet_early;
         if (result.t < 0.0f) return result;
         
         result.hit = true;
@@ -390,45 +430,6 @@ FORCE_INLINE HitResult IntersectTriangle_MT(const Vector3D& rayOrigin, const Vec
     
     return result;
 }
-
-// ==================================================================================
-// SURFACE AREA HEURITSIC (SAH)
-// ==================================================================================
-/*  
-    - Is an algorithm used to feed the 3D static geometry for ray casting.
-    - Is the probability that a ray will hit (or collide) with a box. 
-    - When a player fires a bullet into empty space, the bullet hits a box, traverse the tree to see what was hit.
-    - Calculates the surface area of the bounding box to estimate the statistical likelihood that the ray hit it.
-    - i.e., collision detection (physics), and raytracing (rendering / line of sight).
-*/
-
-// A standard 3D Bounding Box for the builder
-struct AABB {
-    Vector3D bmin = Vector3D( 1e30f,  1e30f,  1e30f);
-    Vector3D bmax = Vector3D(-1e30f, -1e30f, -1e30f);
-
-    void Grow(const Vector3D& p) {
-        bmin = Vector3D::Min(bmin, p);
-        bmax = Vector3D::Max(bmax, p);
-    }
-
-    void Grow(const AABB& b) {
-        bmin = Vector3D::Min(bmin, b.bmin);
-        bmax = Vector3D::Max(bmax, b.bmax);
-    }
-
-    float Area() const {
-        Vector3D e = bmax - bmin; // Extents
-        return e.x * e.y + e.y * e.z + e.z * e.x;
-    }
-};
-
-// Represents your raw level geometry
-struct Triangle {
-    Vector3D v0, v1, v2;
-    Vector3D centroid; // Pre-calculated (v0+v1+v2)/3 for fast binning
-    AABB bounds;       // Pre-calculated AABB of this specific triangle
-};
 
 // =========================================================================
 // PHASE 1: TEMPORARY BINARY NODE (SORT MEMORY)
@@ -949,6 +950,60 @@ public:
     - This ensures millions of polygons are moved for the computational cost of a single 4x4 matrix inversion.
 */
 
+struct alignas(64) Matrix4x4 {
+    float m[16];
+
+    Matrix4x4() {
+        std::fill_n(m, 16, 0.0f);
+        m[0] = m[5] = m[10] = m[15] = 1.0f;
+    }
+
+    Vector3D MultiplyPoint(const Vector3D& v) const {
+        return Vector3D(
+            v.x * m[0] + v.y * m[4] + v.z * m[8]  + m[12],
+            v.x * m[1] + v.y * m[5] + v.z * m[9]  + m[13],
+            v.x * m[2] + v.y * m[6] + v.z * m[10] + m[14]
+        );
+    }
+
+    Vector3D MultiplyDirection(const Vector3D& v) const {
+        return Vector3D(
+            v.x * m[0] + v.y * m[4] + v.z * m[8],
+            v.x * m[1] + v.y * m[5] + v.z * m[9],
+            v.x * m[2] + v.y * m[6] + v.z * m[10]
+        );
+    }
+
+    Matrix4x4 Transpose() const {
+        Matrix4x4 res;
+        res.m[0] = m[0]; res.m[1] = m[4]; res.m[2] = m[8]; res.m[3] = m[12];
+        res.m[4] = m[1]; res.m[5] = m[5]; res.m[6] = m[9]; res.m[7] = m[13];
+        res.m[8] = m[2]; res.m[9] = m[6]; res.m[10] = m[10]; res.m[11] = m[14];
+        res.m[12] = m[3]; res.m[13] = m[7]; res.m[14] = m[11]; res.m[15] = m[15];
+        return res;
+    }
+
+    Matrix4x4 Invert() const {
+        // Fast affine inverse
+        Matrix4x4 res;
+        
+        // Transpose top-left 3x3
+        res.m[0] = m[0]; res.m[1] = m[4]; res.m[2] = m[8]; 
+        res.m[4] = m[1]; res.m[5] = m[5]; res.m[6] = m[9]; 
+        res.m[8] = m[2]; res.m[9] = m[6]; res.m[10]= m[10];
+        
+        res.m[3] = res.m[7] = res.m[11] = 0.0f;
+        res.m[15] = 1.0f;
+        
+        // Translation
+        res.m[12] = -(m[12] * res.m[0] + m[13] * res.m[4] + m[14] * res.m[8]);
+        res.m[13] = -(m[12] * res.m[1] + m[13] * res.m[5] + m[14] * res.m[9]);
+        res.m[14] = -(m[12] * res.m[2] + m[13] * res.m[6] + m[14] * res.m[10]);
+        
+        return res;
+    }
+};
+
 FORCE_INLINE AABB CalculateWorldBounds(const AABB& localBounds, const Matrix4x4& transform) {
     AABB worldBounds;
     
@@ -1459,19 +1514,31 @@ public:
         // (Or interpolate vertex normals using hit.u and hit.v for smooth shading)
         Vector3D e1 = tri.v1 - tri.v0;
         Vector3D e2 = tri.v2 - tri.v0;
-        Vector3D localNormal = Cross(e1, e2).Normalized();
+        Vector3D localNormal = e1.cross(e2);
+
+        // Inline Normalization
+        float lenSq1 = localNormal.dot(localNormal);
+        if (lenSq1 > 1e-8f) {
+            localNormal = localNormal * (1.0f / std::sqrt(lenSq1));
+        }
 
         // 3. THE AAA MATRIX TRAP: 
         // To rotate a normal into world space, you CANNOT use the standard transform matrix. 
         // If the car was scaled (e.g., squashed on the Z axis), the normal will warp.
-        // You MUST multiply the normal by the Transpose of the Inverse Matrix.
+        // Multiply the normal by the Transpose of the Inverse Matrix to prevent scaling distortion.
         Matrix4x4 transposeInverse = inst.inverseTransform.Transpose(); // Guarentees that lighting and physics reflections will always behave the same, even if the designer squashes, stretches, or warps the 3D models in the editor.
-        
+        Vector3D worldNormal = transposeInverse.MultiplyDirection(localNormal);
+
+        // Inline Normalization
+        float lenSq2 = worldNormal.dot(worldNormal);
+        if (lenSq2 > 1e-8f) {
+            worldNormal = worldNormal * (1.0f / std::sqrt(lenSq2));
+        }
+
         // Return the perfectly scaled, world-space normal.
-        return transposeInverse.MultiplyDirection(localNormal).Normalized();
+        return worldNormal;
     }
 };
-
 
 // =========================================================================
 // GAME LOOP ARCHITECTURE
