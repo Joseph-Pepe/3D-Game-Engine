@@ -32,23 +32,20 @@ constexpr uint32_t INVALID_INDEX = 0xFFFFFFFF;
 struct alignas(128) BVH4Node {
     // We use anonymous unions. This costs zero extra memory but allows us to access
     // the registers as arrays when building the BVH, and as SIMD during the raycast.
-    union { __m128 minX; float minX_f[4]; };
-    union { __m128 minY; float minY_f[4]; };
-    union { __m128 minZ; float minZ_f[4]; };
+    alignas(16) float minX[4];
+    alignas(16) float minY[4];
+    alignas(16) float minZ[4];
     
-    union { __m128 maxX; float maxX_f[4]; };
-    union { __m128 maxY; float maxY_f[4]; };
-    union { __m128 maxZ; float maxZ_f[4]; };
+    alignas(16) float maxX[4];
+    alignas(16) float maxY[4];
+    alignas(16) float maxZ[4];
 
     // 4x 4-byte integers = 16 Bytes
     // If MSB (Most Significant Bit) is 1, it's a leaf. Lower 31 bits are the index.
     uint32_t children[4]; 
 
     // 16 Bytes of padding to hit exactly 128 Bytes
-    union {
-        uint32_t padding[4]; 
-        uint32_t primCounts[4]; 
-    };
+    uint32_t primCounts[4]; 
     
     FORCE_INLINE bool IsLeaf(int childIndex) const { 
         return (children[childIndex] & 0x80000000) != 0; 
@@ -62,14 +59,8 @@ struct alignas(128) BVH4Node {
     void SetDegenerateLane(int laneIndex) {
         constexpr float INF = std::numeric_limits<float>::infinity();
         
-        // Setting Min to +INF and Max to -INF guarantees tNear <= tFar will fail
-        minX_f[laneIndex] = INF;
-        minY_f[laneIndex] = INF;
-        minZ_f[laneIndex] = INF;
-
-        maxX_f[laneIndex] = -INF;
-        maxY_f[laneIndex] = -INF;
-        maxZ_f[laneIndex] = -INF;
+        minX[laneIndex] = INF; minY[laneIndex] = INF; minZ[laneIndex] = INF;
+        maxX[laneIndex] = -INF; maxY[laneIndex] = -INF; maxZ[laneIndex] = -INF;
 
         // Nullify the child pointer just to be safe
         children[laneIndex] = 0;
@@ -78,10 +69,10 @@ struct alignas(128) BVH4Node {
 
 // Exactly 32 bytes (half a cache line). Built for extreme traversal speed.
 struct alignas(32) TLASNode {
-    Vector3D minBounds;
+    float minX, minY, minZ;
     uint32_t leftFirst; // If MSB is 1, this is a leaf and holds the instanceIndex. Otherwise, Left Child.
     
-    Vector3D maxBounds;
+    float maxX, maxY, maxZ;
     uint32_t padding;
 
     FORCE_INLINE bool IsLeaf() const { return (leftFirst & 0x80000000) != 0; }
@@ -97,9 +88,9 @@ struct Ray {
         // Prevents division by zero.
         const float epsilon = 1e-8f;
         invDirection = Vector3D(
-            1.0f / (std::abs(d.x) < epsilon ? epsilon : d.x),
-            1.0f / (std::abs(d.y) < epsilon ? epsilon : d.y),
-            1.0f / (std::abs(d.z) < epsilon ? epsilon : d.z)
+            1.0f / (std::abs(d.x()) < epsilon ? epsilon : d.x()),
+            1.0f / (std::abs(d.y()) < epsilon ? epsilon : d.y()),
+            1.0f / (std::abs(d.z()) < epsilon ? epsilon : d.z())
         );
     }
 };
@@ -113,24 +104,24 @@ struct Ray4 {
 
     Ray4(const Vector3D& o, const Vector3D& d) {
         // Broadcast a single float to all 4 lanes
-        origX = _mm_set1_ps(o.x);
-        origY = _mm_set1_ps(o.y);
-        origZ = _mm_set1_ps(o.z);
+        origX = _mm_set1_ps(o.x());
+        origY = _mm_set1_ps(o.y());
+        origZ = _mm_set1_ps(o.z());
 
-        dirX = _mm_set1_ps(d.x);
-        dirY = _mm_set1_ps(d.y);
-        dirZ = _mm_set1_ps(d.z);
+        dirX = _mm_set1_ps(d.x());
+        dirY = _mm_set1_ps(d.y());
+        dirZ = _mm_set1_ps(d.z());
 
         // Pre-calculate inverse direction
         const float epsilon = 1e-8f;
         Vector3D invD(
-            1.0f / (std::abs(d.x) < epsilon ? epsilon : d.x),
-            1.0f / (std::abs(d.y) < epsilon ? epsilon : d.y),
-            1.0f / (std::abs(d.z) < epsilon ? epsilon : d.z)
+            1.0f / (std::abs(d.x()) < epsilon ? epsilon : d.x()),
+            1.0f / (std::abs(d.y()) < epsilon ? epsilon : d.y()),
+            1.0f / (std::abs(d.z()) < epsilon ? epsilon : d.z())
         );
-        invDirX = _mm_set1_ps(invD.x);
-        invDirY = _mm_set1_ps(invD.y);
-        invDirZ = _mm_set1_ps(invD.z);
+        invDirX = _mm_set1_ps(invD.x());
+        invDirY = _mm_set1_ps(invD.y());
+        invDirZ = _mm_set1_ps(invD.z());
     }
 };
 
@@ -174,7 +165,7 @@ struct AABB {
 
     float Area() const {
         Vector3D e = bmax - bmin; // Extents
-        return e.x * e.y + e.y * e.z + e.z * e.x;
+        return e.x() * e.y() + e.y() * e.z() + e.z() * e.x();
     }
 };
 
@@ -189,44 +180,37 @@ struct Triangle {
 // alignas(64) ensures it perfectly snaps into 3 CPU cache lines
 struct alignas(64) Tri4 {
     // Vertex 0 (X, Y, Z for 4 triangles)
-    union { __m128 v0x; float v0x_f[4]; };
-    union { __m128 v0y; float v0y_f[4]; };
-    union { __m128 v0z; float v0z_f[4]; };
+    alignas(16) float v0x[4]; 
+    alignas(16) float v0y[4]; 
+    alignas(16) float v0z[4];
     
     // Pre-calculated Edge 1 (v1 - v0)
-    union { __m128 e1x; float e1x_f[4]; };
-    union { __m128 e1y; float e1y_f[4]; };
-    union { __m128 e1z; float e1z_f[4]; };
+    alignas(16) float e1x[4]; 
+    alignas(16) float e1y[4]; 
+    alignas(16) float e1z[4];
     
     // Pre-calculated Edge 2 (v2 - v0)
-    union { __m128 e2x; float e2x_f[4]; };
-    union { __m128 e2y; float e2y_f[4]; };
-    union { __m128 e2z; float e2z_f[4]; };
+    alignas(16) float e2x[4]; 
+    alignas(16) float e2y[4]; 
+    alignas(16) float e2z[4];
 
-    // The original indices of the 4 triangles (so we know what we hit)
-    // Union the indices with __m128i so the compiler knows it is a vector register!
-    union { __m128i indices_v; uint32_t indices[4]; };
-
-    // Padding to hit exactly 192 bytes. 
-    // You can use this for material IDs or UV offsets later!
-    union {
-        uint32_t materialIDs[4]; 
-        uint32_t padding[4];
-    };
+    alignas(16) uint32_t indices[4];
+    alignas(16) uint32_t materialIDs[4]; 
+    alignas(16) uint32_t padding[4]; // 16 bytes of padding hits exactly 192!
 
     // Phase 1/Phase 2 builder to populate the lanes
     void SetTriangle(int lane, const Triangle& tri, uint32_t index) {
-        v0x_f[lane] = tri.v0.x;
-        v0y_f[lane] = tri.v0.y;
-        v0z_f[lane] = tri.v0.z;
+        v0x[lane] = tri.v0.x();
+        v0y[lane] = tri.v0.y();
+        v0z[lane] = tri.v0.z();
 
-        e1x_f[lane] = tri.v1.x - tri.v0.x;
-        e1y_f[lane] = tri.v1.y - tri.v0.y;
-        e1z_f[lane] = tri.v1.z - tri.v0.z;
+        e1x[lane] = tri.v1.x() - tri.v0.x();
+        e1y[lane] = tri.v1.y() - tri.v0.y();
+        e1z[lane] = tri.v1.z() - tri.v0.z();
 
-        e2x_f[lane] = tri.v2.x - tri.v0.x;
-        e2y_f[lane] = tri.v2.y - tri.v0.y;
-        e2z_f[lane] = tri.v2.z - tri.v0.z;
+        e2x[lane] = tri.v2.x() - tri.v0.x();
+        e2y[lane] = tri.v2.y() - tri.v0.y();
+        e2z[lane] = tri.v2.z() - tri.v0.z();
 
         indices[lane] = index;
     }
@@ -244,15 +228,28 @@ FORCE_INLINE Tri4Hit IntersectTri4_MT(const Tri4& tri4, const Ray4& ray, float m
     const __m128 epsilon = _mm_set1_ps(1e-8f);
     const __m128 zero = _mm_setzero_ps();
 
+    // --- LOAD SIMD REGISTERS FROM STRUCT ---
+    __m128 v0x = _mm_load_ps(tri4.v0x);
+    __m128 v0y = _mm_load_ps(tri4.v0y);
+    __m128 v0z = _mm_load_ps(tri4.v0z);
+
+    __m128 e1x = _mm_load_ps(tri4.e1x);
+    __m128 e1y = _mm_load_ps(tri4.e1y);
+    __m128 e1z = _mm_load_ps(tri4.e1z);
+
+    __m128 e2x = _mm_load_ps(tri4.e2x);
+    __m128 e2y = _mm_load_ps(tri4.e2y);
+    __m128 e2z = _mm_load_ps(tri4.e2z);
+
     // 1. pvec = cross(ray.dir, tri4.e2)
-    __m128 pvecX = _mm_sub_ps(_mm_mul_ps(ray.dirY, tri4.e2z), _mm_mul_ps(ray.dirZ, tri4.e2y));
-    __m128 pvecY = _mm_sub_ps(_mm_mul_ps(ray.dirZ, tri4.e2x), _mm_mul_ps(ray.dirX, tri4.e2z));
-    __m128 pvecZ = _mm_sub_ps(_mm_mul_ps(ray.dirX, tri4.e2y), _mm_mul_ps(ray.dirY, tri4.e2x));
+    __m128 pvecX = _mm_sub_ps(_mm_mul_ps(ray.dirY, e2z), _mm_mul_ps(ray.dirZ, e2y));
+    __m128 pvecY = _mm_sub_ps(_mm_mul_ps(ray.dirZ, e2x), _mm_mul_ps(ray.dirX, e2z));
+    __m128 pvecZ = _mm_sub_ps(_mm_mul_ps(ray.dirX, e2y), _mm_mul_ps(ray.dirY, e2x));
 
     // 2. det = dot(tri4.e1, pvec)
     __m128 det = _mm_add_ps(
-        _mm_add_ps(_mm_mul_ps(tri4.e1x, pvecX), _mm_mul_ps(tri4.e1y, pvecY)),
-        _mm_mul_ps(tri4.e1z, pvecZ)
+        _mm_add_ps(_mm_mul_ps(e1x, pvecX), _mm_mul_ps(e1y, pvecY)),
+        _mm_mul_ps(e1z, pvecZ)
     );
 
     // Backface Culling Mask (det > epsilon)
@@ -262,9 +259,9 @@ FORCE_INLINE Tri4Hit IntersectTri4_MT(const Tri4& tri4, const Ray4& ray, float m
     if (_mm_movemask_ps(validMask) == 0) return { maxDist, 0, 0, INVALID_INDEX };
 
     // 3. tvec = ray.orig - tri4.v0
-    __m128 tvecX = _mm_sub_ps(ray.origX, tri4.v0x);
-    __m128 tvecY = _mm_sub_ps(ray.origY, tri4.v0y);
-    __m128 tvecZ = _mm_sub_ps(ray.origZ, tri4.v0z);
+    __m128 tvecX = _mm_sub_ps(ray.origX, v0x);
+    __m128 tvecY = _mm_sub_ps(ray.origY, v0y);
+    __m128 tvecZ = _mm_sub_ps(ray.origZ, v0z);
 
     // 4. U = dot(tvec, pvec)
     __m128 U = _mm_add_ps(
@@ -278,9 +275,9 @@ FORCE_INLINE Tri4Hit IntersectTri4_MT(const Tri4& tri4, const Ray4& ray, float m
     if (_mm_movemask_ps(validMask) == 0) return { maxDist, 0, 0, (uint32_t)-1 };
 
     // 5. qvec = cross(tvec, tri4.e1)
-    __m128 qvecX = _mm_sub_ps(_mm_mul_ps(tvecY, tri4.e1z), _mm_mul_ps(tvecZ, tri4.e1y));
-    __m128 qvecY = _mm_sub_ps(_mm_mul_ps(tvecZ, tri4.e1x), _mm_mul_ps(tvecX, tri4.e1z));
-    __m128 qvecZ = _mm_sub_ps(_mm_mul_ps(tvecX, tri4.e1y), _mm_mul_ps(tvecY, tri4.e1x));
+    __m128 qvecX = _mm_sub_ps(_mm_mul_ps(tvecY, e1z), _mm_mul_ps(tvecZ, e1y));
+    __m128 qvecY = _mm_sub_ps(_mm_mul_ps(tvecZ, e1x), _mm_mul_ps(tvecX, e1z));
+    __m128 qvecZ = _mm_sub_ps(_mm_mul_ps(tvecX, e1y), _mm_mul_ps(tvecY, e1x));
 
     // 6. V = dot(ray.dir, qvec)
     __m128 V = _mm_add_ps(
@@ -301,8 +298,8 @@ FORCE_INLINE Tri4Hit IntersectTri4_MT(const Tri4& tri4, const Ray4& ray, float m
 
     // 7. T = dot(tri4.e2, qvec) * invDet
     __m128 unscaledT = _mm_add_ps(
-        _mm_add_ps(_mm_mul_ps(tri4.e2x, qvecX), _mm_mul_ps(tri4.e2y, qvecY)),
-        _mm_mul_ps(tri4.e2z, qvecZ)
+        _mm_add_ps(_mm_mul_ps(e2x, qvecX), _mm_mul_ps(e2y, qvecY)),
+        _mm_mul_ps(e2z, qvecZ)
     );
     __m128 T = _mm_mul_ps(unscaledT, invDet);
 
@@ -331,11 +328,13 @@ FORCE_INLINE Tri4Hit IntersectTri4_MT(const Tri4& tri4, const Ray4& ray, float m
     
     // We only loop over the bits that are actually set to 1 in the mask
     while (hitMask != 0) {
+        uint32_t lane;
         #ifdef _MSC_VER
-            unsigned long lane;
-            _BitScanForward(&lane, hitMask);
+            unsigned long msLane;
+            _BitScanForward(&msLane, hitMask);
+            lane = msLane;
         #else
-            int lane = __builtin_ctz(hitMask);
+            lane = __builtin_ctz(hitMask);
         #endif
         
         hitMask &= ~(1 << lane); // Clear the bit
@@ -511,8 +510,8 @@ private:
         // Test X, Y, and Z axes
         for (int axis = 0; axis < 3; axis++) {
             Bin bins[BINS];
-            float boundsMin = (&node.bounds.bmin.x)[axis];
-            float boundsMax = (&node.bounds.bmax.x)[axis];
+            float boundsMin = node.bounds.bmin[axis];
+            float boundsMax = node.bounds.bmax[axis];
             
             // If the box is completely flat on this axis, skip it
             if (boundsMax - boundsMin < 1e-5f) continue;
@@ -521,7 +520,7 @@ private:
             float scale = BINS / (boundsMax - boundsMin);
             for (uint32_t i = 0; i < node.primCount; i++) {
                 const Triangle& tri = m_geometry[m_indices[node.leftFirst + i]];
-                float centroidPos = (&tri.centroid.x)[axis];
+                float centroidPos = tri.centroid[axis];
                 
                 int binIdx = std::min(BINS - 1, static_cast<int>((centroidPos - boundsMin) * scale));
                 bins[binIdx].primCount++;
@@ -571,8 +570,8 @@ private:
 
         // --- THE IN-PLACE PARTITION ---
         // Swap integers around so all left-bin indices are on the left, right-bin on the right.
-        float boundsMin = (&node.bounds.bmin.x)[bestAxis];
-        float boundsMax = (&node.bounds.bmax.x)[bestAxis];
+        float boundsMin = node.bounds.bmin[bestAxis];
+        float boundsMax = node.bounds.bmax[bestAxis];
         float scale = BINS / (boundsMax - boundsMin);
 
         auto firstIt = m_indices.begin() + node.leftFirst;
@@ -581,7 +580,7 @@ private:
         // std::partition is insanely fast for this
         auto splitIt = std::partition(firstIt, lastIt, [&](uint32_t idx) {
             const Triangle& tri = m_geometry[idx];
-            float centroidPos = (&tri.centroid.x)[bestAxis];
+            float centroidPos = tri.centroid[bestAxis];
             int binIdx = std::min(BINS - 1, static_cast<int>((centroidPos - boundsMin) * scale));
             return binIdx < bestSplitBin;
         });
@@ -694,13 +693,13 @@ private:
                 const BVHNode_Binary& childBin = binaryNodes[childBinIdx];
 
                 // 1. Splat the bounds into the Structure of Arrays (SoA)
-                outBVH4[bvh4Idx].minX_f[i] = childBin.bounds.bmin.x;
-                outBVH4[bvh4Idx].minY_f[i] = childBin.bounds.bmin.y;
-                outBVH4[bvh4Idx].minZ_f[i] = childBin.bounds.bmin.z;
+                outBVH4[bvh4Idx].minX[i] = childBin.bounds.bmin.x();
+                outBVH4[bvh4Idx].minY[i] = childBin.bounds.bmin.y();
+                outBVH4[bvh4Idx].minZ[i] = childBin.bounds.bmin.z();
                 
-                outBVH4[bvh4Idx].maxX_f[i] = childBin.bounds.bmax.x;
-                outBVH4[bvh4Idx].maxY_f[i] = childBin.bounds.bmax.y;
-                outBVH4[bvh4Idx].maxZ_f[i] = childBin.bounds.bmax.z;
+                outBVH4[bvh4Idx].maxX[i] = childBin.bounds.bmax.x();
+                outBVH4[bvh4Idx].maxY[i] = childBin.bounds.bmax.y();
+                outBVH4[bvh4Idx].maxZ[i] = childBin.bounds.bmax.z();
 
                 // 2. Handle routing (Leaf vs Internal)
                 if (childBin.IsLeaf()) {
@@ -827,22 +826,30 @@ public:
     // Returns a 4-bit mask (0 to 15). 
     // Bit 0 = Child 0 hit. Bit 1 = Child 1 hit, etc.
     FORCE_INLINE int IntersectNode4(const BVH4Node& node, const Ray4& ray, float maxDist) const {
+
+        // --- LOAD SIMD REGISTERS FROM ALIGNED ARRAYS ---
+        __m128 minX = _mm_load_ps(node.minX);
+        __m128 maxX = _mm_load_ps(node.maxX);
+        __m128 minY = _mm_load_ps(node.minY);
+        __m128 maxY = _mm_load_ps(node.maxY);
+        __m128 minZ = _mm_load_ps(node.minZ);
+        __m128 maxZ = _mm_load_ps(node.maxZ);
         
         // --- X Axis ---
-        __m128 t1x = _mm_mul_ps(_mm_sub_ps(node.minX, ray.origX), ray.invDirX);
-        __m128 t2x = _mm_mul_ps(_mm_sub_ps(node.maxX, ray.origX), ray.invDirX);
+        __m128 t1x = _mm_mul_ps(_mm_sub_ps(minX, ray.origX), ray.invDirX);
+        __m128 t2x = _mm_mul_ps(_mm_sub_ps(maxX, ray.origX), ray.invDirX);
         __m128 tNear = _mm_min_ps(t1x, t2x);
         __m128 tFar  = _mm_max_ps(t1x, t2x);
 
         // --- Y Axis ---
-        __m128 t1y = _mm_mul_ps(_mm_sub_ps(node.minY, ray.origY), ray.invDirY);
-        __m128 t2y = _mm_mul_ps(_mm_sub_ps(node.maxY, ray.origY), ray.invDirY);
+        __m128 t1y = _mm_mul_ps(_mm_sub_ps(minY, ray.origY), ray.invDirY);
+        __m128 t2y = _mm_mul_ps(_mm_sub_ps(maxY, ray.origY), ray.invDirY);
         tNear = _mm_max_ps(tNear, _mm_min_ps(t1y, t2y));
         tFar  = _mm_min_ps(tFar,  _mm_max_ps(t1y, t2y));
 
         // --- Z Axis ---
-        __m128 t1z = _mm_mul_ps(_mm_sub_ps(node.minZ, ray.origZ), ray.invDirZ);
-        __m128 t2z = _mm_mul_ps(_mm_sub_ps(node.maxZ, ray.origZ), ray.invDirZ);
+        __m128 t1z = _mm_mul_ps(_mm_sub_ps(minZ, ray.origZ), ray.invDirZ);
+        __m128 t2z = _mm_mul_ps(_mm_sub_ps(maxZ, ray.origZ), ray.invDirZ);
         tNear = _mm_max_ps(tNear, _mm_min_ps(t1z, t2z));
         tFar  = _mm_min_ps(tFar,  _mm_max_ps(t1z, t2z));
 
@@ -886,12 +893,14 @@ public:
             // Loop as long as there is at least one bit set to 1 in the mask
             while (hitMask != 0) {
                 
+                uint32_t childIdx;
                 // Hardware instruction to find the index of the lowest set bit (0, 1, 2, or 3)
                 #ifdef _MSC_VER
-                    unsigned long childIdx;
-                    _BitScanForward(&childIdx, hitMask);
+                    unsigned long msChildIdx;
+                    _BitScanForward(&msChildIdx, hitMask);
+                    childIdx = msChildIdx;
                 #else
-                    int childIdx = __builtin_ctz(hitMask);
+                    childIdx = __builtin_ctz(hitMask);
                 #endif
 
                 // Clear that bit so we don't process it again on the next loop
@@ -960,17 +969,17 @@ struct alignas(64) Matrix4x4 {
 
     Vector3D MultiplyPoint(const Vector3D& v) const {
         return Vector3D(
-            v.x * m[0] + v.y * m[4] + v.z * m[8]  + m[12],
-            v.x * m[1] + v.y * m[5] + v.z * m[9]  + m[13],
-            v.x * m[2] + v.y * m[6] + v.z * m[10] + m[14]
+            v.x() * m[0] + v.y() * m[4] + v.z() * m[8]  + m[12],
+            v.x() * m[1] + v.y() * m[5] + v.z() * m[9]  + m[13],
+            v.x() * m[2] + v.y() * m[6] + v.z() * m[10] + m[14]
         );
     }
 
     Vector3D MultiplyDirection(const Vector3D& v) const {
         return Vector3D(
-            v.x * m[0] + v.y * m[4] + v.z * m[8],
-            v.x * m[1] + v.y * m[5] + v.z * m[9],
-            v.x * m[2] + v.y * m[6] + v.z * m[10]
+            v.x() * m[0] + v.y() * m[4] + v.z() * m[8],
+            v.x() * m[1] + v.y() * m[5] + v.z() * m[9],
+            v.x() * m[2] + v.y() * m[6] + v.z() * m[10]
         );
     }
 
@@ -1009,14 +1018,14 @@ FORCE_INLINE AABB CalculateWorldBounds(const AABB& localBounds, const Matrix4x4&
     
     // Extract the 8 corners of the local AABB
     Vector3D corners[8] = {
-        Vector3D(localBounds.bmin.x, localBounds.bmin.y, localBounds.bmin.z),
-        Vector3D(localBounds.bmax.x, localBounds.bmin.y, localBounds.bmin.z),
-        Vector3D(localBounds.bmin.x, localBounds.bmax.y, localBounds.bmin.z),
-        Vector3D(localBounds.bmax.x, localBounds.bmax.y, localBounds.bmin.z),
-        Vector3D(localBounds.bmin.x, localBounds.bmin.y, localBounds.bmax.z),
-        Vector3D(localBounds.bmax.x, localBounds.bmin.y, localBounds.bmax.z),
-        Vector3D(localBounds.bmin.x, localBounds.bmax.y, localBounds.bmax.z),
-        Vector3D(localBounds.bmax.x, localBounds.bmax.y, localBounds.bmax.z)
+        Vector3D(localBounds.bmin.x(), localBounds.bmin.y(), localBounds.bmin.z()),
+        Vector3D(localBounds.bmax.x(), localBounds.bmin.y(), localBounds.bmin.z()),
+        Vector3D(localBounds.bmin.x(), localBounds.bmax.y(), localBounds.bmin.z()),
+        Vector3D(localBounds.bmax.x(), localBounds.bmax.y(), localBounds.bmin.z()),
+        Vector3D(localBounds.bmin.x(), localBounds.bmin.y(), localBounds.bmax.z()),
+        Vector3D(localBounds.bmax.x(), localBounds.bmin.y(), localBounds.bmax.z()),
+        Vector3D(localBounds.bmin.x(), localBounds.bmax.y(), localBounds.bmax.z()),
+        Vector3D(localBounds.bmax.x(), localBounds.bmax.y(), localBounds.bmax.z())
     };
 
     // Transform each corner into world space and grow the new box
@@ -1028,18 +1037,18 @@ FORCE_INLINE AABB CalculateWorldBounds(const AABB& localBounds, const Matrix4x4&
 }
 
 FORCE_INLINE bool IntersectAABB(const AABB& bounds, const Ray& ray, float hitDistanceLimit) {
-    float t1 = (bounds.bmin.x - ray.origin.x) * ray.invDirection.x;
-    float t2 = (bounds.bmax.x - ray.origin.x) * ray.invDirection.x;
+    float t1 = (bounds.bmin.x() - ray.origin.x()) * ray.invDirection.x();
+    float t2 = (bounds.bmax.x() - ray.origin.x()) * ray.invDirection.x();
     float tNear = std::min(t1, t2);
     float tFar = std::max(t1, t2);
 
-    t1 = (bounds.bmin.y - ray.origin.y) * ray.invDirection.y;
-    t2 = (bounds.bmax.y - ray.origin.y) * ray.invDirection.y;
+    t1 = (bounds.bmin.y() - ray.origin.y()) * ray.invDirection.y();
+    t2 = (bounds.bmax.y() - ray.origin.y()) * ray.invDirection.y();
     tNear = std::max(tNear, std::min(t1, t2));
     tFar = std::min(tFar, std::max(t1, t2));
 
-    t1 = (bounds.bmin.z - ray.origin.z) * ray.invDirection.z;
-    t2 = (bounds.bmax.z - ray.origin.z) * ray.invDirection.z;
+    t1 = (bounds.bmin.z() - ray.origin.z()) * ray.invDirection.z();
+    t2 = (bounds.bmax.z() - ray.origin.z()) * ray.invDirection.z();
     tNear = std::max(tNear, std::min(t1, t2));
     tFar = std::min(tFar, std::max(t1, t2));
 
@@ -1189,12 +1198,19 @@ private:
 
         if (start == end) {
             uint32_t instIdx = m_mortonArray[start].instanceIndex;
-            node.minBounds = instances[instIdx].worldBounds.bmin;
-            node.maxBounds = instances[instIdx].worldBounds.bmax;
+
+            // --- Assign scalar floats directly ---
+            node.minX = instances[instIdx].worldBounds.bmin.x();
+            node.minY = instances[instIdx].worldBounds.bmin.y();
+            node.minZ = instances[instIdx].worldBounds.bmin.z();
+
+            node.maxX = instances[instIdx].worldBounds.bmax.x();
+            node.maxY = instances[instIdx].worldBounds.bmax.y();
+            node.maxZ = instances[instIdx].worldBounds.bmax.z();
 
             // Set MSB to 1 to flag as leaf, lower 31 bits hold instance index
             node.leftFirst = instIdx | 0x80000000; 
-            return { node.minBounds, node.maxBounds };
+            return instances[instIdx].worldBounds;
         }
 
         // --- INTERNAL NODE (Z-CURVE MEDIAN SPLIT) ---
@@ -1214,8 +1230,14 @@ private:
         combinedBounds.Grow(leftBounds);
         combinedBounds.Grow(rightBounds);
 
-        node.minBounds = combinedBounds.bmin;
-        node.maxBounds = combinedBounds.bmax;
+        // --- Assign scalar floats directly ---
+        node.minX = combinedBounds.bmin.x();
+        node.minY = combinedBounds.bmin.y();
+        node.minZ = combinedBounds.bmin.z();
+        
+        node.maxX = combinedBounds.bmax.x();
+        node.maxY = combinedBounds.bmax.y();
+        node.maxZ = combinedBounds.bmax.z();
 
         return combinedBounds;
     }
@@ -1237,9 +1259,9 @@ public:
         }
 
          // 3. Calculate Morton Codes for all instances
-        float extentX = globalBounds.bmax.x - globalBounds.bmin.x;
-        float extentY = globalBounds.bmax.y - globalBounds.bmin.y;
-        float extentZ = globalBounds.bmax.z - globalBounds.bmin.z;
+        float extentX = globalBounds.bmax.x() - globalBounds.bmin.x();
+        float extentY = globalBounds.bmax.y() - globalBounds.bmin.y();
+        float extentZ = globalBounds.bmax.z() - globalBounds.bmin.z();
         
         // Prevent division by zero if the entire scene is perfectly flat
         if (extentX == 0.0f) extentX = 1e-5f;
@@ -1252,14 +1274,14 @@ public:
 
         for (uint32_t i = 0; i < N; i++) {
             // Find the center of the instance
-            float cx = (instances[i].worldBounds.bmin.x + instances[i].worldBounds.bmax.x) * 0.5f;
-            float cy = (instances[i].worldBounds.bmin.y + instances[i].worldBounds.bmax.y) * 0.5f;
-            float cz = (instances[i].worldBounds.bmin.z + instances[i].worldBounds.bmax.z) * 0.5f;
+            float cx = (instances[i].worldBounds.bmin.x() + instances[i].worldBounds.bmax.x()) * 0.5f;
+            float cy = (instances[i].worldBounds.bmin.y() + instances[i].worldBounds.bmax.y()) * 0.5f;
+            float cz = (instances[i].worldBounds.bmin.z() + instances[i].worldBounds.bmax.z()) * 0.5f;
 
             // Normalize the center to a [0.0, 1.0] scale relative to the global scene bounds
-            float nx = (cx - globalBounds.bmin.x) * invExtentX;
-            float ny = (cy - globalBounds.bmin.y) * invExtentY;
-            float nz = (cz - globalBounds.bmin.z) * invExtentZ;
+            float nx = (cx - globalBounds.bmin.x()) * invExtentX;
+            float ny = (cy - globalBounds.bmin.y()) * invExtentY;
+            float nz = (cz - globalBounds.bmin.z()) * invExtentZ;
             
             m_mortonArray[i].instanceIndex = i;
             m_mortonArray[i].mortonCode = Morton3D(nx, ny, nz);
@@ -1299,10 +1321,16 @@ private:
             const BVHInstance& inst = m_instances[instIdx];
 
             // Snap the leaf node bounds to the newly calculated world bounds of the car
-            node.minBounds = inst.worldBounds.bmin;
-            node.maxBounds = inst.worldBounds.bmax;
+            // --- Assign scalar floats directly ---
+            node.minX = inst.worldBounds.bmin.x();
+            node.minY = inst.worldBounds.bmin.y();
+            node.minZ = inst.worldBounds.bmin.z();
             
-            return { node.minBounds, node.maxBounds };
+            node.maxX = inst.worldBounds.bmax.x();
+            node.maxY = inst.worldBounds.bmax.y();
+            node.maxZ = inst.worldBounds.bmax.z();
+            
+            return inst.worldBounds; // Return the car's bounding box directly
         }
 
         // INTERNAL NODE: Phase 1's builder guarantees that the right child is exactly leftFirst + 1.
@@ -1318,8 +1346,14 @@ private:
         combinedBounds.Grow(leftBounds);
         combinedBounds.Grow(rightBounds);
 
-        node.minBounds = combinedBounds.bmin;
-        node.maxBounds = combinedBounds.bmax;
+        // --- Assign scalar floats directly ---
+        node.minX = combinedBounds.bmin.x();
+        node.minY = combinedBounds.bmin.y();
+        node.minZ = combinedBounds.bmin.z();
+        
+        node.maxX = combinedBounds.bmax.x();
+        node.maxY = combinedBounds.bmax.y();
+        node.maxZ = combinedBounds.bmax.z();
 
         return combinedBounds;
     }
@@ -1335,7 +1369,11 @@ public:
 
         // Record the "perfect" surface area of the newly optimized tree
         if (!m_tlasNodes.empty()) {
-            AABB rootBounds = { m_tlasNodes[0].minBounds, m_tlasNodes[0].maxBounds };
+            // Reconstruct the Vector3D from the new 32-byte optimized scalar floats
+            AABB rootBounds = { 
+                Vector3D(m_tlasNodes[0].minX, m_tlasNodes[0].minY, m_tlasNodes[0].minZ), 
+                Vector3D(m_tlasNodes[0].maxX, m_tlasNodes[0].maxY, m_tlasNodes[0].maxZ) 
+            };
             m_optimalRootArea = rootBounds.Area();
         }
         
@@ -1400,7 +1438,9 @@ public:
             uint32_t nodeIdx = stack[--stackPtr];
             const TLASNode& node = m_tlasNodes[nodeIdx];
 
-            AABB nodeBounds { node.minBounds, node.maxBounds };
+            AABB nodeBounds;
+            nodeBounds.bmin = Vector3D(node.minX, node.minY, node.minZ);
+            nodeBounds.bmax = Vector3D(node.maxX, node.maxY, node.maxZ);
 
             // Standard AABB test. Notice we pass maxDistance, which NEVER shrinks in a Multi-Cast!
             float unusedHitDistance = 0.0f;
@@ -1459,7 +1499,9 @@ public:
             const TLASNode& node = m_tlasNodes[nodeIdx];
 
             // Standard scalar AABB intersection
-            AABB nodeBounds { node.minBounds, node.maxBounds };
+            AABB nodeBounds;
+            nodeBounds.bmin = Vector3D(node.minX, node.minY, node.minZ);
+            nodeBounds.bmax = Vector3D(node.maxX, node.maxY, node.maxZ);
 
             // Standard AABB test against the instance's world bounds
             if (IntersectAABB(nodeBounds, worldRay, outHit.t)) {
