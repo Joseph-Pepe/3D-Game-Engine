@@ -1266,3 +1266,36 @@ private:
         return (mask & 0x07) == 0x07;
     }
 };
+
+/*
+void Engine::UpdateCameraPipeline(float deltaTime) {
+    // Step 1: Gather raw hardware inputs (Keyboard, Mouse, Gamepad)
+    RawInputState rawInput = InputSystem::PollHardware();
+
+    // Step 2: Determine if the player is in a fixed cinematic zone or standard exploration
+    auto& activeZones = LevelManager::GetActiveCinematicZones(); 
+    bool inCinematicZone = !activeZones.empty();
+
+    if (inCinematicZone) {
+        // Run God of War style tracking and blending
+        m_CinematicSystem.Update(m_Player.Position, activeZones, m_MainCamera, deltaTime);
+        
+        // Translate movement vectors relative to the computed cinematic frame
+        m_Player.MovementVelocity = m_InputEngine.ComputeWorldMovement(rawInput, m_MainCamera);
+    } 
+    else {
+        // Run Tomb Raider style spring arm profiling and input orientation
+        m_StateController.Update(m_PlayerCameraState, m_PlayerSpringArm, m_MainCamera, deltaTime);
+        
+        // Standard third-person relative input (relative to spring arm rotation)
+        m_Player.MovementVelocity = m_InputEngine.ComputeWorldMovement(rawInput, m_MainCamera);
+        
+        // Resolve camera placement and collision checks against the environment physics
+        m_SpringArmSystem.Update(m_Player.Position, m_Player.Rotation, m_PlayerSpringArm, m_MainCamera, m_PhysicsScene, deltaTime);
+    }
+
+    // Step 3: Apply final resolved transforms to character physics and view matrices
+    m_PlayerPhysics.ApplyVelocity(m_Player.MovementVelocity, deltaTime);
+    m_Renderer.SetViewMatrix(m_MainCamera.ComputeViewMatrix());
+}
+*/
