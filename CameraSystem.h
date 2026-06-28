@@ -802,3 +802,467 @@ public:
         Renderer::SubmitViewMatrix(viewMat);
     }
 */
+
+// ===============================================
+// CAMERA STATE MACHINE (ECS)
+// ===============================================
+
+// Defines the physical parameters for a specific camera state
+struct CameraStateProfile {
+    float FOV = 90.0f;
+    float TargetArmLength = 300.0f;
+    
+    // Looks at the character's upper chest/head
+    Vector3D TargetOffset = Vector3D(0.0f, 60.0f, 0.0f); 
+    
+    // Pushes the camera left/right for over-the-shoulder framing
+    Vector3D SocketOffset = Vector3D(0.0f, 0.0f, 0.0f);  
+    
+    // How fast we transition INTO this state
+    float TransitionSpeed = 12.0f; 
+};
+
+// --- ECS COMPONENT ---
+// Attach this to your Player Entity alongside the SpringArm and CameraComponent
+struct alignas(16) CameraStateComponent {
+    CameraStateProfile TargetState;
+
+    // Hardcoded AAA Profiles (In a real engine, you'd load these from a JSON/XML config)
+    CameraStateProfile ProfileExploration;
+    CameraStateProfile ProfileAiming;
+    CameraStateProfile ProfileSprinting;
+    CameraStateProfile ProfileCrawling;
+
+    CameraStateComponent() {
+        // 1. Default Exploration
+        ProfileExploration.FOV = 85.0f;
+        ProfileExploration.TargetArmLength = 280.0f;
+        ProfileExploration.TargetOffset = Vector3D(0.0f, 50.0f, 0.0f);
+        ProfileExploration.SocketOffset = Vector3D(0.0f, 0.0f, 0.0f); // Center aligned
+        ProfileExploration.TransitionSpeed = 8.0f; // Smooth, relaxed return to default
+
+        // 2. Aiming the Gun
+        ProfileAiming.FOV = 55.0f; // Zoomed in for precision
+        ProfileAiming.TargetArmLength = 80.0f; // Pulled in tight to the shoulder
+        ProfileAiming.TargetOffset = Vector3D(0.0f, 65.0f, 0.0f); // Look higher up at the reticle
+        ProfileAiming.SocketOffset = Vector3D(55.0f, 0.0f, 0.0f); // Shift right to clear the center screen
+        ProfileAiming.TransitionSpeed = 18.0f; // Fast, snappy transition for combat responsiveness
+
+        // 3. Sprinting
+        ProfileSprinting.FOV = 100.0f; // Widen FOV for sense of speed
+        ProfileSprinting.TargetArmLength = 350.0f; // Pull back slightly
+        ProfileSprinting.TargetOffset = Vector3D(0.0f, 40.0f, 0.0f); // Character leans forward, lower target
+        ProfileSprinting.SocketOffset = Vector3D(0.0f, 0.0f, 0.0f);
+        ProfileSprinting.TransitionSpeed = 5.0f; // Gradual buildup
+
+        // Initialize
+        TargetState = ProfileExploration;
+    }
+
+    void SetState(const CameraStateProfile& newState) {
+        TargetState = newState;
+    }
+};
+
+// Reads the current SpringArmController length and evaluates the physics.
+// Grabs the target properties amd smoothly interpolates the current CameraComponent and SpringArmComponent values towards them usiung frame-rate independent decay. 
+class CameraStateController {
+public:
+    // Scalar Frame-Rate Independent Exponential Decay Lerp
+    static FORCE_INLINE float DecayLerp(float current, float target, float decaySpeed, float deltaTime) {
+        return target + (current - target) * std::exp2(-decaySpeed * deltaTime);
+    }
+
+    // Vector Frame-Rate Independent Exponential Decay Lerp
+    static FORCE_INLINE Vector3D DecayLerp(const Vector3D& current, const Vector3D& target, float decaySpeed, float deltaTime) {
+        float decayFactor = std::exp2(-decaySpeed * deltaTime);
+        return target + ((current - target) * decayFactor);
+    }
+
+    // Mutates the live components to match the target state dynamically over time
+    void Update(CameraStateComponent& state, SpringArmComponent& arm, CameraComponent& camera, float deltaTime) {
+        
+        float speed = state.TargetState.TransitionSpeed;
+
+        // 1. Interpolate the Camera Lens properties
+        camera.FOV = DecayLerp(camera.FOV, state.TargetState.FOV, speed, deltaTime);
+
+        // 2. Interpolate the Spring Arm dimensions
+        arm.TargetArmLength = DecayLerp(arm.TargetArmLength, state.TargetState.TargetArmLength, speed, deltaTime);
+        
+        arm.TargetOffset = DecayLerp(arm.TargetOffset, state.TargetState.TargetOffset, speed, deltaTime);
+        arm.SocketOffset = DecayLerp(arm.SocketOffset, state.TargetState.SocketOffset, speed, deltaTime);
+    }
+};
+
+/*
+    // 1. Instantiate the ECS Data
+    CameraComponent mainCamera;
+    SpringArmComponent playerSpringArm;
+    CameraStateComponent playerCameraState;
+
+    // 2. Instantiate Systems
+    CameraStateController stateController;
+    SpringArmController armController;
+
+    // 3. Main Loop
+    while (Engine.IsRunning()) {
+        
+        // --- A. GAMEPLAY INPUT ROUTING ---
+        // Example: Player holds Right Mouse Button to aim
+        if (Input::IsButtonHeld(MOUSE_BUTTON_RIGHT)) {
+            playerCameraState.SetState(playerCameraState.ProfileAiming);
+        } 
+        else if (Input::IsButtonHeld(KEY_SHIFT)) {
+            playerCameraState.SetState(playerCameraState.ProfileSprinting);
+        } 
+        else {
+            playerCameraState.SetState(playerCameraState.ProfileExploration);
+        }
+
+        // --- B. CAMERA PIPELINE EXECUTION ---
+        // Order matters! 
+
+        // Step 1: Smoothly mutate the FOV and Arm lengths toward the target profile
+        stateController.Update(playerCameraState, playerSpringArm, mainCamera, dt);
+
+        // Step 2: Now that the arm has its new frame-interpolated length, calculate collision and final position
+        armController.Update(
+            player.Position, 
+            player.Rotation, 
+            playerSpringArm, 
+            mainCamera, 
+            physicsScene, 
+            renderer, 
+            dt
+        );
+
+        // --- C. RENDER ---
+        Matrix4x4_SIMD viewMat = mainCamera.GetViewMatrix();
+        Renderer::SubmitViewMatrix(viewMat);
+        // Submit mainCamera.FOV to Projection Matrix...
+    }
+*/
+
+// ======================================================
+// CINEMATIC FIXED | SPATIAL RAIL CAMERA SYSTEM (ECS)
+// =====================================================
+/*
+    - Camera driven by the player's spatial position in the world instead of by time.
+    - Its locked to static nodes or moves along fixed tracks (rails).
+    - It dynamically slides and rotates to frame the player based on where the player stands.
+*/
+
+enum class FixedCameraMode : uint8_t {
+    StaticStation, // Stationary camera that rotates to track player
+    LinearRail     // Camera slides along a track and rotates to track player
+};
+
+// Contiguous, cache-aligned data structure for a cinematic tracking zone
+struct alignas(16) CinematicZoneComponent {
+    uint32_t ZoneID = 0;
+    Vector3D TriggerMin;
+    Vector3D TriggerMax;
+    
+    FixedCameraMode Mode = FixedCameraMode::StaticStation;
+    
+    // Rail bounds (If StaticStation, RailStart is the camera's fixed position)
+    Vector3D RailStart;
+    Vector3D RailEnd;
+    
+    float FOV = 60.0f;          // Cinematic cameras often use tighter FOVs (e.g., 45-60)
+    float TrackingLag = 15.0f;   // Smoothing weight for tracking speed
+};
+
+// --- SYSTEM: CINEMATIC RAIL CONTROLLER ---
+class CinematicRailController {
+public:
+    // Performance Optimization: Cache-friendly processing loop
+    void Update(
+        const Vector3D& playerPosition,
+        const std::inplace_vector<CinematicZoneComponent, 32>& activeZones,
+        CameraComponent& outCamera,
+        float deltaTime)
+    {
+        // 1. Spatial Partitioning / Trigger Volume Scan
+        // Linear scan over stack-allocated vector is faster than tree traversal for small counts
+        const CinematicZoneComponent* currentZone = nullptr;
+        for (const auto& zone : activeZones) {
+            if (IsPointInVolume(playerPosition, zone.TriggerMin, zone.TriggerMax)) {
+                currentZone = &zone;
+                break; 
+            }
+        }
+
+        // Fallback if player leaves all defined tracking volumes
+        if (!currentZone) return;
+
+        Vector3D targetCamPos;
+
+        if (currentZone->Mode == FixedCameraMode::StaticStation) {
+            targetCamPos = currentZone->RailStart;
+        } 
+        else if (currentZone->Mode == FixedCameraMode::LinearRail) {
+            // --- SIMD SPATIAL PROJECTION onto the Camera Rail ---
+            __m128 p = playerPosition.reg;
+            __m128 a = currentZone->RailStart.reg;
+            __m128 b = currentZone->RailEnd.reg;
+
+            __m128 ab = _mm_sub_ps(b, a); // Vector from Rail Start to Rail End
+            __m128 ap = _mm_sub_ps(p, a); // Vector from Rail Start to Player
+
+            // Dot Product: ap . ab
+            __m128 dotAP_AB = _mm_dp_ps(ap, ab, 0x77); 
+            // Dot Product: ab . ab (Squared Length of Rail)
+            __m128 dotAB_AB = _mm_dp_ps(ab, ab, 0x77);
+
+            float scalarTop = _mm_cvtss_f32(dotAP_AB);
+            float scalarBottom = _mm_cvtss_f32(dotAB_AB);
+
+            // Prevent division by zero if the rail has no length
+            float t = (scalarBottom > 1e-6f) ? (scalarTop / scalarBottom) : 0.0f;
+            t = std::clamp(t, 0.0f, 1.0f); // Clamp camera onto the physical rail bounds
+
+            // Position = RailStart + t * (RailEnd - RailStart)
+            targetCamPos = Vector3D(_mm_add_ps(a, _mm_mul_ps(_mm_set1_ps(t), ab)));
+        }
+
+        // 2. Frame-Rate Independent Camera Lag (Smooth transitions along the rail)
+        float decayFactor = std::exp2(-currentZone->TrackingLag * deltaTime);
+        outCamera.Position = targetCamPos + ((outCamera.Position - targetCamPos) * decayFactor);
+
+        // 3. Dynamic Framing / LookAt Rotation
+        // Calculate the direction pointing from the smooth camera position directly to the player
+        Vector3D lookDirection = playerPosition - outCamera.Position;
+        lookDirection = lookDirection.asDirection(); // Force W component to 0.0f
+
+        float lengthSq = lookDirection.dot(lookDirection);
+        if (lengthSq > 1e-6f) {
+            lookDirection = lookDirection * (1.0f / std::sqrt(lengthSq)); // Safe Normalize
+            
+            // Re-use your ultra-fast, trig-free direction to quaternion solver
+            Quaternion targetOrientation = Quaternion::FromDirection(lookDirection);
+            
+            // Soft blend the camera's rotational shift to match player movement cleanly
+            outCamera.Orientation = Quaternion::Slerp(outCamera.Orientation, targetOrientation, 1.0f - decayFactor);
+        }
+
+        // Pass the cinematic zone lens configuration down to the camera state
+        outCamera.FOV = currentZone->FOV;
+    }
+
+private:
+    static FORCE_INLINE bool IsPointInVolume(const Vector3D& p, const Vector3D& min, const Vector3D& max) {
+        // High throughput branchless boundary check using SIMD mask comparisons
+        __m128 point = p.reg;
+        __m128 boxMin = min.reg;
+        __m128 boxMax = max.reg;
+
+        __m128 geMin = _mm_cmpge_ps(point, boxMin);
+        __m128 leMax = _mm_cmple_ps(point, boxMax);
+        __m128 inside = _mm_and_ps(geMin, leMax);
+
+        int mask = _mm_movemask_ps(inside);
+        return (mask & 0x07) == 0x07; // Check X, Y, and Z lanes simultaneously
+    }
+};
+
+// ======================================================
+// CAMERA RELATIVE INPUT ENGINE
+// =====================================================
+/*
+    - Character movement system must dynamically transform the player's hardware input (X/Y input) by the Camera's View Matrix.
+*/
+
+struct alignas(16) RawInputState {
+    // Gamepad left thumbstick or Keyboard WASD normalized axes (-1.0f to 1.0f)
+    float MoveAxisX = 0.0f;
+    float MoveAxisY = 0.0f;
+    
+    // Mouse deltas or Gamepad right thumbstick
+    float LookDeltaX = 0.0f;
+    float LookDeltaY = 0.0f;
+    
+    bool IsGamepad = false;
+};
+
+class CameraRelativeInputEngine {
+public:
+    // Computes a branchless, frame-rate independent world movement vector relative to the camera viewport
+    [[nodiscard]] FORCE_INLINE Vector3D ComputeWorldMovement(const RawInputState& input, const CameraComponent& camera) noexcept {
+        // High throughput early-out for dead-zones
+        float sqMag = (input.MoveAxisX * input.MoveAxisX) + (input.MoveAxisY * input.MoveAxisY);
+        if (sqMag < 0.01f) return Vector3D(0.0f, 0.0f, 0.0f);
+
+        // Extract camera directional axes from its orientation quaternion
+        // Assuming a standard Y-Up coordinate system
+        Vector3D camForward = camera.Orientation.GetForwardVector();
+        Vector3D camRight   = camera.Orientation.GetRightVector();
+
+        // Project camera vectors onto the horizontal gameplay plane (Y = 0) to prevent 
+        // characters from flying or digging into the ground when looking up/down
+        camForward.y = 0.0f;
+        camRight.y   = 0.0f;
+
+        // Perform fast safe normalization on the planar vectors using SIMD registers
+        __m128 fReg = camForward.reg;
+        __m128 rReg = camRight.reg;
+
+        __m128 fDot = _mm_dp_ps(fReg, fReg, 0x77);
+        __m128 rDot = _mm_dp_ps(rReg, rReg, 0x77);
+
+        // Branchless reciprocal square root approximation with one iteration of Newton-Raphson refinement
+        __m128 fRsqrt = _mm_rsqrt_ps(fDot);
+        __m128 rRsqrt = _mm_rsqrt_ps(rDot);
+
+        camForward.reg = _mm_mul_ps(fReg, fRsqrt);
+        camRight.reg   = _mm_mul_ps(rReg, rRsqrt);
+
+        // Accumulate input dimensions to compute final world velocity vector
+        // MoveAxisY maps to Forward/Backward, MoveAxisX maps to Left/Right
+        Vector3D worldDirection = (camForward * input.MoveAxisY) + (camRight * input.MoveAxisX);
+
+        // Clamp vector magnitude to 1.0f to prevent diagonal acceleration exploits
+        float mag = std::sqrt((worldDirection.x * worldDirection.x) + (worldDirection.z * worldDirection.z));
+        if (mag > 1.0f) {
+            worldDirection = worldDirection * (1.0f / mag);
+        }
+
+        return worldDirection;
+    }
+};
+
+// ======================================================
+// ZONE BLENDING 
+// =====================================================
+/*
+    - Smooths crossfades between distinct camera angles (e.g., transition from a fixed overview to a side-scrolling rail track).
+    - Perfroms an automated runtime blend.
+*/
+
+// Holds active crossfading contexts between old and new camera tracks
+struct alignas(16) CameraBlendTracker {
+    CinematicZoneComponent SourceZone;
+    CinematicZoneComponent TargetZone;
+    float BlendAlpha = 1.0f;       // 0.0f = Source, 1.0f = Target Completely Active
+    float BlendSpeed = 2.0f;       // Speed factor of the structural crossfade
+    bool IsBlending = false;
+};
+
+class SpatialRailCameraSystem {
+private:
+    CameraBlendTracker m_BlendState;
+
+public:
+    // Fully SIMD accelerated zone parsing logic
+    void Update(
+        const Vector3D& playerPosition,
+        const std::inplace_vector<CinematicZoneComponent, 32>& levelZones,
+        CameraComponent& outCamera,
+        float deltaTime) noexcept 
+    {
+        // 1. Locate the single primary active camera zone based on spatial volume intersection
+        const CinematicZoneComponent* primaryZone = nullptr;
+        for (const auto& zone : levelZones) {
+            if (IsPointInVolume(playerPosition, zone.TriggerMin, zone.TriggerMax)) {
+                primaryZone = &zone;
+                break;
+            }
+        }
+
+        if (!primaryZone) return; // Retain current frame parameters if out of bounds
+
+        // 2. Manage the Camera Transition State Machine
+        if (!m_BlendState.IsBlending) {
+            // Check if the player stepped into a new tracking environment
+            if (m_BlendState.TargetZone.ZoneID != primaryZone->ZoneID) {
+                // If it's the initial run, just snap to it instantly
+                if (m_BlendState.TargetZone.ZoneID == 0) {
+                    m_BlendState.TargetZone = *primaryZone;
+                } else {
+                    // Trigger a smooth crossfade state machine sequence
+                    m_BlendState.SourceZone = m_BlendState.TargetZone;
+                    m_BlendState.TargetZone = *primaryZone;
+                    m_BlendState.BlendAlpha = 0.0f;
+                    m_BlendState.IsBlending = true;
+                }
+            }
+        } else {
+            // Progress the crossfade state machine cleanly
+            m_BlendState.BlendAlpha += m_BlendState.BlendSpeed * deltaTime;
+            if (m_BlendState.BlendAlpha >= 1.0f) {
+                m_BlendState.BlendAlpha = 1.0f;
+                m_BlendState.IsBlending = false;
+            }
+        }
+
+        // 3. Resolve the Camera Transforms (Evaluate single tracking or crossfaded environments)
+        CameraComponent targetEvaluatedState;
+        
+        if (!m_BlendState.IsBlending) {
+            EvaluateZoneTransform(playerPosition, m_BlendState.TargetZone, targetEvaluatedState);
+            
+            // Apply standard frame-rate independent tracking lag smoothing
+            float decayFactor = std::exp2(-m_BlendState.TargetZone.TrackingLag * deltaTime);
+            outCamera.Position = targetEvaluatedState.Position + ((outCamera.Position - targetEvaluatedState.Position) * decayFactor);
+            outCamera.Orientation = Quaternion::Slerp(outCamera.Orientation, targetEvaluatedState.Orientation, 1.0f - decayFactor);
+            outCamera.FOV = targetEvaluatedState.FOV;
+        } 
+        else {
+            // Solve BOTH spatial curves simultaneously to blend between them cleanly mid-air
+            CameraComponent sourceTrackResult;
+            CameraComponent targetTrackResult;
+            
+            EvaluateZoneTransform(playerPosition, m_BlendState.SourceZone, sourceTrackResult);
+            EvaluateZoneTransform(playerPosition, m_BlendState.TargetZone, targetTrackResult);
+            
+            // Linear interpolate camera vectors across tracking zones
+            float t = m_BlendState.BlendAlpha;
+            outCamera.Position = Vector3D::Lerp(sourceTrackResult.Position, targetTrackResult.Position, t);
+            outCamera.Orientation = Quaternion::Slerp(sourceTrackResult.Orientation, targetTrackResult.Orientation, t);
+            outCamera.FOV = sourceTrackResult.FOV + (targetTrackResult.FOV - sourceTrackResult.FOV) * t;
+        }
+    }
+
+private:
+    // Evaluates a specific zone's mathematical rail or static station mapping logic
+    void EvaluateZoneTransform(const Vector3D& playerPos, const CinematicZoneComponent& zone, CameraComponent& outState) const noexcept {
+        outState.FOV = zone.FOV;
+
+        if (zone.Mode == FixedCameraMode::StaticStation) {
+            outState.Position = zone.RailStart;
+        } 
+        else if (zone.Mode == FixedCameraMode::LinearRail) {
+            __m128 p = playerPos.reg;
+            __m128 a = zone.RailStart.reg;
+            __m128 b = zone.RailEnd.reg;
+
+            __m128 ab = _mm_sub_ps(b, a);
+            __m128 ap = _mm_sub_ps(p, a);
+
+            float scalarTop = _mm_cvtss_f32(_mm_dp_ps(ap, ab, 0x77));
+            float scalarBottom = _mm_cvtss_f32(_mm_dp_ps(ab, ab, 0x77));
+
+            float factor = (scalarBottom > 1e-6f) ? (scalarTop / scalarBottom) : 0.0f;
+            factor = std::clamp(factor, 0.0f, 1.0f);
+
+            outState.Position = Vector3D(_mm_add_ps(a, _mm_mul_ps(_mm_set1_ps(factor), ab)));
+        }
+
+        // Standard direct LookAt resolution algorithm
+        Vector3D lookDir = (playerPos - outState.Position).asDirection();
+        float lengthSq = lookDir.dot(lookDir);
+        if (lengthSq > 1e-6f) {
+            lookDir = lookDir * (1.0f / std::sqrt(lengthSq));
+            outState.Orientation = Quaternion::FromDirection(lookDir);
+        }
+    }
+
+    static FORCE_INLINE bool IsPointInVolume(const Vector3D& p, const Vector3D& min, const Vector3D& max) noexcept {
+        __m128 point = p.reg;
+        __m128 boxMin = min.reg;
+        __m128 boxMax = max.reg;
+        int mask = _mm_movemask_ps(_mm_and_ps(_mm_cmpge_ps(point, boxMin), _mm_cmple_ps(point, boxMax)));
+        return (mask & 0x07) == 0x07;
+    }
+};
