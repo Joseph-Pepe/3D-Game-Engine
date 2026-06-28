@@ -90,14 +90,17 @@ struct CameraInputAxes {
 // SIMD QUATERNION (128-bit)
 // ==================================================================================
 struct alignas(16) Quaternion {
-    union {
-        __m128 reg;
-        struct { float x, y, z, w; };
-    };
+    __m128 reg;
 
     FORCE_INLINE Quaternion() : reg(_mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f)) {} // Identity {0,0,0,1}
     FORCE_INLINE Quaternion(__m128 m) : reg(m) {}
     FORCE_INLINE Quaternion(float _x, float _y, float _z, float _w) : reg(_mm_set_ps(_w, _z, _y, _x)) {}
+
+    // --- HARDWARE GETTERS ---
+    FORCE_INLINE float x() const { return _mm_cvtss_f32(reg); }
+    FORCE_INLINE float y() const { return _mm_cvtss_f32(_mm_shuffle_ps(reg, reg, _MM_SHUFFLE(1, 1, 1, 1))); }
+    FORCE_INLINE float z() const { return _mm_cvtss_f32(_mm_shuffle_ps(reg, reg, _MM_SHUFFLE(2, 2, 2, 2))); }
+    FORCE_INLINE float w() const { return _mm_cvtss_f32(_mm_shuffle_ps(reg, reg, _MM_SHUFFLE(3, 3, 3, 3))); }
 
     // --- ANGLE AXIS CONVERSION ---
     // This is the ONLY time we use Trigonometry. Used when converting mouse/keyboard input to a rotation.
@@ -162,20 +165,31 @@ struct alignas(16) Quaternion {
         return Quaternion(_mm_xor_ps(reg, signMask));
     }
     
-    // --- ROTATE VECTOR ---
+    // --- PURE SIMD ROTATE VECTOR ---
     // Rotates a 3D vector by this quaternion: V' = Q * V * Q^-1
     FORCE_INLINE Vector3D RotateVector(const Vector3D& v) const {
+        // Drastically faster than extracting x, y, and z to memory!
         // Fast path for rotating a vector by a quaternion
-        Vector3D qVec(x, y, z, 0.0f);
+
+        // 1. Mask out W (Force it to 0.0) to get purely the imaginary (x,y,z) axis
+        Vector3D qVec(_mm_blend_ps(reg, _mm_setzero_ps(), 0x08));
+        
+        // 2. Broadcast the Real (w) component across all lanes
+        __m128 wReg = _mm_shuffle_ps(reg, reg, _MM_SHUFFLE(3, 3, 3, 3));
+        
+        // 3. V' = V + 2w(Q_xyz x V) + 2(Q_xyz x (Q_xyz x V))
         Vector3D t = qVec.cross(v) * 2.0f;
-        return v + (t * w) + qVec.cross(t);
+        
+        // Multiply t by w directly in the registers, avoiding scalar extraction
+        Vector3D tw(_mm_mul_ps(t.reg, wReg)); 
+
+        return v + tw + qVec.cross(t);
     }
 
     // --- DIRECTION TO QUATERNION ---
     // Converts a normalized forward vector into a rotation without using Trigonometry.
     static FORCE_INLINE Quaternion FromDirection(const Vector3D& dir) {
         Vector3D baseForward(0.0f, 0.0f, -1.0f, 0.0f); 
-        
         float dot = baseForward.dot(dir);
         
         // Edge Case: The camera needs to perfectly turn around 180 degrees
@@ -185,7 +199,7 @@ struct alignas(16) Quaternion {
         
         // Build the Quaternion using the cross product axis and the half-way dot product
         Vector3D axis = baseForward.cross(dir);
-        Quaternion q(axis.x, axis.y, axis.z, 1.0f + dot);
+        Quaternion q(axis.x(), axis.y(), axis.z(), 1.0f + dot);
         q.Normalize();
         
         return q;
@@ -193,8 +207,7 @@ struct alignas(16) Quaternion {
 
     // --- DOT PRODUCT ---
     FORCE_INLINE float dot(const Quaternion& other) const {
-        __m128 res = _mm_dp_ps(reg, other.reg, 0xFF);
-        return _mm_cvtss_f32(res);
+        return _mm_cvtss_f32(_mm_dp_ps(reg, other.reg, 0xFF));
     }
 
     // --- NORMALIZED LERP (N-Lerp) ---
@@ -225,8 +238,7 @@ struct alignas(16) Quaternion {
         if (cosOmega < 0.0f) {
             cosOmega = -cosOmega;
             // Flip the sign bit of all 4 floats instantly using XOR
-            __m128 negZero = _mm_set1_ps(-0.0f);
-            q2Reg = _mm_xor_ps(q2Reg, negZero);
+            q2Reg = _mm_xor_ps(q2Reg, _mm_set1_ps(-0.0f));
         }
 
         // 2. GIMBAL / PRECISION FALLBACK
@@ -235,9 +247,8 @@ struct alignas(16) Quaternion {
         if (cosOmega > 0.9999f) {
             __m128 tReg = _mm_set1_ps(t);
             __m128 oneMinusT = _mm_sub_ps(_mm_set1_ps(1.0f), tReg);
-            __m128 res = _mm_add_ps(_mm_mul_ps(q1.reg, oneMinusT), _mm_mul_ps(q2Reg, tReg));
             
-            Quaternion result(res);
+            Quaternion result(_mm_add_ps(_mm_mul_ps(q1.reg, oneMinusT), _mm_mul_ps(q2Reg, tReg)));
             result.Normalize();
             return result;
         }
@@ -251,11 +262,8 @@ struct alignas(16) Quaternion {
         float weight1 = std::sin(t * omega) * invSinOmega;
 
         // 4. SIMD RE-ASSEMBLY
-        __m128 w0Reg = _mm_set1_ps(weight0);
-        __m128 w1Reg = _mm_set1_ps(weight1);
-
         // res = (q1 * w0) + (q2 * w1)
-        __m128 res = _mm_add_ps(_mm_mul_ps(q1.reg, w0Reg), _mm_mul_ps(q2Reg, w1Reg));
+        __m128 res = _mm_add_ps(_mm_mul_ps(q1.reg, _mm_set1_ps(weight0)), _mm_mul_ps(q2Reg, _mm_set1_ps(weight1)));
 
         return Quaternion(res);
     }
@@ -297,10 +305,10 @@ struct alignas(16) CameraComponent {
         Quaternion invQ = Orientation.Conjugate();
 
         // 2. Precompute Fused terms for the Rotation Matrix
-        float x2 = invQ.x + invQ.x, y2 = invQ.y + invQ.y, z2 = invQ.z + invQ.z;
-        float xx = invQ.x * x2, xy = invQ.x * y2, xz = invQ.x * z2;
-        float yy = invQ.y * y2, yz = invQ.y * z2, zz = invQ.z * z2;
-        float wx = invQ.w * x2, wy = invQ.w * y2, wz = invQ.w * z2;
+        float x2 = invQ.x() + invQ.x(), y2 = invQ.y() + invQ.y(), z2 = invQ.z() + invQ.z();
+        float xx = invQ.x() * x2, xy = invQ.x() * y2, xz = invQ.x() * z2;
+        float yy = invQ.y() * y2, yz = invQ.y() * z2, zz = invQ.z() * z2;
+        float wx = invQ.w() * x2, wy = invQ.w() * y2, wz = invQ.w() * z2;
 
         // 3. Build the Rotation Axes (Right, Up, Forward)
         Vector3D r(1.0f - (yy + zz), xy - wz, xz + wy, 0.0f);
@@ -332,8 +340,8 @@ struct alignas(16) CameraComponent {
         Vector3D absoluteTarget = Position + currentFront;
 
         std::println("Cam Pos: [{}, {}, {}] | Target: [{}, {}, {}]", 
-                     Position.x, Position.y, Position.z,
-                     absoluteTarget.x, absoluteTarget.y, absoluteTarget.z);
+                     Position.x(), Position.y(), Position.z(),
+                     absoluteTarget.x(), absoluteTarget.y(), absoluteTarget.z());
     }
 };
 
