@@ -16,12 +16,13 @@
         {
             "type": "cppbuild",
             "label": "C/C++: cl.exe build active file",
-            "command": "cl.exe",
+            "command": "C:\\Program Files (x86)\\Microsoft Visual Studio\\18\\BuildTools\\VC\\Tools\\MSVC\\14.51.36231\\bin\\HostX64\\x64\\cl.exe",
             "args": [
                 "/Zi", // Generate debug info
                 "/EHsc",
                 "/nologo",
                 "/Fe${fileDirname}\\${fileBasenameNoExtension}.exe",
+                "/std:c++latest",
                 "${file}"
             ],
             "options": {
@@ -39,7 +40,7 @@
         {
             "type": "cppbuild",
             "label": "C/C++: cl.exe build Engine (High-Performance Release)",
-            "command": "cl.exe",
+            "command": "C:\\Program Files (x86)\\Microsoft Visual Studio\\18\\BuildTools\\VC\\Tools\\MSVC\\14.51.36231\\bin\\HostX64\\x64\\cl.exe",
             "args": [
                 // --- HIGH PERFORMANCE FLAGS ---
                 "/O2",             // Maximum speed optimization
@@ -105,7 +106,7 @@
         },
         {
             "label": "C/C++: cl.exe build Debuggable Release",
-            "command": "C:\\Program Files (x86)\\Microsoft Visual Studio\\18\\BuildTools\\VC\\Tools\\MSVC\\14.50.35717\\bin\\HostX64\\x64\\cl.exe",
+            "command": "C:\\Program Files (x86)\\Microsoft Visual Studio\\18\\BuildTools\\VC\\Tools\\MSVC\\14.51.36231\\bin\\HostX64\\x64\\cl.exe",
             "args": [
                 "/Zi",              // Generate complete debugging information (.pdb)
                 "/O2",              // Keep the speed so the Segfault still triggers
@@ -150,7 +151,7 @@
                 "psapi.lib" // Required for RAM telemetry
             ],
             "problemMatcher": ["$msCompile"],
-            "group": { "kind": "build", "isDefault": true },
+            "group": { "kind": "build", "isDefault": false },
             "dependsOn": ["Assemble FiberContext"]
         }
     ],
