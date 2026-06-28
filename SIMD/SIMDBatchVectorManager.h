@@ -1,7 +1,7 @@
 #pragma once
 
-#include "Math.h"
-#include "Memory.h" // Ensure AlignedVector is included!
+#include "../Math.h"
+#include "../Memory.h" // Ensure AlignedVector is included!
 
 #include <vector>
 #include <execution>
