@@ -12,6 +12,7 @@
 #include <algorithm>   // Required for std::min, std::copy, std::swap
 #include <utility>     // Required for std::swap (in some compilers)
 #include <numeric>     // Standard header for std::reduce algorithms
+#include <bit>         // Required for std::bit_cast
 
 #if __has_include(<inplace_vector>)
     /*
@@ -1107,27 +1108,7 @@ public:
             Vector3D b(0.0f, 1.0f, 0.0f);
             Vector3D c = a + (b * 5.0f); // Completely optimized into registers by the compiler
         */
-        // Anonymous union allows you to access data via names (x,y,z) OR directly as an SSE register (__m128), OR as a float array.
-        union {
-            __m128 reg;
-            struct { float x, y, z, w; };
-        };
-
-        // --- HOMOGENEOUS COORDINATE ENFORCEMENT ---
-
-        // Forces W = 0.0f (Treats the vector as a Direction/Normal)
-        // Mask 0x08 (binary 1000) tells the hardware: 
-        // "Take X, Y, Z from 'reg', take W from the zero vector."
-        FORCE_INLINE Vector3D asDirection() const {
-            return Vector3D(_mm_blend_ps(reg, _mm_setzero_ps(), 0x08));
-        }
-
-        // Forces W = 1.0f (Treats the vector as a Position/Point in space)
-        // We blend our register with a vector containing 1.0f in the W lane.
-        FORCE_INLINE Vector3D asPoint() const {
-            __m128 wOne = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f); // Setps takes (W, Z, Y, X)
-            return Vector3D(_mm_blend_ps(reg, wOne, 0x08));
-        }
+        __m128 reg;
 
         // Default constructor (Zero initialization)
         FORCE_INLINE Vector3D() : reg(_mm_setzero_ps()) {}
@@ -1140,6 +1121,76 @@ public:
 
         // Constructor directly from SSE register (Crucial for fast operators)
         FORCE_INLINE Vector3D(__m128 m) : reg(m) {}
+
+        // ======================================================================
+        // 1. HARDWARE GETTERS (Zero Memory Access)
+        // ======================================================================
+        // Extracts the float directly from the XMM register. 
+        // This API change means you will call `v.x()` instead of `v.x`.
+        
+        // X is in the lowest 32 bits, so we just convert scalar.
+        FORCE_INLINE float x() const { 
+            return _mm_cvtss_f32(reg); 
+        }
+        
+        // Y, Z, and W require a 1-cycle shuffle to move them to the lowest 32 bits before extraction.
+        FORCE_INLINE float y() const { 
+            return _mm_cvtss_f32(_mm_shuffle_ps(reg, reg, _MM_SHUFFLE(1, 1, 1, 1))); 
+        }
+        
+        FORCE_INLINE float z() const { 
+            return _mm_cvtss_f32(_mm_shuffle_ps(reg, reg, _MM_SHUFFLE(2, 2, 2, 2))); 
+        }
+        
+        FORCE_INLINE float w() const { 
+            return _mm_cvtss_f32(_mm_shuffle_ps(reg, reg, _MM_SHUFFLE(3, 3, 3, 3))); 
+        }
+
+        // ======================================================================
+        // 2. HARDWARE SETTERS (SSE4.1)
+        // ======================================================================
+        // Allows mutation without spilling the register to the stack.
+        
+        FORCE_INLINE void setX(float val) {
+            // _mm_move_ss replaces the lowest 32-bits (X) and keeps the high 96-bits intact.
+            reg = _mm_move_ss(reg, _mm_set_ss(val));
+        }
+
+        FORCE_INLINE void setY(float val) {
+            // _mm_insert_ps takes the source value and inserts it into a specific lane.
+            // 0x10 = Source Index 0, Destination Index 1 (Y)
+            reg = _mm_insert_ps(reg, _mm_set_ss(val), 0x10);
+        }
+
+        FORCE_INLINE void setZ(float val) {
+            // 0x20 = Source Index 0, Destination Index 2 (Z)
+            reg = _mm_insert_ps(reg, _mm_set_ss(val), 0x20);
+        }
+
+        FORCE_INLINE void setW(float val) {
+            // 0x30 = Source Index 0, Destination Index 3 (W)
+            reg = _mm_insert_ps(reg, _mm_set_ss(val), 0x30);
+        }
+
+        // ======================================================================
+        // 3. C++20 ZERO-COST MEMORY BRIDGE
+        // ======================================================================
+        // If you need to interface with OpenGL/Vulkan APIs or loop through the 
+        // vector like an array, std::bit_cast is perfectly standard compliant.
+        // It guarantees the exact same zero-overhead assembly as the old union hack.
+        
+        FORCE_INLINE std::array<float, 4> asArray() const {
+            return std::bit_cast<std::array<float, 4>>(reg);
+        }
+
+        // --- AXIS INDEXING ---
+        // Safely extracts X (0), Y (1), Z (2), or W (3) dynamically without breaking strict aliasing.
+        FORCE_INLINE float operator[](int axis) const {
+            // We use std::bit_cast (C++20) to treat the register as a safe array 
+            // entirely on the stack, allowing dynamic indexing without UB.
+            auto arr = std::bit_cast<std::array<float, 4>>(reg);
+            return arr[axis];
+        }
 
         // --- MATHEMATICAL OPERATORS ---
         // By returning by value, the compiler uses Return Value Optimization (RVO).
@@ -1176,6 +1227,22 @@ public:
             __m128 tmp3 = _mm_shuffle_ps(other.reg, other.reg, _MM_SHUFFLE(3, 0, 2, 1));
 
             return Vector3D(_mm_sub_ps(_mm_mul_ps(tmp0, tmp1), _mm_mul_ps(tmp2, tmp3)));
+        }
+
+        // --- HOMOGENEOUS COORDINATE ENFORCEMENT ---
+
+        // Forces W = 0.0f (Treats the vector as a Direction/Normal)
+        // Mask 0x08 (binary 1000) tells the hardware: 
+        // "Take X, Y, Z from 'reg', take W from the zero vector."
+        FORCE_INLINE Vector3D asDirection() const {
+            return Vector3D(_mm_blend_ps(reg, _mm_setzero_ps(), 0x08));
+        }
+
+        // Forces W = 1.0f (Treats the vector as a Position/Point in space)
+        // We blend our register with a vector containing 1.0f in the W lane.
+        FORCE_INLINE Vector3D asPoint() const {
+            __m128 wOne = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f); // Setps takes (W, Z, Y, X)
+            return Vector3D(_mm_blend_ps(reg, wOne, 0x08));
         }
     };
 
