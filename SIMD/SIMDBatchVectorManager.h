@@ -3,6 +3,7 @@
 #include "../Math.h"
 #include "../Memory.h" // Ensure AlignedVector is included!
 #include "AVX-512/SIMDVectorAVX512.h"
+#include "AVX-256/SIMDVectorAVX256.h"
 
 #include <vector>
 #include <execution>
