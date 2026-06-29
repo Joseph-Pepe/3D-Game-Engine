@@ -526,6 +526,7 @@
                 
                 // Only apply physics if the neighbor's index is strictly greater than i
                 auto validCollisionMask = spatialMask && (absoluteJ > static_cast<uint32_t>(i));
+                // auto validCollisionMask = spatialMask && (absoluteJ > i).cast_to<float>();
 
                 // --- SIMD PENETRATION RESOLUTION ---
                 // If validCollisionMask is false, we set distSq to diameterSq so 
