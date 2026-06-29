@@ -34,7 +34,7 @@ extern "C" void* SwapContext(void** current_rsp, void* target_rsp);
 // The Job System needs the fast PRNG from Math.h for the work-stealing logic!
 #include "Math.h"
 #include "FixedFunction.h"
-#include "RandGenMath.h"
+#include "RandGenMap.h"
 
 // ==================================================================================
 // CROSS-PLATFORM CACHE LINE ALIGNMENT
