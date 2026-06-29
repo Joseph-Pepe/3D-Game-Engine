@@ -551,6 +551,56 @@ namespace Engine::ISAArch {
         friend inline simd floor(const simd& a) requires std::is_floating_point_v<T> { return simd(Traits::floor(a.m_data)); }
         friend inline simd ceil(const simd& a) requires std::is_floating_point_v<T> { return simd(Traits::ceil(a.m_data)); }
 
+        // =======================================================================
+        // VECTORIZED TRIGONOMETRY (MINIMAX POLYNOMIAL APPROX & HORNER'S METHOD)
+        // =======================================================================
+        /*
+            - Estimates a curve using a 9th degree polynomial.
+            - Used to animate thousands of skeletal meshes, calculate camera FOV projections, or generate procedural wind for foliage.
+            - Used to simulate ocean waves, or project 3D coordinates onto a 2D screen.
+            - Sine and Cosine are needed.
+        */
+        
+        friend inline simd sin(const simd& x) requires std::is_floating_point_v<T> {
+            // 1. Core Constants
+            const simd INV_TWO_PI(0.159154943f);
+            const simd TWO_PI(6.283185307f);
+            
+            // Minimax Polynomial Coefficients for [-PI, PI]
+            const simd C1(-0.1666666716f); // -1/3!
+            const simd C2(0.0083333310f);  //  1/5!
+            const simd C3(-0.0001984087f); // -1/7!
+            const simd C4(0.0000027525f);  //  1/9!
+
+            // 2. Range Reduction
+            // Map the arbitrary angle 'x' perfectly into the [-PI, PI] window.
+            // Math: cycles = floor((x / 2PI) + 0.5)
+            simd cycles = floor(fma(x, INV_TWO_PI, simd(0.5f)));
+            
+            // Math: x_wrapped = x - (cycles * 2PI)
+            // We use FMA to subtract without losing precision: x_wrapped = fma(cycles, -2PI, x)
+            simd x_wrapped = fma(cycles, simd(-6.283185307f), x);
+
+            // 3. Prepare x^2 for the polynomial
+            simd x2 = x_wrapped * x_wrapped;
+
+            // 4. Horner's Method Evaluation (4 FMA instructions!)
+            // Evaluates: P = C1 + x^2(C2 + x^2(C3 + x^2 * C4))
+            simd poly = fma(x2, C4, C3);
+            poly = fma(x2, poly, C2);
+            poly = fma(x2, poly, C1);
+
+            // 5. Final Assembly: sin(x) = x + (x * x^2 * P)
+            return fma(x_wrapped * x2, poly, x_wrapped);
+        }
+
+        // Cosine is just a phase-shifted Sine wave! 
+        // We add PI/2 and feed it right back into our vectorized Sine function.
+        friend inline simd cos(const simd& x) requires std::is_floating_point_v<T> {
+            const simd HALF_PI(1.570796326f);
+            return sin(x + HALF_PI);
+        }
+
         // --- C++26 OPERATORS (HIDDEN FRIENDS) ---
         // Using friends prevents ambiguous overload resolution and ensures identical inline compilation
 
