@@ -64,6 +64,19 @@ namespace Engine::ISAArch {
             static inline register_type mul(register_type a, register_type b) { return _mm256_mul_ps(a, b); }
             static inline register_type sub(register_type a, register_type b) { return _mm256_sub_ps(a, b); }
             static inline register_type div(register_type a, register_type b) { return _mm256_div_ps(a, b); }
+
+            static inline register_type min(register_type a, register_type b) { return _mm256_min_ps(a, b); }
+            static inline register_type max(register_type a, register_type b) { return _mm256_max_ps(a, b); }
+
+            static inline register_type rsqrt(register_type a) { return _mm256_rsqrt_ps(a); } // 1 / sqrt(x)
+            static inline register_type rcp(register_type a) { return _mm256_rcp_ps(a); }     // 1 / x
+
+            static inline register_type abs(register_type a) { 
+                // Clear the sign bit using bitwise AND
+                return _mm256_and_ps(a, _mm256_castsi256_ps(_mm256_set1_epi32(0x7FFFFFFF))); 
+            }
+            static inline register_type floor(register_type a) { return _mm256_floor_ps(a); }
+            static inline register_type ceil(register_type a) { return _mm256_ceil_ps(a); }
             
             // Relational Intrinsic
             static inline mask_type cmp_gt(register_type a, register_type b) { return _mm256_cmp_ps(a, b, _CMP_GT_OQ); }
@@ -114,6 +127,13 @@ namespace Engine::ISAArch {
                 
                 return _mm_cvtss_f32(sums);
             }
+
+            static inline bool mask_any(mask_type a) { 
+                return _mm256_movemask_ps(_mm256_castsi256_ps(a)) != 0; 
+            }
+            static inline bool mask_all(mask_type a) { 
+                return _mm256_movemask_ps(_mm256_castsi256_ps(a)) == 0xFF; 
+            }
         };
 
         // --- AVX2 UINT32 TRAITS ---
@@ -130,6 +150,9 @@ namespace Engine::ISAArch {
             static inline register_type add(register_type a, register_type b) { return _mm256_add_epi32(a, b); }
             static inline register_type sub(register_type a, register_type b) { return _mm256_sub_epi32(a, b); }
             static inline register_type mul(register_type a, register_type b) { return _mm256_mullo_epi32(a, b); }
+
+            static inline register_type min(register_type a, register_type b) { return _mm256_min_epu32(a, b); }
+            static inline register_type max(register_type a, register_type b) { return _mm256_max_epu32(a, b); }
 
             // Bitwise Math (Required for your expandBits_SIMD function)
             static inline register_type bit_or(register_type a, register_type b) { return _mm256_or_si256(a, b); }
@@ -163,6 +186,13 @@ namespace Engine::ISAArch {
                 
                 return _mm_cvtsi128_si32(sums);
             }
+
+            static inline bool mask_any(mask_type a) { 
+                return _mm256_movemask_ps(_mm256_castsi256_ps(a)) != 0; 
+            }
+            static inline bool mask_all(mask_type a) { 
+                return _mm256_movemask_ps(_mm256_castsi256_ps(a)) == 0xFF; 
+            }
         };
 
         // --- NEON BACKEND (Nintendo Switch 2, Apple Silicon) ---
@@ -179,6 +209,16 @@ namespace Engine::ISAArch {
             static inline register_type mul(register_type a, register_type b) { return vmulq_f32(a, b); }
             static inline register_type sub(register_type a, register_type b) { return vsubq_f32(a, b); }
             static inline register_type div(register_type a, register_type b) { return vdivq_f32(a, b); }
+
+            static inline register_type min(register_type a, register_type b) { return vminq_f32(a, b); }
+            static inline register_type max(register_type a, register_type b) { return vmaxq_f32(a, b); }
+
+            static inline register_type rsqrt(register_type a) { return vrsqrteq_f32(a); }
+            static inline register_type rcp(register_type a) { return vrecpeq_f32(a); }
+
+            static inline register_type abs(register_type a) { return vabsq_f32(a); }
+            static inline register_type floor(register_type a) { return vrndmq_f32(a); } // Round towards Minus infinity
+            static inline register_type ceil(register_type a) { return vrndpq_f32(a); }  // Round towards Plus infinity
             
             static inline mask_type cmp_gt(register_type a, register_type b) { return vcgtq_f32(a, b); }
             static inline mask_type cmp_lt(register_type a, register_type b) { return vcltq_f32(a, b); }
@@ -212,6 +252,15 @@ namespace Engine::ISAArch {
             static inline float reduce_add(register_type a) {
                 return vaddvq_f32(a); 
             }
+
+            static inline bool mask_any(mask_type a) { 
+                // If the maximum value across the vector is > 0, at least one lane is true
+                return vmaxvq_u32(a) > 0; 
+            }
+            static inline bool mask_all(mask_type a) { 
+                // If the minimum value across the vector is > 0, all lanes are true
+                return vminvq_u32(a) > 0; 
+            }
         };
 
         // --- NEON UINT32 TRAITS ---
@@ -228,6 +277,9 @@ namespace Engine::ISAArch {
             static inline register_type add(register_type a, register_type b) { return vaddq_u32(a, b); }
             static inline register_type sub(register_type a, register_type b) { return vsubq_u32(a, b); }
             static inline register_type mul(register_type a, register_type b) { return vmulq_u32(a, b); }
+
+            static inline register_type min(register_type a, register_type b) { return vminq_f32(a, b); }
+            static inline register_type max(register_type a, register_type b) { return vmaxq_f32(a, b); }
             
             // Bitwise Math
             static inline register_type bit_or(register_type a, register_type b) { return vorrq_u32(a, b); }
@@ -252,6 +304,15 @@ namespace Engine::ISAArch {
             // Horizontal Integer Reduction
             static inline uint32_t reduce_add(register_type a) {
                 return vaddvq_u32(a); 
+            }
+
+            static inline bool mask_any(mask_type a) { 
+                // If the maximum value across the vector is > 0, at least one lane is true
+                return vmaxvq_u32(a) > 0; 
+            }
+            static inline bool mask_all(mask_type a) { 
+                // If the minimum value across the vector is > 0, all lanes are true
+                return vminvq_u32(a) > 0; 
             }
         };
     }
@@ -314,6 +375,10 @@ namespace Engine::ISAArch {
         inline simd_mask operator||(const simd_mask<U, Abi>& b) const {
             return simd_mask(Traits::mask_or(m_mask, b.template cast_to<T>().m_mask));
         }
+
+        friend inline bool any_of(const simd_mask& m) { return Traits::mask_any(m.m_mask); }
+        friend inline bool all_of(const simd_mask& m) { return Traits::mask_all(m.m_mask); }
+        friend inline bool none_of(const simd_mask& m) { return !Traits::mask_any(m.m_mask); }
     };
 
     // ==========================================
@@ -352,6 +417,17 @@ namespace Engine::ISAArch {
 
         // --- MEMORY STORE ---
         void copy_to(T* mem) const { Traits::store(mem, m_data); }
+
+        friend inline simd min(const simd& a, const simd& b) { return simd(Traits::min(a.m_data, b.m_data)); }
+        friend inline simd max(const simd& a, const simd& b) { return simd(Traits::max(a.m_data, b.m_data)); }
+        friend inline simd clamp(const simd& v, const simd& lo, const simd& hi) { return min(max(v, lo), hi); }
+
+        friend inline simd rsqrt(const simd& a) requires std::is_floating_point_v<T> { return simd(Traits::rsqrt(a.m_data)); }
+        friend inline simd rcp(const simd& a) requires std::is_floating_point_v<T> { return simd(Traits::rcp(a.m_data)); }
+
+        friend inline simd abs(const simd& a) requires std::is_floating_point_v<T> { return simd(Traits::abs(a.m_data)); }
+        friend inline simd floor(const simd& a) requires std::is_floating_point_v<T> { return simd(Traits::floor(a.m_data)); }
+        friend inline simd ceil(const simd& a) requires std::is_floating_point_v<T> { return simd(Traits::ceil(a.m_data)); }
 
         // --- C++26 OPERATORS (HIDDEN FRIENDS) ---
         // Using friends prevents ambiguous overload resolution and ensures identical inline compilation
@@ -481,7 +557,7 @@ namespace Engine::ISAArch {
         auto raw_cast = detail::simd_traits<FromType, Abi>::template cast_to<ToType>(from.native_handle());
         return simd<ToType, Abi>::from_native(raw_cast);
     }
-};
+}
 
 /*
 // Use the custom C++26-compliant wrapper
