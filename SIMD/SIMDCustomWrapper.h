@@ -134,6 +134,14 @@ namespace Engine::ISAArch {
             static inline bool mask_all(mask_type a) { 
                 return _mm256_movemask_ps(_mm256_castsi256_ps(a)) == 0xFF; 
             }
+
+            // Hardware Vector Swizzling (Symmetric across 128-bit lanes)
+            template <int i0, int i1, int i2, int i3>
+            static inline register_type shuffle(register_type a) {
+                // _MM_SHUFFLE natively expects indices in reverse order (z, y, x, w)
+                // Template parameters are compile-time constants, making this perfectly safe.
+                return _mm256_permute_ps(a, _MM_SHUFFLE(i3, i2, i1, i0));
+            }
         };
 
         // --- AVX2 UINT32 TRAITS ---
@@ -192,6 +200,13 @@ namespace Engine::ISAArch {
             }
             static inline bool mask_all(mask_type a) { 
                 return _mm256_movemask_ps(_mm256_castsi256_ps(a)) == 0xFF; 
+            }
+
+            // Hardware Vector Swizzling (Symmetric across 128-bit lanes)
+            template <int i0, int i1, int i2, int i3>
+            static inline register_type shuffle(register_type a) {
+                // AVX2 uses a dedicated integer shuffle instruction
+                return _mm256_shuffle_epi32(a, _MM_SHUFFLE(i3, i2, i1, i0));
             }
         };
 
@@ -261,6 +276,18 @@ namespace Engine::ISAArch {
                 // If the minimum value across the vector is > 0, all lanes are true
                 return vminvq_u32(a) > 0; 
             }
+
+            // Hardware Vector Swizzling
+            template <int i0, int i1, int i2, int i3>
+            static inline register_type shuffle(register_type a) {
+                // Both MSVC and Clang will aggressively fold this into a single instruction.
+                register_type res = vdupq_n_f32(0.0f); 
+                res = vsetq_lane_f32(vgetq_lane_f32(a, i0), res, 0);
+                res = vsetq_lane_f32(vgetq_lane_f32(a, i1), res, 1);
+                res = vsetq_lane_f32(vgetq_lane_f32(a, i2), res, 2);
+                res = vsetq_lane_f32(vgetq_lane_f32(a, i3), res, 3);
+                return res;
+            }
         };
 
         // --- NEON UINT32 TRAITS ---
@@ -313,6 +340,17 @@ namespace Engine::ISAArch {
             static inline bool mask_all(mask_type a) { 
                 // If the minimum value across the vector is > 0, all lanes are true
                 return vminvq_u32(a) > 0; 
+            }
+
+            // Hardware Vector Swizzling
+            template <int i0, int i1, int i2, int i3>
+            static inline register_type shuffle(register_type a) {
+                register_type res = vdupq_n_u32(0); 
+                res = vsetq_lane_u32(vgetq_lane_u32(a, i0), res, 0);
+                res = vsetq_lane_u32(vgetq_lane_u32(a, i1), res, 1);
+                res = vsetq_lane_u32(vgetq_lane_u32(a, i2), res, 2);
+                res = vsetq_lane_u32(vgetq_lane_u32(a, i3), res, 3);
+                return res;
             }
         };
     }
@@ -503,6 +541,31 @@ namespace Engine::ISAArch {
         friend inline simd operator<<(const simd& a, int shift) requires std::is_integral_v<T> {
             return simd(Traits::shift_l(a.m_data, shift));
         }
+
+        // ============================================
+        // VECTOR SWIZZLING & SHUFFLING (SOA -> AOS)
+        // ============================================
+        /*
+            - GPUs demands the AOS (Array of Structs) layout.
+            - This allows us to freely translate between SOA (Struct of Arrays) or physics and AOS (Array of Structs) for GPU buffer uploads without stalling the CPU.
+            - swizzle allows us to create a AOS vector and run horizontal dot products inside a single register, bypassing expensive memory extractions entirely.
+        */
+
+        // Usage: mySimd.swizzle<1, 0, 3, 2>();
+        template <int i0, int i1, int i2, int i3>
+        inline simd swizzle() const {
+            static_assert(i0 >= 0 && i0 < 4 && i1 >= 0 && i1 < 4 && i2 >= 0 && i2 < 4 && i3 >= 0 && i3 < 4, 
+                "Swizzle indices must be 0, 1, 2, or 3");
+
+            // Moves data horizontally across lanes (e.g., [x, y, z, w] to [y, x, w, z]) to perform matrix multiplication or dot products inside a single SIMD register.
+            return simd(Traits::template shuffle<i0, i1, i2, i3>(m_data));
+        }
+
+        // Common Engine Splats (Broadcast a single lane across the entire register)
+        inline simd splat_x() const { return swizzle<0, 0, 0, 0>(); }
+        inline simd splat_y() const { return swizzle<1, 1, 1, 1>(); }
+        inline simd splat_z() const { return swizzle<2, 2, 2, 2>(); }
+        inline simd splat_w() const { return swizzle<3, 3, 3, 3>(); }
     };
 
     // =========================================================
@@ -599,6 +662,31 @@ struct alignas(NATIVE_SIMD_BATCH_ALIGN) SIMDVector3D {
         Engine::ISAArch::where(!validMask, x) = 0.0f;
         Engine::ISAArch::where(!validMask, y) = 0.0f;
         Engine::ISAArch::where(!validMask, z) = 0.0f;
+    }
+};
+
+using NativeFloat = Engine::ISAArch::simd<float>;
+
+struct GPUVector4 {
+    NativeFloat data; // Holds [X, Y, Z, W] (and an identical second set on AVX2)
+    
+    // Fast Horizontal Dot Product inside a single register!
+    FORCE_INLINE NativeFloat dot(const GPUVector4& other) const {
+        // 1. Multiply the lanes vertically: [x1*x2, y1*y2, z1*z2, w1*w2]
+        NativeFloat xyzw = data * other.data;
+
+        // 2. Swizzle to swap adjacent pairs: [y1*y2, x1*x2, w1*w2, z1*z2]
+        NativeFloat yxwz = xyzw.swizzle<1, 0, 3, 2>();
+
+        // 3. Add them together: [(x+y), (x+y), (z+w), (z+w)]
+        NativeFloat sum1 = xyzw + yxwz;
+
+        // 4. Swizzle the upper half to the lower half: [(z+w), (z+w), (x+y), (x+y)]
+        NativeFloat zwxy = sum1.swizzle<2, 3, 0, 1>();
+
+        // 5. Final addition. Every lane now contains the full Dot Product result!
+        // [ (x+y+z+w), (x+y+z+w), (x+y+z+w), (x+y+z+w) ]
+        return sum1 + zwxy;
     }
 };
 */
