@@ -90,6 +90,26 @@ namespace Engine::ISAArch {
             }
             static inline mask_type mask_and(mask_type a, mask_type b) { return _mm256_and_ps(a, b); }
             static inline mask_type mask_or(mask_type a, mask_type b) { return _mm256_or_ps(a, b); }
+
+            // ============================================
+            // FLOATING-POINT BITWISE LOGIC
+            // ============================================
+            /*
+                - To negate a float, multiplying it by -1.0f routes the data through the CPUs floating-point multiplier (takes 4-5 clock cycles).
+                - Bitwise XOR the float with 0x80000000 (-0.0f in binary), instantly flips the sign bit in 1 clock cycle using the CPUs integer execution ports.
+            */
+
+            // Floating-Point Bitwise Logic (Engine Extension)
+            static inline register_type bit_xor(register_type a, register_type b) { return _mm256_xor_ps(a, b); }
+            static inline register_type bit_and(register_type a, register_type b) { return _mm256_and_ps(a, b); }
+            static inline register_type bit_or(register_type a, register_type b)  { return _mm256_or_ps(a, b); }
+
+            // Fast Unary Negation
+            static inline register_type negate(register_type a) {
+                // -0.0f evaluates to exactly 0x80000000. 
+                // XORing by this flips the sign bit on all 8 floats instantly.
+                return _mm256_xor_ps(a, _mm256_set1_ps(-0.0f)); 
+            }
             
             // Branchless Conditional Blending
             static inline register_type blend(mask_type mask, register_type true_v, register_type false_v) {
@@ -141,6 +161,11 @@ namespace Engine::ISAArch {
                 // _MM_SHUFFLE natively expects indices in reverse order (z, y, x, w)
                 // Template parameters are compile-time constants, making this perfectly safe.
                 return _mm256_permute_ps(a, _MM_SHUFFLE(i3, i2, i1, i0));
+            }
+
+            // Hardware Gather (Scale = 4 bytes per float)
+            static inline register_type gather(const float* base_addr, __m256i indices) {
+                return _mm256_i32gather_ps(base_addr, indices, 4); 
             }
         };
 
@@ -208,6 +233,12 @@ namespace Engine::ISAArch {
                 // AVX2 uses a dedicated integer shuffle instruction
                 return _mm256_shuffle_epi32(a, _MM_SHUFFLE(i3, i2, i1, i0));
             }
+
+            // Hardware Gather (Scale = 4 bytes per uint32)
+            static inline register_type gather(const uint32_t* base_addr, __m256i indices) {
+                // The intrinsic explicitly requires a const int* pointer
+                return _mm256_i32gather_epi32(reinterpret_cast<const int*>(base_addr), indices, 4); 
+            }
         };
 
         // --- NEON BACKEND (Nintendo Switch 2, Apple Silicon) ---
@@ -242,6 +273,23 @@ namespace Engine::ISAArch {
             static inline mask_type mask_not(mask_type a) { return vmvnq_u32(a); } // NEON Bitwise NOT
             static inline mask_type mask_and(mask_type a, mask_type b) { return vandq_u32(a, b); }
             static inline mask_type mask_or(mask_type a, mask_type b) { return vorrq_u32(a, b); }
+
+            // Floating-Point Bitwise Logic (Zero-cost reinterpret casting)
+            static inline register_type bit_xor(register_type a, register_type b) { 
+                return vreinterpretq_f32_u32(veorq_u32(vreinterpretq_u32_f32(a), vreinterpretq_u32_f32(b))); 
+            }
+            static inline register_type bit_and(register_type a, register_type b) { 
+                return vreinterpretq_f32_u32(vandq_u32(vreinterpretq_u32_f32(a), vreinterpretq_u32_f32(b))); 
+            }
+            static inline register_type bit_or(register_type a, register_type b) { 
+                return vreinterpretq_f32_u32(vorrq_u32(vreinterpretq_u32_f32(a), vreinterpretq_u32_f32(b))); 
+            }
+
+            // Fast Unary Negation
+            static inline register_type negate(register_type a) {
+                // ARM NEON natively has a dedicated float negate instruction!
+                return vnegq_f32(a); 
+            }
             
             static inline register_type blend(mask_type mask, register_type true_v, register_type false_v) {
                 return vbslq_f32(mask, true_v, false_v);
@@ -286,6 +334,26 @@ namespace Engine::ISAArch {
                 res = vsetq_lane_f32(vgetq_lane_f32(a, i1), res, 1);
                 res = vsetq_lane_f32(vgetq_lane_f32(a, i2), res, 2);
                 res = vsetq_lane_f32(vgetq_lane_f32(a, i3), res, 3);
+                return res;
+            }
+
+            // ========================================
+            // ARM NEON (AArch64)
+            // ========================================
+            /*
+                - ARM NEON does not have native 128-bit vector gather instruction.
+                - ARM SVE (Scalable Vector Extension) adds 128-bit vector gather instruction.
+                - We can emulate it.
+            */
+
+            // Emulated Hardware Gather
+            static inline register_type gather(const float* base_addr, uint32x4_t indices) {
+                register_type res = vdupq_n_f32(0.0f);
+                // Pointer arithmetic implicitly scales by 4 bytes (sizeof float)
+                res = vsetq_lane_f32(base_addr[vgetq_lane_u32(indices, 0)], res, 0);
+                res = vsetq_lane_f32(base_addr[vgetq_lane_u32(indices, 1)], res, 1);
+                res = vsetq_lane_f32(base_addr[vgetq_lane_u32(indices, 2)], res, 2);
+                res = vsetq_lane_f32(base_addr[vgetq_lane_u32(indices, 3)], res, 3);
                 return res;
             }
         };
@@ -350,6 +418,16 @@ namespace Engine::ISAArch {
                 res = vsetq_lane_u32(vgetq_lane_u32(a, i1), res, 1);
                 res = vsetq_lane_u32(vgetq_lane_u32(a, i2), res, 2);
                 res = vsetq_lane_u32(vgetq_lane_u32(a, i3), res, 3);
+                return res;
+            }
+
+            // Emulated Hardware Gather
+            static inline register_type gather(const uint32_t* base_addr, uint32x4_t indices) {
+                register_type res = vdupq_n_u32(0);
+                res = vsetq_lane_u32(base_addr[vgetq_lane_u32(indices, 0)], res, 0);
+                res = vsetq_lane_u32(base_addr[vgetq_lane_u32(indices, 1)], res, 1);
+                res = vsetq_lane_u32(base_addr[vgetq_lane_u32(indices, 2)], res, 2);
+                res = vsetq_lane_u32(base_addr[vgetq_lane_u32(indices, 3)], res, 3);
                 return res;
             }
         };
@@ -453,6 +531,12 @@ namespace Engine::ISAArch {
         // C++26 Memory Load (P1928 allows implicit load from memory)
         explicit simd(const T* mem) : m_data(Traits::load(mem)) {}
 
+        // --- NON-CONTIGUOUS MEMORY LOAD (GATHER) ---
+        // C++26 Hardware Gather Constructor.
+        // Takes a base pointer and a SIMD batch of array indices.
+        explicit simd(const T* base_addr, const simd<uint32_t, Abi>& indices) 
+            : m_data(Traits::gather(base_addr, indices.native_handle())) {}
+
         // --- MEMORY STORE ---
         void copy_to(T* mem) const { Traits::store(mem, m_data); }
 
@@ -527,17 +611,27 @@ namespace Engine::ISAArch {
             return Traits::reduce_add(a.m_data);
         }
 
-        // --- BITWISE MATH (Restricted to Integers) ---
+        // --- UNARY OPERATORS ---
+        friend inline simd operator-(const simd& a) {
+            return simd(Traits::negate(a.m_data));
+        }
 
-        // C++20 (Concpets): Add 'requires std::is_integral_v<T>' to the bitwise hidden friends to restrict bitwise math exclusively to integer types.
-        friend inline simd operator|(const simd& a, const simd& b) requires std::is_integral_v<T> {
+        // --- BITWISE MATH (floats for IEEE-754 manipulation) ---
+        friend inline simd operator^(const simd& a, const simd& b) {
+            return simd(Traits::bit_xor(a.m_data, b.m_data));
+        }
+
+        // UPDATE: Remove the 'requires std::is_integral_v' from AND and OR
+        friend inline simd operator|(const simd& a, const simd& b) {
             return simd(Traits::bit_or(a.m_data, b.m_data));
         }
 
-        friend inline simd operator&(const simd& a, const simd& b) requires std::is_integral_v<T> {
+        friend inline simd operator&(const simd& a, const simd& b) {
             return simd(Traits::bit_and(a.m_data, b.m_data));
         }
 
+        // C++20 (Concpets): Add 'requires std::is_integral_v<T>' to the bitwise hidden friends to restrict bitwise math exclusively to integer types.
+        // KEEP the restriction on bit-shifts! Shifting a float destroys the exponent (ruins IEEE 754 layout).
         friend inline simd operator<<(const simd& a, int shift) requires std::is_integral_v<T> {
             return simd(Traits::shift_l(a.m_data, shift));
         }
@@ -689,4 +783,68 @@ struct GPUVector4 {
         return sum1 + zwxy;
     }
 };
+
+using NativeFloat = Engine::ISAArch::simd<float>;
+using NativeUInt  = Engine::ISAArch::simd<uint32_t>;
+
+// The dense, contiguous arrays containing all transforms in the level
+float* globalPosX; 
+float* globalPosY;
+float* globalPosZ;
+
+// The scattered array of Entity IDs currently standing inside the trigger box
+uint32_t* activeEntityIDs;
+size_t activeCount;
+
+void ApplyGravityToTriggerBox(float gravity, float dt) {
+    NativeFloat gravityStep = gravity * dt;
+
+    // Loop through the active entities in SIMD batches
+    for (size_t i = 0; i < activeCount; i += NativeFloat::size()) {
+        
+        // 1. Load a batch of 8 scattered Entity IDs (e.g., [4, 102, 59, 881...])
+        NativeUInt entityIndices(&activeEntityIDs[i]);
+
+        // 2. THE GATHER: Instantly pluck the scattered X, Y, and Z coordinates from memory
+        // and pack them perfectly into your SIMD registers.
+        NativeFloat posX(globalPosX, entityIndices);
+        NativeFloat posY(globalPosY, entityIndices);
+        NativeFloat posZ(globalPosZ, entityIndices);
+
+        // 3. Process the math (Apply gravity to the Z axis)
+        posZ -= gravityStep;
+
+        // 4. Write back to memory
+        // (Note: Hardware "Scatter" is not widely supported on AVX2, so we 
+        // flush the results back to the scattered addresses via scalar memory stores).
+        alignas(32) float tempZ[NativeFloat::size()];
+        alignas(32) uint32_t tempIndices[NativeUInt::size()];
+        
+        posZ.copy_to(tempZ);
+        entityIndices.copy_to(tempIndices);
+
+        for (int lane = 0; lane < NativeFloat::size(); ++lane) {
+            globalPosZ[tempIndices[lane]] = tempZ[lane];
+        }
+    }
+}
+
+using NativeFloat = Engine::ISAArch::simd<float>;
+
+// By allowing floating-point values to interact with standard (^, &, |) operators, we are effectively letting your gameplay programmers act like compiler engineers, manipulating pure binary with the safety of C++ types.
+FORCE_INLINE NativeFloat GetSafeInverseRayDirection(const NativeFloat& dir) {
+    // 1. Create a mask of the lanes that are exactly 0.0f
+    auto isZero = (dir == NativeFloat(0.0f));
+
+    // 2. Instead of branching, we force the 0.0f lanes to become a tiny number.
+    NativeFloat safeDir = dir;
+    
+    // 3. We use our proxy to assign a tiny non-zero float to the empty lanes.
+    // BUT we want to preserve the sign (positive zero vs negative zero).
+    // Using bitwise XOR logic, we can flip signs perfectly without multiplication!
+    Engine::ISAArch::where(isZero, safeDir) = 1e-8f; 
+
+    // 4. Safe hardware reciprocal (1.0 / safeDir)
+    return Engine::ISAArch::rcp(safeDir);
+}
 */
