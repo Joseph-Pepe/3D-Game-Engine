@@ -10,18 +10,19 @@
 #include "Math.h"
 #include "BVHGrid.h"
 #include "GPURHI.h"
+#include "STLContainers/InplaceVector.h"
 
-#if __has_include(<inplace_vector>)
-    /*
-        // Replaces (std::vector). Zero heap allocations. Data is perfectly contiguous on the stack.
-        // Extremely cache friendly for your SIMD wrappers.
-        std::inplace_vector<Vector3D, 64> localCluster;
-    */
-    #include <inplace_vector> // C++26 API provides a vector that stores data locally without ever touching the heap allocator.
-    #define ENGINE_HAS_CXX26_INPLACE_VECTOR 1
-#else
-    #define ENGINE_HAS_CXX26_INPLACE_VECTOR 0
-#endif
+// #if __has_include(<inplace_vector>)
+//     /*
+//         // Replaces (std::vector). Zero heap allocations. Data is perfectly contiguous on the stack.
+//         // Extremely cache friendly for your SIMD wrappers.
+//         std::inplace_vector<Vector3D, 64> localCluster;
+//     */
+//     #include <inplace_vector> // C++26 API provides a vector that stores data locally without ever touching the heap allocator.
+//     #define ENGINE_HAS_CXX26_INPLACE_VECTOR 1
+// #else
+//     #define ENGINE_HAS_CXX26_INPLACE_VECTOR 0
+// #endif
 
 #if __has_include(<meta>) && (defined(__cplusplus) && __cplusplus > 202302L || defined(_MSVC_LANG) && _MSVC_LANG > 202302L)
     #include <meta>        // Required for C++26 reflection
@@ -705,15 +706,19 @@ public:
 class CinematicTrackController {
 private:
     // C++26 (std::inplace_vector): Stored directly on the stack/arena. Zero heap fragmentation. Replaces std::vector
-    #if ENGINE_HAS_CXX26_INPLACE_VECTOR
-        // Specify the maximum number of waypoints (e.g., 64). This pre-allocates exactly 1024 bytes (64 * 16 bytes) directly inside the class footprint.
-        std::inplace_vector<Vector3DStack, 64> controlPoints;
-        std::inplace_vector<Vector3DStack, 64> lookAtTargets;
-    #else
-        // Kept as Vector3DStack because CatmullRom uses heavy vector math operations where SSE acceleration actually benefits the 4-point polynomial evaluation.
-        std::vector<Vector3DStack> controlPoints;
-        std::vector<Vector3DStack> lookAtTargets;
-    #endif
+    // #if ENGINE_HAS_CXX26_INPLACE_VECTOR
+    //     // Specify the maximum number of waypoints (e.g., 64). This pre-allocates exactly 1024 bytes (64 * 16 bytes) directly inside the class footprint.
+    //     std::inplace_vector<Vector3DStack, 64> controlPoints;
+    //     std::inplace_vector<Vector3DStack, 64> lookAtTargets;
+    // #else
+    //     // Kept as Vector3DStack because CatmullRom uses heavy vector math operations where SSE acceleration actually benefits the 4-point polynomial evaluation.
+    //     std::vector<Vector3DStack> controlPoints;
+    //     std::vector<Vector3DStack> lookAtTargets;
+    // #endif
+
+    // Guaranteed zero-allocation stack storage using our custom C++26 engine container
+    Engine::STLContainer::inplace_vector<Vector3DStack, 64> controlPoints;
+    Engine::STLContainer::inplace_vector<Vector3DStack, 64> lookAtTargets;
 
     float currentProgress = 0.0f;  // Global timeline progress (0.0 to 1.0)
     float traversalSpeed = 0.1f;   // Percentage of track completed per second
@@ -1000,7 +1005,7 @@ public:
     // Performance Optimization: Cache-friendly processing loop
     void Update(
         const Vector3D& playerPosition,
-        const std::inplace_vector<CinematicZoneComponent, 32>& activeZones,
+        const Engine::STLContainer::inplace_vector<CinematicZoneComponent, 32>& activeZones,
         CameraComponent& outCamera,
         float deltaTime)
     {
@@ -1177,7 +1182,7 @@ public:
     // Fully SIMD accelerated zone parsing logic
     void Update(
         const Vector3D& playerPosition,
-        const std::inplace_vector<CinematicZoneComponent, 32>& levelZones,
+        const Engine::STLContainer::inplace_vector<CinematicZoneComponent, 32>& levelZones,
         CameraComponent& outCamera,
         float deltaTime) noexcept 
     {
