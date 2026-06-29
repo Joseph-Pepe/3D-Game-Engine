@@ -15,6 +15,8 @@
 #include "SIMD/AVX-256/SIMDVectorAVX256.h"
 #include "Hardware.h"  // For AVX availability checks
 #include "EngineSettings.h"
+#include "MortonCode.h"
+
 
 // Cross-platform restrict macro for pointer aliasing guarantees
 #if defined(_MSC_VER)
