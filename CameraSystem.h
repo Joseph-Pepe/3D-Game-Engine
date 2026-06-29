@@ -50,6 +50,26 @@
     - P(t) = (1/2) (2P_1 + t(-P_0 + P_2) + t^2(2P_0 - 5P_1 + 4P_2 - P_3) + t^3(-P_0 + 3P_1 - 3P_2 + P_3)), where it evaluates 4 points (P_0, P_1, P_2, P_3)
 */
 
+// --- MATH UTILITIES FOR CAMERA PATHING (SPLINES & LINEAR ALGEBRA) ---
+FORCE_INLINE Vector3DStack Lerp(const Vector3DStack& a, const Vector3DStack& b, float t) {
+    // V = A + t * (B - A)
+    return a + ((b - a) * t);
+}
+
+FORCE_INLINE Vector3DStack CatmullRom(const Vector3DStack& p0, const Vector3DStack& p1, 
+                                      const Vector3DStack& p2, const Vector3DStack& p3, float t) {
+    float t2 = t * t;
+    float t3 = t2 * t;
+
+    // Evaluates in a few CPU cycles using standard ALUs
+    Vector3DStack v0 = p1 * 2.0f;
+    Vector3DStack v1 = (p2 - p0) * t;
+    Vector3DStack v2 = (p0 * 2.0f - p1 * 5.0f + p2 * 4.0f - p3) * t2;
+    Vector3DStack v3 = (p1 * 3.0f - p0 - p2 * 3.0f + p3) * t3;
+
+    return (v0 + v1 + v2 + v3) * 0.5f;
+}
+
 // Strongly typed movement strictly prevents invalid input
 // enum class CameraMove {
 //     FORWARD, BACKWARD, LEFT, RIGHT, UP, DOWN
