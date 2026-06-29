@@ -296,5 +296,96 @@ namespace Engine::STLContainer {
             }
             m_size = 0;
         }
+
+        // --- FAST ENGINE ERASURE (O(1)) ---
+        // Overwrites the target element with the last element in the array, then pops the back. Destroys the original ordering of the array.
+        // Game Engine: We don't really care about maintaining the order of an array when killing a particle or destroying an entity.
+        constexpr void erase_unsorted(const_iterator pos) {
+            iterator it = const_cast<iterator>(pos);
+            ENGINE_ASSERT(it >= begin() && it < end() && "erase_unsorted iterator out of bounds!");
+            
+            // If it's not the very last element, move the last element into this spot
+            if (it != end() - 1) {
+                *it = std::move(back()); 
+            }
+            
+            pop_back(); // Handles the destruction and size decrement safely
+        }
+        
+        constexpr void erase_unsorted_by_index(size_type index) {
+            ENGINE_ASSERT(index < m_size && "erase_unsorted index out of bounds!");
+            if (index != m_size - 1) {
+                m_storage.m_data[index] = std::move(back());
+            }
+            pop_back();
+        }
+
+        // --- BULK SIZING ---
+        
+        // Bypasses all constructors. Extremely dangerous but incredibly fast.
+        // Use ONLY when passing the buffer to a C-API (like Vulkan, DirectX, or File I/O) that will immediately overwrite the memory.
+        constexpr void resize_uninitialized(size_type new_size) noexcept {
+            static_assert(std::is_trivially_constructible_v<T>, "resize_uninitialized is only safe for trivial types (POD)!");
+            ENGINE_ASSERT(new_size <= Capacity && "resize_uninitialized exceeds capacity!");
+            // ENGINE_ASSUME helps the optimizer know m_size is now exactly new_size
+            m_size = new_size; 
+            ENGINE_ASSUME(m_size == new_size);
+        }
+
+        // Standard resize (safe)
+        constexpr void resize(size_type new_size) {
+            ENGINE_ASSERT(new_size <= Capacity && "resize exceeds capacity!");
+            if (new_size > m_size) {
+                // Grow and default construct
+                for (size_type i = m_size; i < new_size; ++i) {
+                    std::construct_at(&m_storage.m_data[i]);
+                }
+            } else if (new_size < m_size) {
+                // Shrink and destroy in reverse order
+                if constexpr (!std::is_trivially_destructible_v<T>) {
+                    for (size_type i = m_size; i > new_size; --i) {
+                        std::destroy_at(&m_storage.m_data[i - 1]);
+                    }
+                }
+            }
+            m_size = new_size;
+        }
+
+        // --- STANDARD ORDERED MODIFIERS (O(N)) ---
+        
+        constexpr iterator erase(const_iterator pos) {
+            iterator it = const_cast<iterator>(pos);
+            ENGINE_ASSERT(it >= begin() && it < end() && "erase iterator out of bounds!");
+            
+            // Shift everything left by 1
+            if (it + 1 < end()) {
+                std::move(it + 1, end(), it);
+            }
+            
+            pop_back();
+            return it;
+        }
+
+        constexpr iterator insert(const_iterator pos, const T& value) {
+            iterator it = const_cast<iterator>(pos);
+            ENGINE_ASSERT(it >= begin() && it <= end() && "insert iterator out of bounds!");
+            ENGINE_ASSERT(m_size < Capacity && "insert overflow, capacity exceeded!");
+
+            if (it == end()) {
+                push_back(value);
+                return end() - 1;
+            }
+
+            // Construct a dummy element at the end to extend the active lifetime area safely
+            std::construct_at(&m_storage.m_data[m_size], std::move(back()));
+            ++m_size;
+
+            // Shift everything right by 1
+            std::move_backward(it, end() - 2, end() - 1);
+            
+            // Insert the new value
+            *it = value;
+            return it;
+        }
     };
 } 
