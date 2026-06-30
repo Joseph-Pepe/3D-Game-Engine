@@ -123,6 +123,22 @@ struct alignas(16) Quaternion {
     FORCE_INLINE float z() const { return _mm_cvtss_f32(_mm_shuffle_ps(reg, reg, _MM_SHUFFLE(2, 2, 2, 2))); }
     FORCE_INLINE float w() const { return _mm_cvtss_f32(_mm_shuffle_ps(reg, reg, _MM_SHUFFLE(3, 3, 3, 3))); }
 
+    // --- DIRECTIONAL VECTOR ACCESSORS ---
+    // Returns the normalized forward vector (assuming -Z is forward)
+    FORCE_INLINE Vector3D GetForwardVector() const {
+        return RotateVector(Vector3D(0.0f, 0.0f, -1.0f, 0.0f));
+    }
+
+    // Returns the normalized right vector (+X)
+    FORCE_INLINE Vector3D GetRightVector() const {
+        return RotateVector(Vector3D(1.0f, 0.0f, 0.0f, 0.0f));
+    }
+
+    // Returns the normalized up vector (+Y)
+    FORCE_INLINE Vector3D GetUpVector() const {
+        return RotateVector(Vector3D(0.0f, 1.0f, 0.0f, 0.0f));
+    }
+
     // --- ANGLE AXIS CONVERSION ---
     // This is the ONLY time we use Trigonometry. Used when converting mouse/keyboard input to a rotation.
     static FORCE_INLINE Quaternion AngleAxis(float angleDegrees, const Vector3D& axis) {
