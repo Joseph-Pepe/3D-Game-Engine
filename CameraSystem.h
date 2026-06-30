@@ -57,6 +57,12 @@ FORCE_INLINE Vector3DStack Lerp(const Vector3DStack& a, const Vector3DStack& b, 
     return a + ((b - a) * t);
 }
 
+// 128-bit SIMD Lerp
+FORCE_INLINE Vector3D Lerp(const Vector3D& a, const Vector3D& b, float t) {
+    // V = A + t * (B - A)
+    return a + ((b - a) * t);
+}
+
 FORCE_INLINE Vector3DStack CatmullRom(const Vector3DStack& p0, const Vector3DStack& p1, 
                                       const Vector3DStack& p2, const Vector3DStack& p3, float t) {
     float t2 = t * t;
