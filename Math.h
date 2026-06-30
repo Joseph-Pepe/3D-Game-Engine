@@ -191,6 +191,19 @@ public:
         reg = _mm_insert_ps(reg, _mm_set_ss(val), 0x30);
     }
 
+    // --- SIMD LINEAR INTERPOLATION ---
+    // V = a + t * (b - a)
+    static FORCE_INLINE Vector3D Lerp(const Vector3D& a, const Vector3D& b, float t) {
+        // Broadcast the scalar 't' across all 4 lanes of a register
+        __m128 tReg = _mm_set1_ps(t);
+        
+        // Calculate the difference: (b - a)
+        __m128 diff = _mm_sub_ps(b.reg, a.reg);
+        
+        // Fused Multiply-Add: diff * t + a
+        return Vector3D(_mm_fmadd_ps(diff, tReg, a.reg));
+    }
+
     // ======================================================================
     // 3. C++20 ZERO-COST MEMORY BRIDGE
     // ======================================================================
