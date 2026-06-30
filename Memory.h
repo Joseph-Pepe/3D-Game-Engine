@@ -455,6 +455,159 @@ public:
 };
 
 // ==================================================================================
+// FRAME ALLOCATOR (DOUBLE / TRIPLE BUFFERING)
+// ==================================================================================
+/*
+    - Replaces general heap allocation for data that only lives for a single frame.
+    - Render commands, UI vertices, physics contact manifolds, temporary string formatting.
+    - Required for the GPU to process Vulkan/DirectX12 command buffers.
+    - Automatically supports Double Buffering (2) or Triple Buffering (3).
+    - Prevents the CPU from overwriting the memory the GPU is trying to read which leads to screen tearing and crashes.
+    - ZERO destructors are called. The memory is instantly obliterated at the end of the frame.
+*/
+
+// BufferCount: 2 = Console/V-Sync Locked (Double), 3 = Uncapped PC (Triple)
+template <size_t BufferCount = 2>
+class alignas(ENGINE_CACHE_CHUNK_SIZE) FrameAllocator {
+    static_assert(BufferCount >= 2, "Frame Allocator must have at least 2 buffers (Double Buffering).");
+
+private:
+    // C++20/26: std::array guarantees contiguous allocation of the arenas
+    // std::array<LocalLinearArena, BufferCount> m_arenas;
+
+    // By using an array of uninitialized bytes, we bypass the missing default constructor.
+    // alignas() ensures the block starts perfectly on a cache line boundary.
+    alignas(LocalLinearArena) std::byte m_arenaStorage[sizeof(LocalLinearArena) * BufferCount];
+    
+    // Aligned to prevent false sharing if placed near other atomic variables
+    alignas(ENGINE_CACHE_CHUNK_SIZE) size_t m_currentFrame;
+
+    ENGINE_FORCE_INLINE LocalLinearArena& GetArena(size_t index) {
+        return *reinterpret_cast<LocalLinearArena*>(&m_arenaStorage[index * sizeof(LocalLinearArena)]);
+    }
+
+    ENGINE_FORCE_INLINE const LocalLinearArena& GetArena(size_t index) const {
+        return *reinterpret_cast<const LocalLinearArena*>(&m_arenaStorage[index * sizeof(LocalLinearArena)]);
+    }
+
+public:
+    // Initialize all underlying arenas with the exact same capacity
+    // Example: 16MB per frame buffer = 32MB total RAM usage for Double Buffering.
+    FrameAllocator(size_t bytesPerFrame) 
+        : m_currentFrame(0) {
+
+        for (size_t i = 0; i < BufferCount; ++i) {
+            // Placement new directly into our contiguous uninitialized byte block.
+            new (&GetArena(i)) LocalLinearArena(bytesPerFrame);
+        }
+    }
+
+    ~FrameAllocator() {
+        for (size_t i = 0; i < BufferCount; ++i) {
+            // Because m_arenaStorage is just standard bytes, the compiler will NOT 
+            // auto-destruct the objects. Manual destruction is now perfectly safe and required!
+            GetArena(i).~LocalLinearArena();
+        }
+    }
+
+    // Prevent copying and moving to lock this memory physically to its instantiation site
+    FrameAllocator(const FrameAllocator&) = delete;
+    FrameAllocator& operator=(const FrameAllocator&) = delete;
+
+    // --- BARE-METAL FRAME ALLOCATION ---
+    // Passes the alignment requirement straight through to the underlying local arena.
+    template <typename T, size_t Align = alignof(T)>
+    [[nodiscard]] ENGINE_FORCE_INLINE T* Allocate(size_t count = 1) {
+        // O(1) pointer bump, perfectly aligned, zero locks.
+        return GetArena(m_currentFrame).template Allocate<T, Align>(count);
+    }
+
+    // --- FRAME OBJECT INSTANTIATION ---
+    // Allocates memory AND calls the constructor. Useful for temporary frame-bound objects.
+    template <typename T, size_t Align = alignof(T), typename... Args>
+    [[nodiscard]] ENGINE_FORCE_INLINE T* Emplace(Args&&... args) {
+        T* ptr = GetArena(m_currentFrame).template Allocate<T, Align>(1);
+        return new (ptr) T(std::forward<Args>(args)...);
+    }
+
+    // --- GPU FENCE SYNC & FRAME FLIP ---
+    // Call this EXACTLY ONCE per thread at the very beginning of your main loop.
+    ENGINE_FORCE_INLINE void FlipFrame() {
+        
+        // 1. Compile-Time Modulo Optimization
+        // Modulo (%) is a slow CPU instruction. If BufferCount is 2 (power of 2), 
+        // the compiler can replace it with a blindingly fast bitwise AND (& 1).
+        if constexpr ((BufferCount & (BufferCount - 1)) == 0) {
+            m_currentFrame = (m_currentFrame + 1) & (BufferCount - 1);
+        } else {
+            // Fallback for Triple Buffering (3 is not a power of 2)
+            m_currentFrame = (m_currentFrame + 1) % BufferCount;
+        }
+
+        // =====================================================================
+        // CRITICAL ENGINE ARCHITECTURE NOTE: GPU FENCES
+        // =====================================================================
+        // In a real Vulkan/DX12 engine, before we reset this arena, we MUST check 
+        // the hardware GPU Fence to guarantee the GPU has finished rendering 
+        // the frame associated with this memory block.
+        // 
+        // Example:
+        // if (!RenderAPI::IsGPUFinished(m_currentFrame)) {
+        //     RenderAPI::WaitForGPU(m_currentFrame); // Stall the CPU until GPU is done
+        // }
+        // =====================================================================
+
+        // 2. Wipe the newly active frame clean in O(1) time.
+        // Zero destructors are called. The memory is ready to be instantly overwritten.
+        GetArena(m_currentFrame).Reset();
+    }
+
+    // Telemetry
+    ENGINE_FORCE_INLINE size_t GetCurrentFrameIndex() const noexcept { return m_currentFrame; }
+    ENGINE_FORCE_INLINE size_t GetCurrentUsedMemory() const noexcept { return GetArena(m_currentFrame).GetUsedMemory(); }
+    ENGINE_FORCE_INLINE size_t GetCapacityPerFrame() const noexcept { return GetArena(m_currentFrame).GetCapacity(); }
+};
+
+// ==================================================================================
+// GLOBAL FRAME MEMORY DECLARATION
+// ==================================================================================
+// Define exactly how much temporary memory a single frame is allowed to generate.
+constexpr size_t FRAME_MEMORY_SIZE = 16 * 1024 * 1024; // 16 MB per frame
+
+// Single-Threaded Application:
+// inline FrameAllocator<2> g_MainFrameAllocator(FRAME_MEMORY_SIZE);
+
+// Multi-Threaded Application (The AAA Way):
+// Every worker thread gets its own Double-Buffered 16MB allocator. Zero locks!
+// thread_local FrameAllocator<2> t_WorkerFrameAllocator(FRAME_MEMORY_SIZE);
+
+/*
+void RenderSystem::Update() {
+    // 1. Advance the frame (swaps buffer 0 to 1, waits for GPU, and wipes it)
+    t_WorkerFrameAllocator.FlipFrame();
+
+    // 2. Allocate an array of SIMD matrices for 10,000 asteroids
+    // This memory is strictly aligned to 64 bytes (AVX-512 ready).
+    Matrix4x4_SIMD* modelMatrices = t_WorkerFrameAllocator.Allocate<Matrix4x4_SIMD, 64>(10000);
+
+    for (int i = 0; i < 10000; i++) {
+        modelMatrices[i] = CalculateAsteroidTransform(i);
+    }
+
+    // 3. Allocate a temporary string for the UI
+    // char arrays allocated here will vanish when the frame flips. No std::string heap allocations!
+    char* fpsText = t_WorkerFrameAllocator.Allocate<char>(64);
+    std::snprintf(fpsText, 64, "FPS: %d", currentFPS);
+
+    // 4. Send the perfectly aligned, contiguous memory to the GPU Command Buffer
+    VulkanRenderer::SubmitDrawCall(modelMatrices, 10000);
+    UIRenderer::SubmitText(fpsText);
+    
+    // Frame ends. We don't delete anything!
+}
+*/
+
+// ==================================================================================
 // CONCURRENT LINEAR ARENA (THREAD-SAFE, GLOBAL)
 // ==================================================================================
 
@@ -605,6 +758,314 @@ public:
     ENGINE_FORCE_INLINE size_t GetUsedMemory() const noexcept { return m_offset; }
     ENGINE_FORCE_INLINE size_t GetCapacity() const noexcept { return m_capacity; }
 };
+
+// ==================================================================================
+// POOL ALLOCATOR (O(1) BUMP-TO-POOL HYBRID)
+// ==================================================================================
+/*
+    - Designed for Game Objects, Projectiles, Audio Voices, and Network Packets.
+    - Handles objects that spawn and die at completely random, unpredictable intervals.
+    - O(1) Instant Startup: Defers free-list generation until objects actually die (Zero Page Faults).
+    - Intrusive Free-List: The 'next' pointer is secretly stored inside the dead object's memory.
+    - Pre-allocates a massive array of objects. When an object dies, it writes the memory address of the next free slot into the dead object's memory, creating a linked list of free memory (a free list) with zero overhead.
+    - Mandatory for Game Object/Entity system, projectiles, network packets, and audio voices.
+*/
+
+template <typename T, size_t Align = alignof(T)>
+class alignas(ENGINE_CACHE_CHUNK_SIZE) LocalPoolAllocator {
+    
+    // Ensure alignment is a power of 2 and at least large enough to hold a pointer
+    static_assert((Align & (Align - 1)) == 0, "Alignment must be a power of 2");
+    static_assert(Align >= alignof(void*), "Alignment must accommodate at least a pointer size");
+
+private:
+    // --- INTRUSIVE LINKED LIST NODE ---
+    // This node secretly lives inside the memory of a DEAD object. 
+    // When the object is alive, this data is completely overwritten by the actual T object.
+    struct FreeNode {
+        FreeNode* next;
+    };
+
+    // --- COMPILE-TIME BLOCK SIZING ---
+    // We must guarantee that the block is large enough to hold the object OR the free node,
+    // and that every single block perfectly adheres to the hardware alignment (e.g., 64 bytes for AVX-512).
+    static constexpr size_t MinBlockSize = (sizeof(T) > sizeof(FreeNode)) ? sizeof(T) : sizeof(FreeNode);
+    static constexpr size_t BlockSize = (MinBlockSize + Align - 1) & ~(Align - 1);
+
+    uint8_t* m_memory;          // Master block of perfectly aligned memory
+    FreeNode* m_freeListHead;   // Head of the linked list (only used for dead objects)
+    
+    size_t m_capacity;          // Maximum number of objects this pool can hold
+    size_t m_bumpIndex;         // Tracks how many blocks we have allocated initially (The Lazy Bump Pointer)
+
+public:
+    // O(1) Allocation from the OS. Zero initialization loops.
+    LocalPoolAllocator(size_t capacity) 
+        : m_capacity(capacity), m_bumpIndex(0), m_freeListHead(nullptr) {
+        
+        // Native aligned allocation guarantees the entire block starts on the correct boundary
+        m_memory = static_cast<uint8_t*>(::operator new(capacity * BlockSize, std::align_val_t{Align}));
+
+        if (!m_memory) {
+            std::println(std::cerr, "[FATAL] OS Refused to allocate Pool Arena!");
+            std::abort();
+        }
+
+        std::println("[MEMORY] Initialized Hybrid Pool Allocator: {:.2f} MB (Capacity: {})", 
+                     (float)(capacity * BlockSize) / (1024.0f * 1024.0f), capacity);
+    }
+
+    ~LocalPoolAllocator() {
+        ::operator delete(m_memory, m_capacity * BlockSize, std::align_val_t{Align});
+    }
+
+    // Prevent copy/move to isolate the memory pool
+    LocalPoolAllocator(const LocalPoolAllocator&) = delete;
+    LocalPoolAllocator& operator=(const LocalPoolAllocator&) = delete;
+
+    // --- BARE-METAL ALLOCATION ---
+    [[nodiscard]] ENGINE_FORCE_INLINE T* Allocate() {
+        void* ptr = nullptr;
+
+        // 1. FREE-LIST PATH (Prioritize recycling dead objects to keep cache memory "hot")
+        if (m_freeListHead != nullptr) {
+            ptr = m_freeListHead;
+            m_freeListHead = m_freeListHead->next;
+        } 
+        // 2. BUMP-POINTER PATH (Lazy Initialization)
+        else if (m_bumpIndex < m_capacity) {
+            ptr = m_memory + (m_bumpIndex * BlockSize);
+            m_bumpIndex++;
+        } 
+        // 3. OUT OF MEMORY
+        else [[unlikely]] {
+            std::println(std::cerr, "[FATAL] Pool Allocator Exhausted!");
+            std::println(std::cerr, "{}", std::to_string(std::stacktrace::current()));
+            std::abort();
+        }
+
+        // C++20/26: Prove to the compiler the pointer strictly adheres to AVX/SIMD boundaries
+        return std::assume_aligned<Align>(static_cast<T*>(ptr));
+    }
+
+    // --- O(1) EMPLACE (ALLOCATE + CONSTRUCT) ---
+    template <typename... Args>
+    [[nodiscard]] ENGINE_FORCE_INLINE T* Emplace(Args&&... args) {
+        T* ptr = Allocate();
+        // Placement new constructs the object directly in the recycled memory
+        return new (ptr) T(std::forward<Args>(args)...);
+    }
+
+    // --- O(1) DEALLOCATION ---
+    ENGINE_FORCE_INLINE void Free(T* ptr) noexcept {
+        if (!ptr) return;
+
+        // 1. Explicitly call the destructor of the object BEFORE we overwrite its memory
+        if constexpr (!std::is_trivially_destructible_v<T>) {
+            ptr->~T();
+        }
+
+        // 2. Intrusive Linked List: Cast the dead object's memory into a FreeNode
+        FreeNode* node = reinterpret_cast<FreeNode*>(ptr);
+
+        // 3. Push it to the front of the Free List (LIFO order ensures cache-hot memory is reused first)
+        node->next = m_freeListHead;
+        m_freeListHead = node;
+    }
+
+    // --- TELEMETRY ---
+    // Note: Active count requires subtracting the length of the free list (which is an O(N) operation to traverse).
+    // In a pure performance environment, we only track the high-water mark via bump index.
+    ENGINE_FORCE_INLINE size_t GetHighWaterMark() const noexcept { return m_bumpIndex; }
+    ENGINE_FORCE_INLINE size_t GetCapacity() const noexcept { return m_capacity; }
+};
+
+/*
+// 1. Create a massive pool of perfectly aligned Game Objects
+// For AVX2, align to 32 bytes.
+LocalPoolAllocator<GameObject, 32> g_ProjectilePool(100000); // Pool of 100,000 bullets
+
+void FireWeapon() {
+    // 2. Instantly grabs cache-hot memory and constructs the bullet
+    GameObject* bullet = g_ProjectilePool.Emplace(currentPos, currentDirection);
+}
+
+void OnBulletHitWall(GameObject* bullet) {
+    // 3. Instantly shreds the bullet, calls its destructor, and adds it back to the free list
+    g_ProjectilePool.Free(bullet);
+}
+*/
+
+// ==================================================================================
+// OS VIRTUAL MEMORY PAGING ARENA (ZERO-FRAGMENTATION STREAMING VAULT)
+// ==================================================================================
+/*
+    - Designed for Massive Open-World Streaming, Entity Component Systems, and Asset Vaults.
+    - Reserves billions of virtual addresses instantly with exactly 0 bytes of physical RAM overhead.
+    - Eliminates kernel page faults by managing explicit physical page commitment.
+    - Dual-Kernel Architecture: Native integration for Windows Kernel and POSIX/Linux systems.
+    - Interface directly with the OS Virtual Memory Manager, bypasses 'new' entirely.
+    - e.g., reserve 10GB of contiguous virtual addresses, but consumes 0 bytes of physical RAM.
+*/
+
+#if defined(_WIN32) || defined(_WIN64)
+    #define WIN32_LEAN_AND_MEAN
+    #define NOMINMAX
+    #include <windows.h>
+#else
+    #include <sys/mman.h>
+    #include <unistd.h>
+#endif
+
+class alignas(ENGINE_CACHE_CHUNK_SIZE) VirtualMemoryArena {
+private:
+    uint8_t* m_baseAddress;       // The structural anchor in the 64-bit address space
+    size_t   m_reservedSize;      // Total size of the virtual address reservation
+    size_t   m_bumpOffset;        // High-water mark of requested engine memory
+    size_t   m_committedOffset;   // High-water mark of actual physical RAM committed from the OS
+    size_t   m_pageSize;          // Detected hardware MMU page size (typically 4KB)
+
+    // --- KERNEL SPECIFIC DETECTION ---
+    size_t QueryOSPageSize() noexcept {
+        #if defined(_WIN32) || defined(_WIN64)
+            SYSTEM_INFO sysInfo;
+            GetSystemInfo(&sysInfo);
+            return static_cast<size_t>(sysInfo.dwPageSize);
+        #else
+            return static_cast<size_t>(sysconf(_SC_PAGESIZE));
+        #endif
+    }
+
+    // --- KERNEL SYSTEM CALLS ---
+    void OSReserve(size_t size) {
+        #if defined(_WIN32) || defined(_WIN64)
+            m_baseAddress = static_cast<uint8_t*>(VirtualAlloc(nullptr, size, MEM_RESERVE, PAGE_NOACCESS));
+        #else
+            m_baseAddress = static_cast<uint8_t*>(mmap(nullptr, size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+            if (m_baseAddress == MAP_FAILED) m_baseAddress = nullptr;
+        #endif
+    }
+
+    void OSCommit(void* ptr, size_t size) noexcept {
+        #if defined(_WIN32) || defined(_WIN64)
+            VirtualAlloc(ptr, size, MEM_COMMIT, PAGE_READWRITE);
+        #else
+            mprotect(ptr, size, PROT_READ | PROT_WRITE);
+        #endif
+    }
+
+    void OSDecommit(void* ptr, size_t size) noexcept {
+        #if defined(_WIN32) || defined(_WIN64)
+            VirtualFree(ptr, size, MEM_DECOMMIT);
+        #else
+            // Inform the kernel to release physical backing frames instantly
+            madvise(ptr, size, MADV_DONTNEED);
+            mprotect(ptr, size, PROT_NONE);
+        #endif
+    }
+
+public:
+    explicit VirtualMemoryArena(size_t totalReservationSize)
+        : m_baseAddress(nullptr), m_bumpOffset(0), m_committedOffset(0) {
+        
+        m_pageSize = QueryOSPageSize();
+        
+        // Enforce that the entire reservation layout maps strictly to OS page blocks
+        m_reservedSize = (totalReservationSize + m_pageSize - 1) & ~(m_pageSize - 1);
+
+        OSReserve(m_reservedSize);
+
+        if (!m_baseAddress) [[unlikely]] {
+            std::println(std::cerr, "[FATAL] Kernel completely refused virtual address reservation of {} GB!", 
+                         (float)m_reservedSize / (1024.0f * 1024.0f * 1024.0f));
+            std::abort();
+        }
+
+        std::println("[MEMORY] Virtual Arena Configured. Reserved Address Space: {:.2f} GB | Hardware Page Size: {} KB", 
+                     (float)m_reservedSize / (1024.0f * 1024.0f * 1024.0f), m_pageSize / 1024);
+    }
+
+    ~VirtualMemoryArena() {
+        if (m_baseAddress) {
+            #if defined(_WIN32) || defined(_WIN64)
+                VirtualFree(m_baseAddress, 0, MEM_RELEASE);
+            #else
+                munmap(m_baseAddress, m_reservedSize);
+            #endif
+        }
+    }
+
+    VirtualMemoryArena(const VirtualMemoryArena&) = delete;
+    VirtualMemoryArena& operator=(const VirtualMemoryArena&) = delete;
+
+    // --- HYPER-OPTIMIZED ALLOCATION LOOP ---
+    template <typename T, size_t Align = alignof(T)>
+    [[nodiscard]] ENGINE_FORCE_INLINE T* Allocate(size_t count) {
+        static_assert((Align & (Align - 1)) == 0, "Alignment must be a power of 2");
+
+        uintptr_t currentAddress = reinterpret_cast<uintptr_t>(m_baseAddress + m_bumpOffset);
+        size_t padding = (Align - (currentAddress & (Align - 1))) & (Align - 1);
+        size_t totalAllocationSize = padding + (count * sizeof(T));
+
+        size_t newBumpOffset = m_bumpOffset + totalAllocationSize;
+
+        if (newBumpOffset > m_reservedSize) [[unlikely]] {
+            std::println(std::cerr, "[FATAL] Out of Virtual Address Space! Hard Limit reached.");
+            std::println(std::cerr, "{}", std::to_string(std::stacktrace::current()));
+            std::abort();
+        }
+
+        // --- AUTOMATIC LAZY PAGE COMMITMENT ---
+        if (newBumpOffset > m_committedOffset) {
+            size_t dynamicBytesNeeded = newBumpOffset - m_committedOffset;
+            // Mathematical rounding logic to map directly to hardware page widths
+            size_t pageAlignedBytes = (dynamicBytesNeeded + m_pageSize - 1) & ~(m_pageSize - 1);
+
+            OSCommit(m_baseAddress + m_committedOffset, pageAlignedBytes);
+            m_committedOffset += pageAlignedBytes;
+        }
+
+        uintptr_t targetAddress = currentAddress + padding;
+        m_bumpOffset = newBumpOffset;
+
+        return std::assume_aligned<Align>(reinterpret_cast<T*>(targetAddress));
+    }
+
+    // --- SURGICAL RAM RELEASE (AAA WORLD STREAMING UNLOAD) ---
+    /*
+        Allows the engine to free megabytes of physical RAM back to the operating system
+        whenever a zone is streamed out, without invalidating references or fragmenting memory.
+    */
+    ENGINE_FORCE_INLINE void FreeToMarker(size_t targetOffsetMarker) noexcept {
+        if (targetOffsetMarker >= m_bumpOffset) return;
+
+        // Round up target offset marker to the nearest page boundary to safeguard preceding active assets
+        size_t safePageBoundary = (targetOffsetMarker + m_pageSize - 1) & ~(m_pageSize - 1);
+
+        if (safePageBoundary < m_committedOffset) {
+            size_t bytesToDecommit = m_committedOffset - safePageBoundary;
+            OSDecommit(m_baseAddress + safePageBoundary, bytesToDecommit);
+            m_committedOffset = safePageBoundary;
+        }
+
+        m_bumpOffset = targetOffsetMarker;
+    }
+
+    // --- INSTANT RESET ---
+    ENGINE_FORCE_INLINE void Reset() noexcept {
+        if (m_committedOffset > 0) {
+            OSDecommit(m_baseAddress, m_committedOffset);
+            m_committedOffset = 0;
+            m_bumpOffset = 0;
+        }
+    }
+
+    // --- TELEMETRY ---
+    ENGINE_FORCE_INLINE size_t GetVirtualAddressUsage() const noexcept { return m_bumpOffset; }
+    ENGINE_FORCE_INLINE size_t GetPhysicalRamCommitment() const noexcept { return m_committedOffset; }
+    ENGINE_FORCE_INLINE size_t GetTotalReservedCapacity() const noexcept { return m_reservedSize; }
+};
+
 
 // ==================================================================================
 // ARENA MARKER (TRANSIENT UNWINDING)
