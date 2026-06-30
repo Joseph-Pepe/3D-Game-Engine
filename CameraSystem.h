@@ -57,7 +57,7 @@ FORCE_INLINE Vector3DStack Lerp(const Vector3DStack& a, const Vector3DStack& b, 
     return a + ((b - a) * t);
 }
 
-// 128-bit SIMD Lerp
+// 128-bit PURE SIMD Lerp (Executes entirely inside SSE/AVX registers)
 FORCE_INLINE Vector3D Lerp(const Vector3D& a, const Vector3D& b, float t) {
     // V = A + t * (B - A)
     return a + ((b - a) * t);
@@ -73,6 +73,20 @@ FORCE_INLINE Vector3DStack CatmullRom(const Vector3DStack& p0, const Vector3DSta
     Vector3DStack v1 = (p2 - p0) * t;
     Vector3DStack v2 = (p0 * 2.0f - p1 * 5.0f + p2 * 4.0f - p3) * t2;
     Vector3DStack v3 = (p1 * 3.0f - p0 - p2 * 3.0f + p3) * t3;
+
+    return (v0 + v1 + v2 + v3) * 0.5f;
+}
+
+FORCE_INLINE Vector3D CatmullRom(const Vector3D& p0, const Vector3D& p1, 
+                                 const Vector3D& p2, const Vector3D& p3, float t) {
+    float t2 = t * t;
+    float t3 = t2 * t;
+
+    // Evaluates in a few CPU cycles using standard SIMD FMA
+    Vector3D v0 = p1 * 2.0f;
+    Vector3D v1 = (p2 - p0) * t;
+    Vector3D v2 = (p0 * 2.0f - p1 * 5.0f + p2 * 4.0f - p3) * t2;
+    Vector3D v3 = (p1 * 3.0f - p0 - p2 * 3.0f + p3) * t3;
 
     return (v0 + v1 + v2 + v3) * 0.5f;
 }
@@ -252,6 +266,56 @@ struct alignas(16) Quaternion {
     FORCE_INLINE float dot(const Quaternion& other) const {
         return _mm_cvtss_f32(_mm_dp_ps(reg, other.reg, 0xFF));
     }
+
+    // --- QUATERNION DOT PRODUCT ---
+    // FORCE_INLINE float dot_simd(const Quaternion& rhs) const {
+    //     // Dot product across all 4 lanes
+    //     __m128 res = _mm_dp_ps(reg, rhs.reg, 0xFF);
+    //     return _mm_cvtss_f32(res);
+    // }
+
+    // --- SPHERICAL LINEAR INTERPOLATION (SLERP) ---
+    // static FORCE_INLINE Quaternion Slerp(const Quaternion& a, const Quaternion& b, float t) {
+    //     float cosTheta = a.dot_simd(b);
+    //     __m128 bReg = b.reg;
+
+    //     // 1. Shortest Path Routing
+    //     // If the dot product is negative, the quaternions point away from each other.
+    //     // We negate one of them to ensure the camera takes the shortest visual path.
+    //     if (cosTheta < 0.0f) {
+    //         cosTheta = -cosTheta;
+    //         // Instantly flip the sign bit of all 4 floats using XOR
+    //         __m128 signMask = _mm_castsi128_ps(_mm_set1_epi32(0x80000000));
+    //         bReg = _mm_xor_ps(bReg, signMask); 
+    //     }
+
+    //     // 2. Fallback to NLerp (Normalized Lerp) for microscopic adjustments
+    //     // If the rotations are almost identical, calculating Trigonometry is a waste of CPU cycles.
+    //     if (cosTheta > 0.9995f) {
+    //         __m128 tReg = _mm_set1_ps(t);
+    //         __m128 diff = _mm_sub_ps(bReg, a.reg);
+            
+    //         Quaternion res(_mm_fmadd_ps(diff, tReg, a.reg));
+    //         res.Normalize();
+    //         return res;
+    //     }
+
+    //     // 3. Standard Slerp Trigonometry
+    //     float theta = std::acos(cosTheta);
+    //     float invSinTheta = 1.0f / std::sin(theta);
+        
+    //     // Calculate interpolation scales
+    //     float scaleA = std::sin((1.0f - t) * theta) * invSinTheta;
+    //     float scaleB = std::sin(t * theta) * invSinTheta;
+
+    //     // Apply scales and add: (a * scaleA) + (b * scaleB)
+    //     __m128 res = _mm_add_ps(
+    //         _mm_mul_ps(a.reg, _mm_set1_ps(scaleA)),
+    //         _mm_mul_ps(bReg,  _mm_set1_ps(scaleB))
+    //     );
+
+    //     return Quaternion(res);
+    // }
 
     // --- NORMALIZED LERP (N-Lerp) ---
     // Insanely fast. Used when the angle between quaternions is extremely small.
@@ -1148,8 +1212,8 @@ public:
 
         // Project camera vectors onto the horizontal gameplay plane (Y = 0) to prevent 
         // characters from flying or digging into the ground when looking up/down
-        camForward.y = 0.0f;
-        camRight.y   = 0.0f;
+        camForward.setY(0.0f);
+        camRight.setY(0.0f);
 
         // Perform fast safe normalization on the planar vectors using SIMD registers
         __m128 fReg = camForward.reg;
@@ -1170,7 +1234,7 @@ public:
         Vector3D worldDirection = (camForward * input.MoveAxisY) + (camRight * input.MoveAxisX);
 
         // Clamp vector magnitude to 1.0f to prevent diagonal acceleration exploits
-        float mag = std::sqrt((worldDirection.x * worldDirection.x) + (worldDirection.z * worldDirection.z));
+        float mag = std::sqrt((worldDirection.x() * worldDirection.x()) + (worldDirection.z() * worldDirection.z()));
         if (mag > 1.0f) {
             worldDirection = worldDirection * (1.0f / mag);
         }
