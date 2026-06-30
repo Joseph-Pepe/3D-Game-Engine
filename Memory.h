@@ -760,7 +760,7 @@ public:
 };
 
 // ==================================================================================
-// POOL ALLOCATOR (O(1) BUMP-TO-POOL HYBRID)
+// LOCAL POOL ALLOCATOR (O(1) BUMP-TO-POOL HYBRID)
 // ==================================================================================
 /*
     - Designed for Game Objects, Projectiles, Audio Voices, and Network Packets.
@@ -769,6 +769,7 @@ public:
     - Intrusive Free-List: The 'next' pointer is secretly stored inside the dead object's memory.
     - Pre-allocates a massive array of objects. When an object dies, it writes the memory address of the next free slot into the dead object's memory, creating a linked list of free memory (a free list) with zero overhead.
     - Mandatory for Game Object/Entity system, projectiles, network packets, and audio voices.
+    - LocalPoolAllocator is for single threaded object recycling.
 */
 
 template <typename T, size_t Align = alignof(T)>
@@ -895,6 +896,92 @@ void OnBulletHitWall(GameObject* bullet) {
     g_ProjectilePool.Free(bullet);
 }
 */
+
+// ==================================================================================
+// CONCURRENT POOL ALLOCATOR (THREAD-SAFE O(1) BUMP-TO-POOL HYBRID)
+// ==================================================================================
+// Is a thread-safe version of LocalPoolAllocator that is used for global game objects (bullets, network packets) spawned from multiple threads.
+template <typename T, size_t Align = alignof(T)>
+class alignas(ENGINE_CACHE_CHUNK_SIZE) ConcurrentPoolAllocator {
+    static_assert((Align & (Align - 1)) == 0, "Alignment must be a power of 2");
+    static_assert(Align >= alignof(void*), "Alignment must accommodate at least a pointer size");
+
+private:
+    struct alignas(Align) FreeNode {
+        FreeNode* next;
+    };
+
+    static constexpr size_t MinBlockSize = (sizeof(T) > sizeof(FreeNode)) ? sizeof(T) : sizeof(FreeNode);
+    static constexpr size_t BlockSize = (MinBlockSize + Align - 1) & ~(Align - 1);
+
+    uint8_t* m_memory;
+    size_t m_capacity;
+
+    // Use std::atomic for thread safety and align them to prevent false sharing
+    alignas(ENGINE_CACHE_CHUNK_SIZE) std::atomic<FreeNode*> m_freeListHead;
+    alignas(ENGINE_CACHE_CHUNK_SIZE) std::atomic<size_t> m_bumpIndex;
+
+public:
+    ConcurrentPoolAllocator(size_t capacity) 
+        : m_capacity(capacity), m_bumpIndex(0), m_freeListHead(nullptr) {
+        
+        m_memory = static_cast<uint8_t*>(::operator new(capacity * BlockSize, std::align_val_t{Align}));
+        if (!m_memory) std::abort();
+    }
+
+    ~ConcurrentPoolAllocator() {
+        ::operator delete(m_memory, m_capacity * BlockSize, std::align_val_t{Align});
+    }
+
+    ConcurrentPoolAllocator(const ConcurrentPoolAllocator&) = delete;
+    ConcurrentPoolAllocator& operator=(const ConcurrentPoolAllocator&) = delete;
+
+    [[nodiscard]] ENGINE_FORCE_INLINE T* Allocate() {
+        // 1. FREE-LIST PATH (Thread-Safe Pop)
+        FreeNode* head = m_freeListHead.load(std::memory_order_acquire);
+        while (head != nullptr) {
+            // Attempt to move the head to the next node. If another thread beat us, loop and try again.
+            if (m_freeListHead.compare_exchange_weak(head, head->next, std::memory_order_release, std::memory_order_relaxed)) {
+                return std::assume_aligned<Align>(reinterpret_cast<T*>(head));
+            }
+        }
+
+        // 2. BUMP-POINTER PATH (Thread-Safe Increment)
+        // fetch_add returns the PREVIOUS value, ensuring each thread gets a unique index.
+        size_t index = m_bumpIndex.fetch_add(1, std::memory_order_relaxed);
+        
+        if (index < m_capacity) {
+            return std::assume_aligned<Align>(reinterpret_cast<T*>(m_memory + (index * BlockSize)));
+        }
+
+        // Out of memory
+        std::abort();
+        return nullptr;
+    }
+
+    template <typename... Args>
+    [[nodiscard]] ENGINE_FORCE_INLINE T* Emplace(Args&&... args) {
+        T* ptr = Allocate();
+        return new (ptr) T(std::forward<Args>(args)...);
+    }
+
+    ENGINE_FORCE_INLINE void Free(T* ptr) noexcept {
+        if (!ptr) return;
+
+        if constexpr (!std::is_trivially_destructible_v<T>) {
+            ptr->~T();
+        }
+
+        FreeNode* node = reinterpret_cast<FreeNode*>(ptr);
+
+        // 3. FREE-LIST PUSH (Thread-Safe Push)
+        FreeNode* head = m_freeListHead.load(std::memory_order_relaxed);
+        do {
+            node->next = head;
+        // Attempt to set the head to our new node. If another thread changed the head, update our 'head' variable and try again.
+        } while (!m_freeListHead.compare_exchange_weak(head, node, std::memory_order_release, std::memory_order_relaxed));
+    }
+};
 
 // ==================================================================================
 // OS VIRTUAL MEMORY PAGING ARENA (ZERO-FRAGMENTATION STREAMING VAULT)
