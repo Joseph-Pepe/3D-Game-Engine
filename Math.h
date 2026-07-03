@@ -1142,13 +1142,13 @@ FORCE_INLINE constexpr Matrix4 operator*(const Matrix4& a, const Matrix4& b) {
 // ==================================================================================
 // Every mesh needs an invisible box around it. When the engine calculates collisions or checks if an object is visible, it does not check all 10,000 vertices of a 3D model.
 // It checks the 8 corners of an AABB.
-struct alignas(32) AABB {
+struct alignas(32) AABBMath {
     Vector3D minBounds; // Bottom-Left-Back corner
     Vector3D maxBounds; // Top-Right-Front corner
 
     // --- HARDWARE INTERSECTION TEST ---
     // Returns true if this box is overlapping with another box
-    FORCE_INLINE bool Intersects(const AABB& other) const {
+    FORCE_INLINE bool Intersects(const AABBMath& other) const {
         // SSE comparison: a.max > b.min AND a.min < b.max
         __m128 maxGTmin = _mm_cmpgt_ps(maxBounds.reg, other.minBounds.reg);
         __m128 minLTmax = _mm_cmplt_ps(minBounds.reg, other.maxBounds.reg);
@@ -1197,7 +1197,7 @@ struct Frustum {
 
     // --- FRUSTUM CULLING TEST (100% SIMD) ---
     // Returns true if the AABB is inside or touching the frustum
-    FORCE_INLINE bool IsBoxVisible(const AABB& box) const {
+    FORCE_INLINE bool IsBoxVisible(const AABBMath& box) const {
 
         for (int i = 0; i < 6; ++i) {
             __m128 planeReg = planes[i].reg;
