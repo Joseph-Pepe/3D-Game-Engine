@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <type_traits>
 #include <format>
+#include <print> // std::println
 
 // ==================================================
 // INSTRUCTION SET ARCHITECTURES (ISA)
@@ -30,6 +31,32 @@
     #error "Engine Compiler Error: Unsupported CPU architecture. AVX2, NEON, or SSE4.1 instruction sets are strictly required."
 #endif
 
+// ===================================================
+// UNIFORM MEMORY ALIGNMENT MACROS (MSVC, Clang, GCC)
+// ===================================================
+// Cache line sizes are typically 64 bytes on modern CPUs.
+// Vulkan/DirectX require 16-byte alignment for vec4.
+// Prevents the compiler from padding our structs differently on a Nintendo Switch vs PC. 
+#define CACHE_CHUNK_ALIGN_16 alignas(16)
+#define CACHE_CHUNK_ALIGN_32 alignas(32)
+#define CACHE_CHUNK_ALIGN_64 alignas(64)
+
+// inline is a suggestion to the compiler, __forceinline will force the compiler to flatten the math directly into the execution path.
+#if defined(_MSC_VER)
+    #define FORCE_INLINE __forceinline
+#elif defined(__clang__) || defined(__GNUC__)
+    #define FORCE_INLINE __attribute__((always_inline)) inline
+#else
+    #define FORCE_INLINE inline
+#endif
+
+// Makes a promise to the compiler that data arrays never overlap.
+#if defined(_MSC_VER)
+    #define RESTRICT __restrict
+#elif defined(__clang__) || defined(__GNUC__)
+    #define RESTRICT __restrict__
+#endif
+
 void LogHardwareArchitecture() {
     #if defined(ENGINE_ARCH_AVX2)
         std::println("[AVX2, X86]: Intel/AMD based architecture detected.");
@@ -52,9 +79,9 @@ namespace Engine::ISAArch {
         // C++26 'native' alias: Automatically deduces the best hardware vector length at compile time based on your compiler flags (e.g., /arch:AVX2).
         template <typename T>
         #if ENGINE_ARCH_AVX2
-            using native = avx2;     // Xbox/PS5/PC
+            using native = avx2;     // Xbox/PS5/PC (256-bit (8 floats))
         #elif ENGINE_ARCH_NEON
-            using native = neon;     // Nintendo Switch 2 / Apple Silicon
+            using native = neon;     // Nintendo Switch 2 / Apple Silicon (128-bit (4 floats))
         #else
             using native = scalar;   // Legacy PC
         #endif
@@ -66,6 +93,204 @@ namespace Engine::ISAArch {
     namespace detail {
         // Primary template (Undefined)
         template <typename T, typename Abi> struct simd_traits;
+
+        #if ENGINE_ARCH_AVX2 || ENGINE_ARCH_SSE41
+            // ========================================================
+            // --- SSE4.1 BACKEND (128-bit x64 Base) ---
+            // ========================================================
+            // SSE 4.1 traits are mandatory, even if the user has an AVX2 capable PC. 
+            // We must use SSE registers for 4x4 matrices and 3D vectors to guarantee 16-byte data structures.
+            template <> struct simd_traits<float, simd_abi::sse41> {
+                using register_type = __m128;
+                using mask_type     = __m128; 
+                static constexpr int size = 4;
+                
+                static inline register_type broadcast(float v) { return _mm_set1_ps(v); }
+                static inline register_type load(const float* mem) { return _mm_loadu_ps(mem); }
+                static inline void store(float* mem, register_type v) { _mm_storeu_ps(mem, v); }
+                
+                static inline register_type add(register_type a, register_type b) { return _mm_add_ps(a, b); }
+                static inline register_type mul(register_type a, register_type b) { return _mm_mul_ps(a, b); }
+                static inline register_type sub(register_type a, register_type b) { return _mm_sub_ps(a, b); }
+                static inline register_type div(register_type a, register_type b) { return _mm_div_ps(a, b); }
+
+                static inline register_type min(register_type a, register_type b) { return _mm_min_ps(a, b); }
+                static inline register_type max(register_type a, register_type b) { return _mm_max_ps(a, b); }
+
+                static inline register_type rsqrt(register_type a) { 
+                    __m128 approx = _mm_rsqrt_ps(a);
+
+                    // Newton-Raphson: x1 = x0 * (1.5 - (0.5 * a * x0 * x0))
+                    __m128 half_a = _mm_mul_ps(_mm_set1_ps(0.5f), a);
+                    __m128 x0_sq = _mm_mul_ps(approx, approx);
+                    return _mm_mul_ps(approx, _mm_sub_ps(_mm_set1_ps(1.5f), _mm_mul_ps(half_a, x0_sq)));
+                }
+
+                static inline register_type rcp(register_type a) { 
+                    // _mm_rcp_ps: is fast, but is an approximation with 11 to 14 bits of precision. If you use this to normalize vectors, this precision loss will cause objects to gradually drift, jitter or fail collision detection at world-space extremes.
+                    __m128 approx = _mm_rcp_ps(a);
+
+                    // Newton-Raphson: x1 = x0 * (2.0 - a * x0) to refine 11-bits into an accurate 23-bit float, 
+                    return _mm_mul_ps(approx, _mm_sub_ps(_mm_set1_ps(2.0f), _mm_mul_ps(a, approx)));
+                }
+
+                static inline register_type abs(register_type a) { 
+                    return _mm_and_ps(a, _mm_castsi128_ps(_mm_set1_epi32(0x7FFFFFFF))); 
+                }
+                
+                // SSE4.1 specific rounding intrinsics
+                static inline register_type floor(register_type a) { return _mm_round_ps(a, _MM_FROUND_TO_NEG_INF | _MM_FROUND_NO_EXC); }
+                static inline register_type ceil(register_type a) { return _mm_round_ps(a, _MM_FROUND_TO_POS_INF | _MM_FROUND_NO_EXC); }
+                
+                static inline mask_type cmp_gt(register_type a, register_type b) { return _mm_cmpgt_ps(a, b); }
+                static inline mask_type cmp_lt(register_type a, register_type b) { return _mm_cmplt_ps(a, b); }
+                static inline mask_type cmp_eq(register_type a, register_type b) { return _mm_cmpeq_ps(a, b); }
+
+                static inline mask_type mask_not(mask_type a) { 
+                    // return _mm_xor_ps(a, _mm_castsi128_ps(_mm_set1_epi32(-1))); 
+
+                    // Zero-cost generation of 0xFFFFFFFF across all 4 lanes
+                    __m128 all_ones = _mm_cmpeq_ps(_mm_setzero_ps(), _mm_setzero_ps());
+                    return _mm_xor_ps(a, all_ones);
+
+                }
+                static inline mask_type mask_and(mask_type a, mask_type b) { return _mm_and_ps(a, b); }
+                static inline mask_type mask_or(mask_type a, mask_type b) { return _mm_or_ps(a, b); }
+
+                static inline register_type bit_xor(register_type a, register_type b) { return _mm_xor_ps(a, b); }
+                static inline register_type bit_and(register_type a, register_type b) { return _mm_and_ps(a, b); }
+                static inline register_type bit_or(register_type a, register_type b)  { return _mm_or_ps(a, b); }
+
+                static inline register_type negate(register_type a) {
+                    return _mm_xor_ps(a, _mm_set1_ps(-0.0f)); 
+                }
+                
+                // SSE4.1 introduces native variable blending
+                static inline register_type blend(mask_type mask, register_type true_v, register_type false_v) {
+                    return _mm_blendv_ps(false_v, true_v, mask);
+                }
+
+                // Emulated FMA for SSE processors (SSE 4.1 does not have native hardware Fused-Multiply-Add).
+                static inline register_type fmadd(register_type a, register_type b, register_type c) {
+                    return _mm_add_ps(_mm_mul_ps(a, b), c); 
+                }
+                
+                static inline register_type sqrt(register_type a) {
+                    return _mm_sqrt_ps(a);
+                }
+
+                template <typename Target>
+                static inline __m128i cast_to(register_type a) {
+                    static_assert(std::is_same_v<Target, uint32_t>, "Only float-to-uint32_t supported.");
+                    return _mm_cvttps_epi32(a); 
+                }
+
+                // SSE Horizontal add
+                static inline float reduce_add(register_type a) {
+                    __m128 shuf = _mm_movehdup_ps(a);
+                    __m128 sums = _mm_add_ps(a, shuf);
+                    shuf = _mm_movehl_ps(shuf, sums);
+                    sums = _mm_add_ss(sums, shuf);
+                    return _mm_cvtss_f32(sums);
+                }
+
+                static inline bool mask_any(mask_type a) { return _mm_movemask_ps(a) != 0; }
+                static inline bool mask_all(mask_type a) { return _mm_movemask_ps(a) == 0x0F; }
+
+                template <int i0, int i1, int i2, int i3>
+                static inline register_type shuffle(register_type a) {
+                    return _mm_shuffle_ps(a, a, _MM_SHUFFLE(i3, i2, i1, i0));
+                }
+
+                // // Optimized SSE4.1 Emulated Gather (No Memory Store Required) (SSE lacks AVX2's gather instruction)
+                static inline register_type gather(const float* base_addr, __m128i indices) {
+                    return _mm_set_ps(
+                        base_addr[_mm_extract_epi32(indices, 3)], 
+                        base_addr[_mm_extract_epi32(indices, 2)], 
+                        base_addr[_mm_extract_epi32(indices, 1)], 
+                        base_addr[_mm_extract_epi32(indices, 0)]
+                    );
+                }
+            };
+
+            // --- SSE4.1 UINT32 TRAITS ---
+            template <> struct simd_traits<uint32_t, simd_abi::sse41> {
+                using register_type = __m128i;
+                using mask_type     = __m128i; 
+                static constexpr int size = 4;
+
+                template <typename Target>
+                static inline __m128 cast_to(register_type a) {
+                    static_assert(std::is_same_v<Target, float>, "uint32_t-to-float cast.");
+                    return _mm_cvtepi32_ps(a); 
+                }
+                
+                // Memory
+                static inline register_type broadcast(uint32_t v) { return _mm_set1_epi32(v); }
+                static inline register_type load(const uint32_t* mem) { return _mm_loadu_si128(reinterpret_cast<const __m128i*>(mem)); }
+                static inline void store(uint32_t* mem, register_type v) { _mm_storeu_si128(reinterpret_cast<__m128i*>(mem), v); }
+                
+                // Arithmetic
+                static inline register_type add(register_type a, register_type b) { return _mm_add_epi32(a, b); }
+                static inline register_type sub(register_type a, register_type b) { return _mm_sub_epi32(a, b); }
+                static inline register_type mul(register_type a, register_type b) { return _mm_mullo_epi32(a, b); }
+
+                static inline register_type min(register_type a, register_type b) { return _mm_min_epu32(a, b); }
+                static inline register_type max(register_type a, register_type b) { return _mm_max_epu32(a, b); }
+
+                // Bitwise Math
+                static inline register_type bit_or(register_type a, register_type b) { return _mm_or_si128(a, b); }
+                static inline register_type bit_and(register_type a, register_type b) { return _mm_and_si128(a, b); }
+                static inline register_type shift_l(register_type a, int imm) { return _mm_slli_epi32(a, imm); }
+                
+                // Relational
+                static inline mask_type cmp_gt(register_type a, register_type b) { return _mm_cmpgt_epi32(a, b); }
+                static inline mask_type cmp_lt(register_type a, register_type b) { return _mm_cmpgt_epi32(b, a); } // Flipped for Less-Than
+                static inline mask_type cmp_eq(register_type a, register_type b) { return _mm_cmpeq_epi32(a, b); }
+
+                // Mask Logic
+                static inline mask_type mask_not(mask_type a) { 
+                    // return _mm_xor_si128(a, _mm_set1_epi32(-1)); 
+
+                    // Zero-cost generation of all 1s
+                    __m128i all_ones = _mm_cmpeq_epi32(_mm_setzero_si128(), _mm_setzero_si128());
+                    return _mm_xor_si128(a, all_ones);
+                }
+                static inline mask_type mask_and(mask_type a, mask_type b) { return _mm_and_si128(a, b); }
+                static inline mask_type mask_or(mask_type a, mask_type b) { return _mm_or_si128(a, b); }
+
+                static inline register_type blend(mask_type mask, register_type true_v, register_type false_v) {
+                    return _mm_blendv_epi8(false_v, true_v, mask);
+                }
+
+                // Horizontal Integer Reduction
+                static inline uint32_t reduce_add(register_type a) {
+                    __m128i shuf = _mm_shuffle_epi32(a, _MM_SHUFFLE(1, 0, 3, 2));
+                    __m128i sums = _mm_add_epi32(a, shuf);
+                    shuf = _mm_shuffle_epi32(sums, _MM_SHUFFLE(2, 3, 0, 1));
+                    sums = _mm_add_epi32(sums, shuf);
+                    return _mm_cvtsi128_si32(sums);
+                }
+
+                static inline bool mask_any(mask_type a) { return _mm_movemask_ps(_mm_castsi128_ps(a)) != 0; }
+                static inline bool mask_all(mask_type a) { return _mm_movemask_ps(_mm_castsi128_ps(a)) == 0x0F; }
+
+                template <int i0, int i1, int i2, int i3>
+                static inline register_type shuffle(register_type a) {
+                    return _mm_shuffle_epi32(a, _MM_SHUFFLE(i3, i2, i1, i0));
+                }
+
+                // Emulated Hardware Gather for SSE4.1 UINT32
+                static inline register_type gather(const uint32_t* base_addr, __m128i indices) {
+                    return _mm_set_epi32(
+                        base_addr[_mm_extract_epi32(indices, 3)], 
+                        base_addr[_mm_extract_epi32(indices, 2)], 
+                        base_addr[_mm_extract_epi32(indices, 1)], 
+                        base_addr[_mm_extract_epi32(indices, 0)]
+                    );
+                }
+            };
+        #endif // ENGINE_ARCH_AVX2 || ENGINE_ARCH_SSE41
 
         #if ENGINE_ARCH_AVX2
             // ========================================================
@@ -88,8 +313,22 @@ namespace Engine::ISAArch {
                 static inline register_type min(register_type a, register_type b) { return _mm256_min_ps(a, b); }
                 static inline register_type max(register_type a, register_type b) { return _mm256_max_ps(a, b); }
 
-                static inline register_type rsqrt(register_type a) { return _mm256_rsqrt_ps(a); } // 1 / sqrt(x)
-                static inline register_type rcp(register_type a) { return _mm256_rcp_ps(a); }     // 1 / x
+                // 1 / sqrt(x)
+                static inline register_type rsqrt(register_type a) { 
+                    __m256 approx = _mm256_rsqrt_ps(a);
+                    // Newton-Raphson: x1 = x0 * (1.5 - (0.5 * a * x0 * x0))
+                    __m256 half_a = _mm256_mul_ps(_mm256_set1_ps(0.5f), a);
+                    __m256 x0_sq = _mm256_mul_ps(approx, approx);
+                    return _mm256_mul_ps(approx, _mm256_fnmadd_ps(half_a, x0_sq, _mm256_set1_ps(1.5f)));
+                }
+
+                // 1 / x
+                static inline register_type rcp(register_type a) { 
+                    __m256 approx = _mm256_rcp_ps(a);
+                    // Newton-Raphson: x1 = x0 * (2.0 - a * x0)
+                    // Uses hardware FMA to collapse the math!
+                    return _mm256_mul_ps(approx, _mm256_fnmadd_ps(a, approx, _mm256_set1_ps(2.0f)));
+                } 
 
                 static inline register_type abs(register_type a) { 
                     // Clear the sign bit using bitwise AND
@@ -105,8 +344,12 @@ namespace Engine::ISAArch {
 
                 // Mask Logic
                 static inline mask_type mask_not(mask_type a) { 
-                    // XOR with all 1s (0xFFFFFFFF) flips every bit
-                    return _mm256_xor_ps(a, _mm256_castsi256_ps(_mm256_set1_epi32(-1))); 
+                    // XOR with all 1s (0xFFFFFFFF) flips every bit, but forces the CPU to load a constant from the data section of the binary.
+                    // return _mm256_xor_ps(a, _mm256_castsi256_ps(_mm256_set1_epi32(-1)));
+
+                    // Generates a register of all 1s instantly without touching memory. Compares a zero register to itself. Result is strictly 0xFFFFFFFF across all lanes. 
+                    __m256 all_ones = _mm256_cmp_ps(_mm256_setzero_ps(), _mm256_setzero_ps(), _CMP_EQ_OQ);
+                    return _mm256_xor_ps(a, all_ones);
                 }
                 static inline mask_type mask_and(mask_type a, mask_type b) { return _mm256_and_ps(a, b); }
                 static inline mask_type mask_or(mask_type a, mask_type b) { return _mm256_or_ps(a, b); }
@@ -194,6 +437,12 @@ namespace Engine::ISAArch {
                 using register_type = __m256i;
                 using mask_type     = __m256i; 
                 static constexpr int size = 8;
+
+                template <typename Target>
+                static inline __m256 cast_to(register_type a) {
+                    static_assert(std::is_same_v<Target, float>, "uint32_t-to-float cast is implemented.");
+                    return _mm256_cvtepi32_ps(a); 
+                }
                 
                 // Memory
                 static inline register_type broadcast(uint32_t v) { return _mm256_set1_epi32(v); }
@@ -216,7 +465,12 @@ namespace Engine::ISAArch {
                 static inline mask_type cmp_lt(register_type a, register_type b) { return _mm256_cmpgt_epi32(b, a); } // Flipped operands for Less-Than
                 static inline mask_type cmp_eq(register_type a, register_type b) { return _mm256_cmpeq_epi32(a, b); }
 
-                static inline mask_type mask_not(mask_type a) { return _mm256_xor_si256(a, _mm256_set1_epi32(-1)); }
+                static inline mask_type mask_not(mask_type a) { 
+                    // return _mm256_xor_si256(a, _mm256_set1_epi32(-1)); 
+
+                    __m256i all_ones = _mm256_cmpeq_epi32(_mm256_setzero_si256(), _mm256_setzero_si256());
+                    return _mm256_xor_si256(a, all_ones);
+                }
                 static inline mask_type mask_and(mask_type a, mask_type b) { return _mm256_and_si256(a, b); }
                 static inline mask_type mask_or(mask_type a, mask_type b) { return _mm256_or_si256(a, b); }
 
@@ -283,8 +537,25 @@ namespace Engine::ISAArch {
                 static inline register_type min(register_type a, register_type b) { return vminq_f32(a, b); }
                 static inline register_type max(register_type a, register_type b) { return vmaxq_f32(a, b); }
 
-                static inline register_type rsqrt(register_type a) { return vrsqrteq_f32(a); }
-                static inline register_type rcp(register_type a) { return vrecpeq_f32(a); }
+                // 1 / sqrt(x)
+                static inline register_type rsqrt(register_type a) { 
+                    // 1. Get the rough 8-bit estimate
+                    float32x4_t approx = vrsqrteq_f32(a);
+                    // 2. Execute the dedicated hardware Newton-Raphson step
+                    float32x4_t step = vrsqrtsq_f32(a, vmulq_f32(approx, approx));
+                    // 3. Multiply the estimate by the step to get 23-bit precision
+                    return vmulq_f32(approx, step);
+                }
+
+                // 1 / x
+                static inline register_type rcp(register_type a) { 
+                    // 1. Get the rough 8-bit estimate
+                    float32x4_t approx = vrecpeq_f32(a);
+                    // 2. Execute the dedicated hardware Newton-Raphson step
+                    float32x4_t step = vrecpsq_f32(a, approx);
+                    // 3. Multiply the estimate by the step to get 23-bit precision
+                    return vmulq_f32(approx, step);
+                }
 
                 static inline register_type abs(register_type a) { return vabsq_f32(a); }
                 static inline register_type floor(register_type a) { return vrndmq_f32(a); } // Round towards Minus infinity
@@ -454,6 +725,12 @@ namespace Engine::ISAArch {
                     res = vsetq_lane_u32(base_addr[vgetq_lane_u32(indices, 3)], res, 3);
                     return res;
                 }
+
+                template <typename Target>
+                static inline float32x4_t cast_to(register_type a) {
+                    static_assert(std::is_same_v<Target, float>, "uint32_t-to-float cast is implemented.");
+                    return vcvtq_f32_u32(a);
+                }
             };
         #endif // ENGINE_ARCH_NEON
     }
@@ -490,18 +767,24 @@ namespace Engine::ISAArch {
         inline simd_mask<U, Abi> cast_to() const {
             if constexpr (std::is_same_v<T, U>) {
                 return *this;
-            } else if constexpr (std::is_same_v<T, uint32_t> && std::is_same_v<U, float>) {
-                #ifdef ENGINE_ARCH_AVX2
+            } // UINT32 to FLOAT
+            else if constexpr (std::is_same_v<T, uint32_t> && std::is_same_v<U, float>) {
+                if constexpr (std::is_same_v<Abi, simd_abi::avx2>) {
                     return simd_mask<U, Abi>(_mm256_castsi256_ps(m_mask));
-                #elif defined(ENGINE_ARCH_NEON)
+                } else if constexpr (std::is_same_v<Abi, simd_abi::sse41>) {
+                    return simd_mask<U, Abi>(_mm_castsi128_ps(m_mask));
+                } else if constexpr (std::is_same_v<Abi, simd_abi::neon>) {
                     return simd_mask<U, Abi>(m_mask);
-                #endif
-            } else if constexpr (std::is_same_v<T, float> && std::is_same_v<U, uint32_t>) {
-                #ifdef ENGINE_ARCH_AVX2
+                }
+            } // FLOAT to UINT32
+            else if constexpr (std::is_same_v<T, float> && std::is_same_v<U, uint32_t>) {
+                if constexpr (std::is_same_v<Abi, simd_abi::avx2>) {
                     return simd_mask<U, Abi>(_mm256_castps_si256(m_mask));
-                #elif defined(ENGINE_ARCH_NEON)
+                } else if constexpr (std::is_same_v<Abi, simd_abi::sse41>) {
+                    return simd_mask<U, Abi>(_mm_castps_si128(m_mask));
+                } else if constexpr (std::is_same_v<Abi, simd_abi::neon>) {
                     return simd_mask<U, Abi>(m_mask);
-                #endif
+                }
             } else {
                 static_assert(sizeof(U) == 0, "Unsupported mask cast.");
             }
@@ -788,7 +1071,7 @@ namespace Engine::ISAArch {
 
     // The free function that mirrors std::simd::where
     template <typename T, typename Abi>
-    inline WhereExpression<T, Abi> where(const simd_mask<T, Abi>& mask, simd<T, Abi>& target) {
+    [[nodiscard]] FORCE_INLINE WhereExpression<T, Abi> where(const simd_mask<T, Abi>& mask, simd<T, Abi>& target) {
         return WhereExpression<T, Abi>{mask, target};
     }
 
@@ -800,11 +1083,81 @@ namespace Engine::ISAArch {
         auto raw_cast = detail::simd_traits<FromType, Abi>::template cast_to<ToType>(from.native_handle());
         return simd<ToType, Abi>::from_native(raw_cast);
     }
+
+    // ========================================================
+    // TIER 1: SOA (Struct of Arrays) - "The Number Cruncher"
+    // ========================================================
+    // Maps to the widest available CPU register natively (e.g., 256-bit on AVX2, 128-bit on NEON).
+    // Particle physics, Job Systems, Audio Processing, Culling loops.
+    // WARNING: Do NOT use inside structs meant for network serialization or GPU buffers.
+    template <typename T>
+    using WideBatch = simd<T, simd_abi::native<T>>;
+    
+    // Engine-wide typedefs for data processing
+    using WideFloat = WideBatch<float>;
+    using WideUInt  = WideBatch<uint32_t>;
+
+    // ========================================================
+    // TIER 2: AOS (Array of Structs) - "The Geometric Standard"
+    // ========================================================
+    // Strictly locked to 128-bit (4 lanes) across ALL platforms.
+    // On AVX2 systems, this deliberately steps down to SSE4.1 ABI.
+    // Transform Matrices, Vectors, Quaternions, GPU Uniform Buffers.
+    template <typename T>
+    #if ENGINE_ARCH_NEON
+        using FixedBatch4 = simd<T, simd_abi::neon>;
+    #else
+        using FixedBatch4 = simd<T, simd_abi::sse41>; 
+    #endif
+    
+    // Engine-wide typedefs for geometry
+    using FixedFloat4 = FixedBatch4<float>;
+    using FixedUInt4  = FixedBatch4<uint32_t>;
+
+    /*
+        // 1. PERFECT GPU VEC4 (Guaranteed 16 Bytes on all consoles/PC)
+        CACHE_CHUNK_ALIGN_16 struct GPUVector4 {
+            Engine::ISAArch::FixedFloat4 data;  // Explicitly locked to 128-bit (4 lanes)
+            
+            FORCE_INLINE Engine::ISAArch::FixedFloat4 dot(const GPUVector4& other) const {
+                auto xyzw = data * other.data;
+                auto yxwz = xyzw.swizzle<1, 0, 3, 2>();
+                auto sum1 = xyzw + yxwz;
+                auto zwxy = sum1.swizzle<2, 3, 0, 1>();
+                return sum1 + zwxy;
+            }
+        };
+
+        // 2. PERFECT BATCH PROCESSOR (Scales natively to AVX2/NEON width)
+        void ApplyGravityToTriggerBox(float gravity, float dt, float* RESTRICT globalPosZ, const uint32_t* RESTRICT activeEntityIDs, size_t activeCount) {
+            Engine::ISAArch::WideFloat gravityStep = gravity * dt; // Uses up to 256-bit AVX2
+
+            for (size_t i = 0; i < activeCount; i += Engine::ISAArch::WideFloat::size()) {
+                Engine::ISAArch::WideUInt entityIndices(&activeEntityIDs[i]);
+
+                Engine::ISAArch::WideFloat posX(globalPosX, entityIndices);
+                Engine::ISAArch::WideFloat posY(globalPosY, entityIndices);
+                Engine::ISAArch::WideFloat posZ(globalPosZ, entityIndices);
+
+                posZ -= gravityStep;
+
+                CACHE_CHUNK_ALIGN_32 float tempZ[Engine::ISAArch::WideFloat::size()];
+                CACHE_CHUNK_ALIGN_32 uint32_t tempIndices[Engine::ISAArch::WideUInt::size()];
+                
+                posZ.copy_to(tempZ);
+                entityIndices.copy_to(tempIndices);
+
+                for (int lane = 0; lane < Engine::ISAArch::WideFloat::size(); ++lane) {
+                    globalPosZ[tempIndices[lane]] = tempZ[lane];
+                }
+            }
+        }
+    */
 }
 
 /*
 // Use the custom C++26-compliant wrapper
-using NativeFloatSIMDBatch = Engine::ISAArch::simd<float>;
+using NativeFloatSIMDBatch = Engine::ISAArch::FixedFloat4;
 using NativeUIntBatch      = Engine::ISAArch::simd<uint32_t>;
 
 constexpr std::size_t NATIVE_BATCH_SIZE = NativeFloatSIMDBatch::size();
@@ -831,8 +1184,11 @@ struct alignas(NATIVE_SIMD_BATCH_ALIGN) SIMDVector3D {
         NativeFloatSIMDBatch safeSqLen = sqLen;
         Engine::ISAArch::where(!validMask, safeSqLen) = 1.0f; 
 
-        // Emits hardware square root seamlessly
-        NativeFloatSIMDBatch invLen = 1.0f / Engine::ISAArch::sqrt(safeSqLen);
+        // Division is too expensive (10-15 clock cycles)
+        // NativeFloatSIMDBatch invLen = 1.0f / Engine::ISAArch::sqrt(safeSqLen);
+
+        // Fast, refined, division-free inverse square root! Solves the expensive division problem, provides a performance boost.
+        NativeFloatSIMDBatch invLen = Engine::ISAArch::rsqrt(safeSqLen);
 
         // Masked multiplications execute cleanly via the proxy overload
         Engine::ISAArch::where(validMask, x) *= invLen;
@@ -915,7 +1271,7 @@ void ApplyGravityToTriggerBox(float gravity, float dt) {
     }
 }
 
-using NativeFloat = Engine::ISAArch::simd<float>;
+using NativeFloat = Engine::ISAArch::FixedFloat4;
 
 // By allowing floating-point values to interact with standard (^, &, |) operators, we are effectively letting your gameplay programmers act like compiler engineers, manipulating pure binary with the safety of C++ types.
 FORCE_INLINE NativeFloat GetSafeInverseRayDirection(const NativeFloat& dir) {
