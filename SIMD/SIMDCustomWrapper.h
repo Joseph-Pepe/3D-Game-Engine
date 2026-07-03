@@ -236,6 +236,103 @@ namespace Engine::ISAArch {
                 }
             };
 
+            // --- AVX-512 DOUBLE TRAITS (8 Elements per Register) ---
+            template <> struct simd_traits<double, simd_abi::avx512> {
+                using register_type = __m512d;
+                using mask_type     = __mmask8; 
+                static constexpr int size = 8;
+                
+                static inline register_type broadcast(double v) { return _mm512_set1_pd(v); }
+                static inline register_type load(const double* mem) { return _mm512_loadu_pd(mem); }
+                static inline void store(double* mem, register_type v) { _mm512_storeu_pd(mem, v); }
+                
+                static inline register_type add(register_type a, register_type b) { return _mm512_add_pd(a, b); }
+                static inline register_type sub(register_type a, register_type b) { return _mm512_sub_pd(a, b); }
+                static inline register_type mul(register_type a, register_type b) { return _mm512_mul_pd(a, b); }
+                static inline register_type div(register_type a, register_type b) { return _mm512_div_pd(a, b); }
+
+                static inline register_type min(register_type a, register_type b) { return _mm512_min_pd(a, b); }
+                static inline register_type max(register_type a, register_type b) { return _mm512_max_pd(a, b); }
+                static inline register_type sqrt(register_type a) { return _mm512_sqrt_pd(a); }
+                
+                // Precision is paramount for doubles, so we use actual division instead of Newton-Raphson approximation
+                static inline register_type rsqrt(register_type a) { return _mm512_div_pd(_mm512_set1_pd(1.0), _mm512_sqrt_pd(a)); }
+                static inline register_type rcp(register_type a) { return _mm512_div_pd(_mm512_set1_pd(1.0), a); }
+
+                static inline register_type abs(register_type a) { return _mm512_and_pd(a, _mm512_castsi512_pd(_mm512_set1_epi64(0x7FFFFFFFFFFFFFFF))); }
+                static inline register_type floor(register_type a) { return _mm512_floor_pd(a); }
+                static inline register_type ceil(register_type a) { return _mm512_ceil_pd(a); }
+
+                static inline register_type fmadd(register_type a, register_type b, register_type c) { return _mm512_fmadd_pd(a, b, c); }
+
+                static inline mask_type cmp_gt(register_type a, register_type b) { return _mm512_cmp_pd_mask(a, b, _CMP_GT_OQ); }
+                static inline mask_type cmp_lt(register_type a, register_type b) { return _mm512_cmp_pd_mask(a, b, _CMP_LT_OQ); }
+                static inline mask_type cmp_eq(register_type a, register_type b) { return _mm512_cmp_pd_mask(a, b, _CMP_EQ_OQ); }
+
+                static inline mask_type mask_not(mask_type a) { return _knot_mask8(a); }
+                static inline mask_type mask_and(mask_type a, mask_type b) { return _kand_mask8(a, b); }
+                static inline mask_type mask_or(mask_type a, mask_type b) { return _kor_mask8(a, b); }
+
+                static inline register_type bit_xor(register_type a, register_type b) { return _mm512_xor_pd(a, b); }
+                static inline register_type bit_or(register_type a, register_type b) { return _mm512_or_pd(a, b); }
+                static inline register_type bit_and(register_type a, register_type b) { return _mm512_and_pd(a, b); }
+                static inline register_type negate(register_type a) { return _mm512_xor_pd(a, _mm512_set1_pd(-0.0)); }
+
+                static inline register_type blend(mask_type mask, register_type true_v, register_type false_v) { return _mm512_mask_blend_pd(mask, false_v, true_v); }
+                static inline double reduce_add(register_type a) { return _mm512_reduce_add_pd(a); }
+
+                // Gather uses a 256-bit index register to fetch 8 doubles
+                static inline register_type gather(const double* base_addr, __m512i indices) { 
+                    return _mm512_i32gather_pd(_mm512_castsi512_si256(indices), base_addr, 8); 
+                }
+
+                static inline bool mask_any(mask_type a) { return a != 0; }
+                static inline bool mask_all(mask_type a) { return a == 0xFF; }
+
+                template <int i0, int i1, int i2, int i3, int i4, int i5, int i6, int i7>
+                static inline register_type shuffle(register_type a) { return a; } // (AVX-512 cross-lane swizzling is highly complex, omit for brevity unless needed)
+            };
+
+            // --- AVX-512 UINT8 TRAITS (64 Elements per Register) ---
+            template <> struct simd_traits<uint8_t, simd_abi::avx512> {
+                using register_type = __m512i;
+                using mask_type     = __mmask64; // Massive 64-bit hardware mask!
+                static constexpr int size = 64;
+
+                static inline register_type broadcast(uint8_t v) { return _mm512_set1_epi8(v); }
+                static inline register_type load(const uint8_t* mem) { return _mm512_loadu_si512(reinterpret_cast<const void*>(mem)); }
+                static inline void store(uint8_t* mem, register_type v) { _mm512_storeu_si512(reinterpret_cast<void*>(mem), v); }
+                
+                static inline register_type add(register_type a, register_type b) { return _mm512_add_epi8(a, b); }
+                static inline register_type sub(register_type a, register_type b) { return _mm512_sub_epi8(a, b); }
+                
+                // Saturating Arithmetic (Clamps to 255 or 0)
+                static inline register_type add_sat(register_type a, register_type b) { return _mm512_adds_epu8(a, b); }
+                static inline register_type sub_sat(register_type a, register_type b) { return _mm512_subs_epu8(a, b); }
+
+                static inline mask_type cmp_gt(register_type a, register_type b) { return _mm512_cmpgt_epu8_mask(a, b); }
+                static inline mask_type cmp_lt(register_type a, register_type b) { return _mm512_cmplt_epu8_mask(a, b); }
+                static inline mask_type cmp_eq(register_type a, register_type b) { return _mm512_cmpeq_epi8_mask(a, b); }
+
+                static inline mask_type mask_not(mask_type a) { return _knot_mask64(a); }
+                static inline mask_type mask_and(mask_type a, mask_type b) { return _kand_mask64(a, b); }
+                static inline mask_type mask_or(mask_type a, mask_type b) { return _kor_mask64(a, b); }
+
+                static inline register_type min(register_type a, register_type b) { return _mm512_min_epu8(a, b); }
+                static inline register_type max(register_type a, register_type b) { return _mm512_max_epu8(a, b); }
+
+                static inline register_type bit_xor(register_type a, register_type b) { return _mm512_xor_epi32(a, b); }
+                static inline register_type bit_or(register_type a, register_type b) { return _mm512_or_epi32(a, b); }
+                static inline register_type bit_and(register_type a, register_type b) { return _mm512_and_epi32(a, b); }
+
+                static inline register_type blend(mask_type mask, register_type true_v, register_type false_v) {
+                    return _mm512_mask_blend_epi8(mask, false_v, true_v);
+                }
+
+                static inline bool mask_any(mask_type a) { return a != 0; }
+                static inline bool mask_all(mask_type a) { return a == 0xFFFFFFFFFFFFFFFFULL; }
+            };
+
             // --- AVX-512 UINT32 TRAITS ---
             template <> struct simd_traits<uint32_t, simd_abi::avx512> {
                 using register_type = __m512i;
@@ -478,6 +575,120 @@ namespace Engine::ISAArch {
                     __m128i half_data = _mm_cvtps_ph(v, _MM_FROUND_TO_NEAREST_INT);
                     _mm_storel_epi64(reinterpret_cast<__m128i*>(mem), half_data);
                 }
+            };
+
+            // --- SSE4.1 DOUBLE TRAITS (2 Elements per Register) ---
+            template <> struct simd_traits<double, simd_abi::sse41> {
+                using register_type = __m128d;
+                using mask_type     = __m128d; 
+                static constexpr int size = 2;
+                
+                static inline register_type broadcast(double v) { return _mm_set1_pd(v); }
+                static inline register_type load(const double* mem) { return _mm_loadu_pd(mem); }
+                static inline void store(double* mem, register_type v) { _mm_storeu_pd(mem, v); }
+                
+                static inline register_type add(register_type a, register_type b) { return _mm_add_pd(a, b); }
+                static inline register_type sub(register_type a, register_type b) { return _mm_sub_pd(a, b); }
+                static inline register_type mul(register_type a, register_type b) { return _mm_mul_pd(a, b); }
+                static inline register_type div(register_type a, register_type b) { return _mm_div_pd(a, b); }
+
+                static inline register_type min(register_type a, register_type b) { return _mm_min_pd(a, b); }
+                static inline register_type max(register_type a, register_type b) { return _mm_max_pd(a, b); }
+                static inline register_type sqrt(register_type a) { return _mm_sqrt_pd(a); }
+
+                static inline register_type rsqrt(register_type a) { return _mm_div_pd(_mm_set1_pd(1.0), _mm_sqrt_pd(a)); }
+                static inline register_type rcp(register_type a) { return _mm_div_pd(_mm_set1_pd(1.0), a); }
+
+                static inline register_type abs(register_type a) { return _mm_and_pd(a, _mm_castsi128_pd(_mm_set1_epi64x(0x7FFFFFFFFFFFFFFF))); }
+                static inline register_type floor(register_type a) { return _mm_floor_pd(a); }
+                static inline register_type ceil(register_type a) { return _mm_ceil_pd(a); }
+
+                static inline register_type fmadd(register_type a, register_type b, register_type c) { return _mm_add_pd(_mm_mul_pd(a, b), c); }
+
+                static inline mask_type cmp_gt(register_type a, register_type b) { return _mm_cmpgt_pd(a, b); }
+                static inline mask_type cmp_lt(register_type a, register_type b) { return _mm_cmplt_pd(a, b); }
+                static inline mask_type cmp_eq(register_type a, register_type b) { return _mm_cmpeq_pd(a, b); }
+
+                static inline mask_type mask_not(mask_type a) { 
+                    __m128d all_ones = _mm_cmpeq_pd(_mm_setzero_pd(), _mm_setzero_pd());
+                    return _mm_xor_pd(a, all_ones);
+                }
+                static inline mask_type mask_and(mask_type a, mask_type b) { return _mm_and_pd(a, b); }
+                static inline mask_type mask_or(mask_type a, mask_type b) { return _mm_or_pd(a, b); }
+
+                static inline register_type bit_xor(register_type a, register_type b) { return _mm_xor_pd(a, b); }
+                static inline register_type bit_or(register_type a, register_type b) { return _mm_or_pd(a, b); }
+                static inline register_type bit_and(register_type a, register_type b) { return _mm_and_pd(a, b); }
+                static inline register_type negate(register_type a) { return _mm_xor_pd(a, _mm_set1_pd(-0.0)); }
+
+                static inline register_type blend(mask_type mask, register_type true_v, register_type false_v) { return _mm_blendv_pd(false_v, true_v, mask); }
+
+                static inline double reduce_add(register_type a) {
+                    __m128d sums = _mm_add_pd(a, _mm_unpackhi_pd(a, a));
+                    return _mm_cvtsd_f64(sums);
+                }
+
+                static inline register_type gather(const double* base_addr, __m128i indices) {
+                    // Extracts the lowest 2 indices from the 4 provided by the uint32_t batch
+                    return _mm_set_pd(base_addr[_mm_extract_epi32(indices, 1)], base_addr[_mm_extract_epi32(indices, 0)]);
+                }
+
+                static inline bool mask_any(mask_type a) { return _mm_movemask_pd(a) != 0; }
+                static inline bool mask_all(mask_type a) { return _mm_movemask_pd(a) == 0x3; }
+
+                template <int i0, int i1>
+                static inline register_type shuffle(register_type a) {
+                    return _mm_shuffle_pd(a, a, _MM_SHUFFLE2(i1, i0));
+                }
+            };
+
+            // --- SSE4.1 UINT8 TRAITS (16 Elements per Register) ---
+            template <> struct simd_traits<uint8_t, simd_abi::sse41> {
+                using register_type = __m128i;
+                using mask_type     = __m128i; 
+                static constexpr int size = 16;
+                
+                static inline register_type broadcast(uint8_t v) { return _mm_set1_epi8(v); }
+                static inline register_type load(const uint8_t* mem) { return _mm_loadu_si128(reinterpret_cast<const __m128i*>(mem)); }
+                static inline void store(uint8_t* mem, register_type v) { _mm_storeu_si128(reinterpret_cast<__m128i*>(mem), v); }
+                
+                static inline register_type add(register_type a, register_type b) { return _mm_add_epi8(a, b); }
+                static inline register_type sub(register_type a, register_type b) { return _mm_sub_epi8(a, b); }
+                
+                static inline register_type add_sat(register_type a, register_type b) { return _mm_adds_epu8(a, b); }
+                static inline register_type sub_sat(register_type a, register_type b) { return _mm_subs_epu8(a, b); }
+
+                static inline register_type min(register_type a, register_type b) { return _mm_min_epu8(a, b); }
+                static inline register_type max(register_type a, register_type b) { return _mm_max_epu8(a, b); }
+
+                static inline register_type bit_or(register_type a, register_type b) { return _mm_or_si128(a, b); }
+                static inline register_type bit_and(register_type a, register_type b) { return _mm_and_si128(a, b); }
+                static inline register_type bit_xor(register_type a, register_type b) { return _mm_xor_si128(a, b); }
+                
+                // Relational Unsigned Limits (XOR highest bit 0x80 to shift into signed range for the hardware comparator)
+                static inline mask_type cmp_gt(register_type a, register_type b) { 
+                    __m128i sign_flip = _mm_set1_epi8(char(0x80));
+                    return _mm_cmpgt_epi8(_mm_xor_si128(a, sign_flip), _mm_xor_si128(b, sign_flip)); 
+                }
+                static inline mask_type cmp_lt(register_type a, register_type b) { 
+                    __m128i sign_flip = _mm_set1_epi8(char(0x80));
+                    return _mm_cmpgt_epi8(_mm_xor_si128(b, sign_flip), _mm_xor_si128(a, sign_flip)); 
+                }
+                static inline mask_type cmp_eq(register_type a, register_type b) { return _mm_cmpeq_epi8(a, b); }
+
+                static inline mask_type mask_not(mask_type a) { 
+                    __m128i all_ones = _mm_cmpeq_epi32(_mm_setzero_si128(), _mm_setzero_si128());
+                    return _mm_xor_si128(a, all_ones);
+                }
+                static inline mask_type mask_and(mask_type a, mask_type b) { return _mm_and_si128(a, b); }
+                static inline mask_type mask_or(mask_type a, mask_type b) { return _mm_or_si128(a, b); }
+
+                static inline register_type blend(mask_type mask, register_type true_v, register_type false_v) {
+                    return _mm_blendv_epi8(false_v, true_v, mask);
+                }
+
+                static inline bool mask_any(mask_type a) { return _mm_movemask_epi8(a) != 0; }
+                static inline bool mask_all(mask_type a) { return _mm_movemask_epi8(a) == 0xFFFF; }
             };
 
             // --- SSE4.1 UINT32 TRAITS ---
@@ -776,6 +987,123 @@ namespace Engine::ISAArch {
                 }
             };
 
+            // --- AVX2 DOUBLE TRAITS (4 Elements per Register) ---
+            template <> struct simd_traits<double, simd_abi::avx2> {
+                using register_type = __m256d;
+                using mask_type     = __m256d; 
+                static constexpr int size = 4;
+                
+                static inline register_type broadcast(double v) { return _mm256_set1_pd(v); }
+                static inline register_type load(const double* mem) { return _mm256_loadu_pd(mem); }
+                static inline void store(double* mem, register_type v) { _mm256_storeu_pd(mem, v); }
+                
+                static inline register_type add(register_type a, register_type b) { return _mm256_add_pd(a, b); }
+                static inline register_type sub(register_type a, register_type b) { return _mm256_sub_pd(a, b); }
+                static inline register_type mul(register_type a, register_type b) { return _mm256_mul_pd(a, b); }
+                static inline register_type div(register_type a, register_type b) { return _mm256_div_pd(a, b); }
+
+                static inline register_type min(register_type a, register_type b) { return _mm256_min_pd(a, b); }
+                static inline register_type max(register_type a, register_type b) { return _mm256_max_pd(a, b); }
+                static inline register_type sqrt(register_type a) { return _mm256_sqrt_pd(a); }
+
+                static inline register_type rsqrt(register_type a) { return _mm256_div_pd(_mm256_set1_pd(1.0), _mm256_sqrt_pd(a)); }
+                static inline register_type rcp(register_type a) { return _mm256_div_pd(_mm256_set1_pd(1.0), a); }
+
+                static inline register_type abs(register_type a) { return _mm256_and_pd(a, _mm256_castsi256_pd(_mm256_set1_epi64x(0x7FFFFFFFFFFFFFFF))); }
+                static inline register_type floor(register_type a) { return _mm256_floor_pd(a); }
+                static inline register_type ceil(register_type a) { return _mm256_ceil_pd(a); }
+
+                static inline register_type fmadd(register_type a, register_type b, register_type c) { return _mm256_fmadd_pd(a, b, c); }
+
+                static inline mask_type cmp_gt(register_type a, register_type b) { return _mm256_cmp_pd(a, b, _CMP_GT_OQ); }
+                static inline mask_type cmp_lt(register_type a, register_type b) { return _mm256_cmp_pd(a, b, _CMP_LT_OQ); }
+                static inline mask_type cmp_eq(register_type a, register_type b) { return _mm256_cmp_pd(a, b, _CMP_EQ_OQ); }
+
+                static inline mask_type mask_not(mask_type a) { 
+                    __m256d all_ones = _mm256_cmp_pd(_mm256_setzero_pd(), _mm256_setzero_pd(), _CMP_EQ_OQ);
+                    return _mm256_xor_pd(a, all_ones);
+                }
+                static inline mask_type mask_and(mask_type a, mask_type b) { return _mm256_and_pd(a, b); }
+                static inline mask_type mask_or(mask_type a, mask_type b) { return _mm256_or_pd(a, b); }
+
+                static inline register_type bit_xor(register_type a, register_type b) { return _mm256_xor_pd(a, b); }
+                static inline register_type bit_or(register_type a, register_type b) { return _mm256_or_pd(a, b); }
+                static inline register_type bit_and(register_type a, register_type b) { return _mm256_and_pd(a, b); }
+                static inline register_type negate(register_type a) { return _mm256_xor_pd(a, _mm256_set1_pd(-0.0)); }
+
+                static inline register_type blend(mask_type mask, register_type true_v, register_type false_v) { return _mm256_blendv_pd(false_v, true_v, mask); }
+
+                static inline double reduce_add(register_type a) {
+                    __m128d lo = _mm256_extractf128_pd(a, 0);
+                    __m128d hi = _mm256_extractf128_pd(a, 1);
+                    __m128d sums = _mm_add_pd(lo, hi);
+                    sums = _mm_add_pd(sums, _mm_unpackhi_pd(sums, sums));
+                    return _mm_cvtsd_f64(sums);
+                }
+
+                static inline register_type gather(const double* base_addr, __m256i indices) {
+                    // Elegant API mapping: Takes the lowest 128-bits (4 indices) from the uint32 batch and pulls 4 doubles!
+                    return _mm256_i32gather_pd(base_addr, _mm256_castsi256_si128(indices), 8); 
+                }
+
+                static inline bool mask_any(mask_type a) { return _mm256_movemask_pd(a) != 0; }
+                static inline bool mask_all(mask_type a) { return _mm256_movemask_pd(a) == 0xF; }
+
+                template <int i0, int i1, int i2, int i3>
+                static inline register_type shuffle(register_type a) { return _mm256_permute4x64_pd(a, _MM_SHUFFLE(i3, i2, i1, i0)); }
+            };
+
+            // --- AVX2 UINT8 TRAITS (32 Elements per Register) ---
+            template <> struct simd_traits<uint8_t, simd_abi::avx2> {
+                using register_type = __m256i;
+                using mask_type     = __m256i; 
+                static constexpr int size = 32;
+                
+                static inline register_type broadcast(uint8_t v) { return _mm256_set1_epi8(v); }
+                static inline register_type load(const uint8_t* mem) { return _mm256_loadu_si256(reinterpret_cast<const __m256i*>(mem)); }
+                static inline void store(uint8_t* mem, register_type v) { _mm256_storeu_si256(reinterpret_cast<__m256i*>(mem), v); }
+                
+                static inline register_type add(register_type a, register_type b) { return _mm256_add_epi8(a, b); }
+                static inline register_type sub(register_type a, register_type b) { return _mm256_sub_epi8(a, b); }
+                
+                // Saturating Hardware Arithmetic
+                static inline register_type add_sat(register_type a, register_type b) { return _mm256_adds_epu8(a, b); }
+                static inline register_type sub_sat(register_type a, register_type b) { return _mm256_subs_epu8(a, b); }
+
+                static inline register_type min(register_type a, register_type b) { return _mm256_min_epu8(a, b); }
+                static inline register_type max(register_type a, register_type b) { return _mm256_max_epu8(a, b); }
+
+                static inline register_type bit_xor(register_type a, register_type b) { return _mm256_xor_si256(a, b); }
+                static inline register_type bit_or(register_type a, register_type b) { return _mm256_or_si256(a, b); }
+                static inline register_type bit_and(register_type a, register_type b) { return _mm256_and_si256(a, b); }
+                
+                // Relational Unsigned Limits
+                static inline mask_type cmp_gt(register_type a, register_type b) { 
+                    __m256i sign_flip = _mm256_set1_epi8(static_cast<char>(0x80));
+                    return _mm256_cmpgt_epi8(_mm256_xor_si256(a, sign_flip), _mm256_xor_si256(b, sign_flip)); 
+                }
+                static inline mask_type cmp_lt(register_type a, register_type b) { 
+                    __m256i sign_flip = _mm256_set1_epi8(static_cast<char>(0x80));
+                    return _mm256_cmpgt_epi8(_mm256_xor_si256(b, sign_flip), _mm256_xor_si256(a, sign_flip)); 
+                }
+                static inline mask_type cmp_eq(register_type a, register_type b) { return _mm256_cmpeq_epi8(a, b); }
+
+                static inline mask_type mask_not(mask_type a) { 
+                    __m256i all_ones = _mm256_cmpeq_epi32(_mm256_setzero_si256(), _mm256_setzero_si256());
+                    return _mm256_xor_si256(a, all_ones);
+                }
+                static inline mask_type mask_and(mask_type a, mask_type b) { return _mm256_and_si256(a, b); }
+                static inline mask_type mask_or(mask_type a, mask_type b) { return _mm256_or_si256(a, b); }
+
+                static inline register_type blend(mask_type mask, register_type true_v, register_type false_v) {
+                    return _mm256_blendv_epi8(false_v, true_v, mask);
+                }
+
+                static inline bool mask_any(mask_type a) { return _mm256_movemask_epi8(a) != 0; }
+                // _mm256_movemask_epi8 extracts the top bit of all 32 bytes. If all are true, the result is 32 1s (0xFFFFFFFF)
+                static inline bool mask_all(mask_type a) { return _mm256_movemask_epi8(a) == (int)0xFFFFFFFF; }
+            };
+
             // --- AVX2 UINT32 TRAITS ---
             template <> struct simd_traits<uint32_t, simd_abi::avx2> {
                 using register_type = __m256i;
@@ -1070,6 +1398,112 @@ namespace Engine::ISAArch {
                 }
             };
 
+            // --- NEON DOUBLE TRAITS (2 Elements per Register) ---
+            template <> struct simd_traits<double, simd_abi::neon> {
+                using register_type = float64x2_t;
+                using mask_type     = uint64x2_t;
+                static constexpr int size = 2;
+                
+                static inline register_type broadcast(double v) { return vdupq_n_f64(v); }
+                static inline register_type load(const double* mem) { return vld1q_f64(mem); }
+                static inline void store(double* mem, register_type v) { vst1q_f64(mem, v); }
+
+                static inline register_type add(register_type a, register_type b) { return vaddq_f64(a, b); }
+                static inline register_type sub(register_type a, register_type b) { return vsubq_f64(a, b); }
+                static inline register_type mul(register_type a, register_type b) { return vmulq_f64(a, b); }
+                static inline register_type div(register_type a, register_type b) { return vdivq_f64(a, b); }
+
+                static inline register_type min(register_type a, register_type b) { return vminq_f64(a, b); }
+                static inline register_type max(register_type a, register_type b) { return vmaxq_f64(a, b); }
+                static inline register_type sqrt(register_type a) { return vsqrtq_f64(a); }
+
+                static inline register_type rsqrt(register_type a) { return vdivq_f64(vdupq_n_f64(1.0), vsqrtq_f64(a)); }
+                static inline register_type rcp(register_type a) { return vdivq_f64(vdupq_n_f64(1.0), a); }
+
+                static inline register_type abs(register_type a) { return vabsq_f64(a); }
+                static inline register_type floor(register_type a) { return vrndmq_f64(a); }
+                static inline register_type ceil(register_type a) { return vrndpq_f64(a); }
+                
+                static inline register_type fmadd(register_type a, register_type b, register_type c) { return vfmaq_f64(c, a, b); }
+
+                static inline mask_type cmp_gt(register_type a, register_type b) { return vcgtq_f64(a, b); }
+                static inline mask_type cmp_lt(register_type a, register_type b) { return vcltq_f64(a, b); }
+                static inline mask_type cmp_eq(register_type a, register_type b) { return vceqq_f64(a, b); }
+
+                static inline mask_type mask_not(mask_type a) { return veorq_u64(a, vdupq_n_u64(-1)); }
+                static inline mask_type mask_and(mask_type a, mask_type b) { return vandq_u64(a, b); }
+                static inline mask_type mask_or(mask_type a, mask_type b) { return vorrq_u64(a, b); }
+
+                static inline register_type bit_or(register_type a, register_type b) { return vreinterpretq_f64_u64(vorrq_u64(vreinterpretq_u64_f64(a), vreinterpretq_u64_f64(b))); }
+                static inline register_type bit_and(register_type a, register_type b) { return vreinterpretq_f64_u64(vandq_u64(vreinterpretq_u64_f64(a), vreinterpretq_u64_f64(b))); }
+                static inline register_type bit_xor(register_type a, register_type b) { return vreinterpretq_f64_u64(veorq_u64(vreinterpretq_u64_f64(a), vreinterpretq_u64_f64(b))); }
+                static inline register_type negate(register_type a) { return vnegq_f64(a); }
+
+                static inline register_type blend(mask_type mask, register_type true_v, register_type false_v) { return vbslq_f64(mask, true_v, false_v); }
+
+                static inline double reduce_add(register_type a) { return vaddvq_f64(a); }
+
+                static inline register_type gather(const double* base_addr, uint32x4_t indices) {
+                    register_type res = vdupq_n_f64(0.0);
+                    res = vsetq_lane_f64(base_addr[vgetq_lane_u32(indices, 0)], res, 0);
+                    res = vsetq_lane_f64(base_addr[vgetq_lane_u32(indices, 1)], res, 1);
+                    return res;
+                }
+
+                static inline bool mask_any(mask_type a) { return vmaxvq_u32(vreinterpretq_u32_u64(a)) > 0; }
+                static inline bool mask_all(mask_type a) { return vminvq_u32(vreinterpretq_u32_u64(a)) > 0; }
+
+                template <int i0, int i1>
+                static inline register_type shuffle(register_type a) {
+                    register_type res = vdupq_n_f64(0.0);
+                    // ARM NEON lacks a fast cross-lane double shuffle, fallback to inserts
+                    res = vsetq_lane_f64(vgetq_lane_f64(a, i0), res, 0);
+                    res = vsetq_lane_f64(vgetq_lane_f64(a, i1), res, 1);
+                    return res;
+                }
+            };
+
+            // --- NEON UINT8 TRAITS (16 Elements per Register) ---
+            template <> struct simd_traits<uint8_t, simd_abi::neon> {
+                using register_type = uint8x16_t;
+                using mask_type     = uint8x16_t;
+                static constexpr int size = 16;
+                
+                static inline register_type broadcast(uint8_t v) { return vdupq_n_u8(v); }
+                static inline register_type load(const uint8_t* mem) { return vld1q_u8(mem); }
+                static inline void store(uint8_t* mem, register_type v) { vst1q_u8(mem, v); }
+
+                static inline register_type add(register_type a, register_type b) { return vaddq_u8(a, b); }
+                static inline register_type sub(register_type a, register_type b) { return vsubq_u8(a, b); }
+                
+                // Saturating Hardware Arithmetic
+                static inline register_type add_sat(register_type a, register_type b) { return vqaddq_u8(a, b); }
+                static inline register_type sub_sat(register_type a, register_type b) { return vqsubq_u8(a, b); }
+
+                static inline register_type min(register_type a, register_type b) { return vminq_u8(a, b); }
+                static inline register_type max(register_type a, register_type b) { return vmaxq_u8(a, b); }
+                
+                static inline register_type bit_or(register_type a, register_type b) { return vorrq_u8(a, b); }
+                static inline register_type bit_and(register_type a, register_type b) { return vandq_u8(a, b); }
+                static inline register_type bit_xor(register_type a, register_type b) { return veorq_u8(a, b); }
+                
+                // Relational
+                static inline mask_type cmp_gt(register_type a, register_type b) { return vcgtq_u8(a, b); }
+                static inline mask_type cmp_lt(register_type a, register_type b) { return vcltq_u8(a, b); }
+                static inline mask_type cmp_eq(register_type a, register_type b) { return vceqq_u8(a, b); }
+
+                static inline mask_type mask_not(mask_type a) { return vmvnq_u8(a); }
+                static inline mask_type mask_and(mask_type a, mask_type b) { return vandq_u8(a, b); }
+                static inline mask_type mask_or(mask_type a, mask_type b) { return vorrq_u8(a, b); }
+
+                static inline register_type blend(mask_type mask, register_type true_v, register_type false_v) {
+                    return vbslq_u8(mask, true_v, false_v);
+                }
+
+                static inline bool mask_any(mask_type a) { return vmaxvq_u8(a) > 0; }
+                static inline bool mask_all(mask_type a) { return vminvq_u8(a) > 0; }
+            };
+
             // --- NEON UINT32 TRAITS ---
             template <> struct simd_traits<uint32_t, simd_abi::neon> {
                 using register_type = uint32x4_t;
@@ -1361,6 +1795,16 @@ namespace Engine::ISAArch {
             Traits::store_half(mem, m_data);
         }
 
+        // --- SATURATING ARITHMETIC (Clamps instead of wrapping) ---
+        // Exclusively unlocked for 8-bit integers (Colors, Voxels)
+        friend inline simd add_sat(const simd& a, const simd& b) requires (sizeof(T) == 1) {
+            return simd(Traits::add_sat(a.m_data, b.m_data));
+        }
+
+        friend inline simd sub_sat(const simd& a, const simd& b) requires (sizeof(T) == 1) {
+            return simd(Traits::sub_sat(a.m_data, b.m_data));
+        }
+
         // =======================================================================
         // VECTORIZED TRIGONOMETRY (MINIMAX POLYNOMIAL APPROX & HORNER'S METHOD)
         // =======================================================================
@@ -1525,6 +1969,14 @@ namespace Engine::ISAArch {
             return simd(Traits::template shuffle<i0, i1, i2, i3>(m_data));
         }
 
+        // 2-Lane Swizzle (Required for double precision on SSE4.1 / NEON)
+        template <int i0, int i1>
+        inline simd swizzle() const requires (Traits::size == 2) {
+            static_assert(i0 >= 0 && i0 < 2 && i1 >= 0 && i1 < 2, 
+                "Swizzle indices for 2-lane vectors must be 0 or 1");
+            return simd(Traits::template shuffle<i0, i1>(m_data));
+        }
+
         // Common Engine Splats (Broadcast a single lane across the entire register)
         inline simd splat_x() const { return swizzle<0, 0, 0, 0>(); }
         inline simd splat_y() const { return swizzle<1, 1, 1, 1>(); }
@@ -1595,9 +2047,11 @@ namespace Engine::ISAArch {
     using WideBatch = simd<T, simd_abi::native<T>>;
     
     // Engine-wide typedefs for data processing
-    using WideFloat = WideBatch<float>;
-    using WideUInt  = WideBatch<uint32_t>;
-    using WideInt   = WideBatch<int32_t>;
+    using WideFloat  = WideBatch<float>;
+    using WideDouble = WideBatch<double>;
+    using WideUInt8  = WideBatch<uint8_t>;
+    using WideUInt32 = WideBatch<uint32_t>;
+    using WideInt32  = WideBatch<int32_t>;
 
     // ========================================================
     // TIER 2: AOS (Array of Structs) - "The Geometric Standard"
@@ -1618,8 +2072,10 @@ namespace Engine::ISAArch {
     
     // Engine-wide typedefs for geometry
     using FixedFloat4 = FixedBatch4<float>;
-    using FixedUInt4  = FixedBatch4<uint32_t>;
-    using FixedInt4   = FixedBatch4<int32_t>;
+    using FixedDouble = FixedBatch4<double>;
+    using FixedUInt8  = FixedBatch4<uint8_t>;
+    using FixedUInt32 = FixedBatch4<uint32_t>;
+    using FixedInt32  = FixedBatch4<int32_t>;
 
     /*
         // 1. PERFECT GPU VEC4 (Guaranteed 16 Bytes on all consoles/PC)
