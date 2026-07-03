@@ -19,33 +19,44 @@
     #include <f16cintrin.h> // Required for Clang/GCC on Linux
 #endif
 
-#if defined(__AVX2__)
-    // AVX2: Xbox Series X/S, PS5, Modern PC
+#if defined(__AVX512F__)
     #include <immintrin.h>
+
+    // AVX512: Next-Gen (AVX512 silicon intrinsically includes AVX2 and SSE4.1)
+    #define ENGINE_ARCH_AVX512 1
+
+    // AVX512 implicitly guarantees AVX2 and SSE4.1 support 
     #define ENGINE_ARCH_AVX2 1
-#elif defined(__aarch64__) || defined(_M_ARM64)
-    // ARM NEON: Apple Silicon, Switch 2, Android, Windows on ARM
-    #include <arm_neon.h>
-    #define ENGINE_ARCH_NEON 1
+    #define ENGINE_ARCH_SSE41 1
+#elif defined(__AVX2__)
+    #include <immintrin.h>
+
+    // AVX2: Xbox Series X/S, PS5, Modern PC
+    #define ENGINE_ARCH_AVX2 1
+
+    // AVX2 implicitly guarantees SSE4.1 support
+    #define ENGINE_ARCH_SSE41 1
 #elif defined(__SSE4_1__)
     // SSE4.1: Legacy PC Fallback
     #include <immintrin.h> // immintrin handles all x86 SIMD headers
 
     // SSE 4.1 hardware (pre-2012 CPU) does not support Float16 compression, it belongs to the FC16 hardware extension.
+    #define ENGINE_ARCH_SSE41 1
+
     // Enforces [SSE4.1 + FC16 extension]
     #if !defined(__F16C__) && (defined(__clang__) || defined(__GNUC__))
         #error "Engine Compiler Error: SSE4.1 fallback strictly requires the F16C extension for Float16 memory compression. Please compile with -mf16c."
     #endif
-    #define ENGINE_ARCH_SSE41 1
+    
+#elif defined(__aarch64__) || defined(_M_ARM64)
+    // ARM NEON: Apple Silicon, Switch 2, Android, Windows on ARM
+    #include <arm_neon.h>
+    #define ENGINE_ARCH_NEON 1
 #else
-    #error "Engine Compiler Error: Unsupported CPU architecture. AVX2, NEON, or SSE4.1 instruction sets are strictly required."
+    #error "Engine Compiler Error: Unsupported CPU architecture. AVX512, AVX2, NEON, or SSE4.1 instruction sets are strictly required."
 #endif
 
 // --- HARDWARE EXTENSIONS ---
-
-#if defined(__AVX512F__)
-    #define ENGINE_ARCH_AVX512 1
-#endif
 #if defined(__ARM_FEATURE_SVE)   
     // Apple Silicon (M4+)
     #include <arm_sve.h>
@@ -81,8 +92,10 @@
 #endif
 
 void LogHardwareArchitecture() {
-    #if defined(ENGINE_ARCH_AVX2)
-        std::println("[AVX2, X86]: Intel/AMD based architecture detected.");
+    #if defined(ENGINE_ARCH_AVX512)
+        std::println("[AVX-512]: Supercomputer / Next-Gen (x86_64) architecture detected.");
+    #elif defined(ENGINE_ARCH_AVX2)
+        std::println("[AVX2]: Intel/AMD (x86_64) based architecture detected.");
     #elif defined(ENGINE_ARCH_NEON)
         std::println("[ARM64]: ARM based architecture detected.");
     #elif defined(ENGINE_ARCH_SSE41)
@@ -144,6 +157,7 @@ namespace Engine::ISAArch {
                 
                 // Mask Logic operates on standard CPU integer registers, completely bypassing the vector ALU
                 static inline mask_type mask_not(mask_type a) { return _knot_mask16(a); }
+                static inline mask_type mask_or(mask_type a, mask_type b) { return _kor_mask16(a, b); }
                 static inline mask_type mask_and(mask_type a, mask_type b) { return _kand_mask16(a, b); }
 
                 static inline bool mask_any(mask_type a) { return a != 0; }
@@ -183,16 +197,21 @@ namespace Engine::ISAArch {
                 }
 
                 // --- AVX-512 BITWISE & LOGIC ---
-                static inline register_type abs(register_type a) { return _mm512_and_ps(a, _mm512_castsi512_ps(_mm512_set1_epi32(0x7FFFFFFF))); }
+                static inline register_type abs(register_type a) { return _mm512_and_ps(a, _mm512_castsi512_ps(_mm512_set1_epi32(0x7FFFFFFF))); } // Uses the floating-point AND instruction
                 static inline register_type floor(register_type a) { return _mm512_floor_ps(a); }
                 static inline register_type ceil(register_type a) { return _mm512_ceil_ps(a); }
                 static inline mask_type cmp_lt(register_type a, register_type b) { return _mm512_cmp_ps_mask(a, b, _CMP_LT_OQ); }
                 static inline mask_type cmp_eq(register_type a, register_type b) { return _mm512_cmp_ps_mask(a, b, _CMP_EQ_OQ); }
 
+                // --- AVX-512 BITWISE & LOGIC (Pure AVX-512F Compliant) ---
                 static inline register_type bit_xor(register_type a, register_type b) { return _mm512_xor_ps(a, b); }
                 static inline register_type bit_and(register_type a, register_type b) { return _mm512_and_ps(a, b); }
                 static inline register_type bit_or(register_type a, register_type b)  { return _mm512_or_ps(a, b); }
-                static inline register_type negate(register_type a) { return _mm512_xor_ps(a, _mm512_set1_ps(-0.0f)); }
+
+                static inline register_type negate(register_type a) { 
+                    // Uses the floating-point XOR instruction with -0.0f
+                    return _mm512_xor_ps(a, _mm512_set1_ps(-0.0f)); 
+                }
 
                 // --- AVX-512 CASTING, SHUFFLE, & GATHER ---
                 template <typename Target>
@@ -245,9 +264,11 @@ namespace Engine::ISAArch {
                 static inline mask_type mask_or(mask_type a, mask_type b) { return _kor_mask16(a, b); }
 
                 // Bitwise Math
-                static inline register_type bit_or(register_type a, register_type b) { return _mm512_or_si512(a, b); }
-                static inline register_type bit_and(register_type a, register_type b) { return _mm512_and_si512(a, b); }
+                static inline register_type bit_xor(register_type a, register_type b) { return _mm512_xor_epi32(a, b); }
+                static inline register_type bit_or(register_type a, register_type b) { return _mm512_or_epi32(a, b); }
+                static inline register_type bit_and(register_type a, register_type b) { return _mm512_and_epi32(a, b); }
                 static inline register_type shift_l(register_type a, int imm) { return _mm512_slli_epi32(a, imm); }
+                static inline register_type shift_r(register_type a, int imm) { return _mm512_srli_epi32(a, imm); }
 
                 static inline register_type blend(mask_type mask, register_type true_v, register_type false_v) {
                     return _mm512_mask_blend_epi32(mask, false_v, true_v);
@@ -261,6 +282,21 @@ namespace Engine::ISAArch {
                 static inline register_type gather(const uint32_t* base_addr, __m512i indices) {
                     return _mm512_i32gather_epi32(indices, base_addr, 4); 
                 }
+
+                // Boundary Math
+                static inline register_type min(register_type a, register_type b) { return _mm512_min_epu32(a, b); }
+                static inline register_type max(register_type a, register_type b) { return _mm512_max_epu32(a, b); }
+
+                // Mask Evaluation
+                static inline bool mask_any(mask_type a) { return a != 0; }
+                static inline bool mask_all(mask_type a) { return a == 0xFFFF; }
+
+                // Hardware Vector Swizzling (Symmetric across 128-bit lanes)
+                template <int i0, int i1, int i2, int i3>
+                static inline register_type shuffle(register_type a) {
+                    return _mm512_shuffle_epi32(a, _MM_SHUFFLE(i3, i2, i1, i0));
+                }
+
             };
         #endif
 
@@ -427,6 +463,7 @@ namespace Engine::ISAArch {
                 static inline register_type bit_or(register_type a, register_type b) { return _mm_or_si128(a, b); }
                 static inline register_type bit_and(register_type a, register_type b) { return _mm_and_si128(a, b); }
                 static inline register_type shift_l(register_type a, int imm) { return _mm_slli_epi32(a, imm); }
+                static inline register_type shift_r(register_type a, int imm) { return _mm_srli_epi32(a, imm); }
                 
                 // Relational
                 static inline mask_type cmp_gt(register_type a, register_type b) { return _mm_cmpgt_epi32(a, b); }
@@ -656,9 +693,11 @@ namespace Engine::ISAArch {
                 static inline register_type max(register_type a, register_type b) { return _mm256_max_epu32(a, b); }
 
                 // Bitwise Math (Required for your expandBits_SIMD function)
+                static inline register_type bit_xor(register_type a, register_type b) { return _mm256_xor_si256(a, b); }
                 static inline register_type bit_or(register_type a, register_type b) { return _mm256_or_si256(a, b); }
                 static inline register_type bit_and(register_type a, register_type b) { return _mm256_and_si256(a, b); }
                 static inline register_type shift_l(register_type a, int imm) { return _mm256_slli_epi32(a, imm); }
+                static inline register_type shift_r(register_type a, int imm) { return _mm256_srli_epi32(a, imm); }
                 
                 static inline mask_type cmp_gt(register_type a, register_type b) { return _mm256_cmpgt_epi32(a, b); }
                 static inline mask_type cmp_lt(register_type a, register_type b) { return _mm256_cmpgt_epi32(b, a); } // Flipped operands for Less-Than
@@ -883,6 +922,10 @@ namespace Engine::ISAArch {
                 static inline register_type shift_l(register_type a, int imm) { 
                     // Broadcast the scalar 'imm' into a signed 32x4 vector, then shift
                     return vshlq_u32(a, vdupq_n_s32(imm)); 
+                }
+                static inline register_type shift_r(register_type a, int imm) { 
+                    // Broadcast the negative shift amount as a signed 32-bit integer vector
+                    return vshlq_u32(a, vdupq_n_s32(-imm)); 
                 }
                 
                 static inline mask_type cmp_gt(register_type a, register_type b) { return vcgtq_u32(a, b); }
@@ -1219,6 +1262,10 @@ namespace Engine::ISAArch {
             return simd(Traits::shift_l(a.m_data, shift));
         }
 
+        friend inline simd operator>>(const simd& a, int shift) requires std::is_integral_v<T> {
+            return simd(Traits::shift_r(a.m_data, shift));
+        }
+
         // ============================================
         // VECTOR SWIZZLING & SHUFFLING (SOA -> AOS)
         // ============================================
@@ -1320,8 +1367,12 @@ namespace Engine::ISAArch {
     template <typename T>
     #if ENGINE_ARCH_NEON
         using FixedBatch4 = simd<T, simd_abi::neon>;
-    #else
+    #elif ENGINE_ARCH_AVX512 || ENGINE_ARCH_AVX2 || ENGINE_ARCH_SSE41
+        // ALL x86/x64 PC and Console platforms drop to SSE for 128-bit geometry
         using FixedBatch4 = simd<T, simd_abi::sse41>; 
+    #else
+        // Absolute fallback (scalar 4-float array)
+        using FixedBatch4 = simd<T, simd_abi::scalar>; 
     #endif
     
     // Engine-wide typedefs for geometry
