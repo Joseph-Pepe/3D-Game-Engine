@@ -109,6 +109,7 @@ namespace Engine::ISAArch {
     // ==========================================
     namespace simd_abi {
         struct scalar {};
+        struct sse41 {};
         struct avx2 {};
         struct neon {};
         struct avx512 {};
