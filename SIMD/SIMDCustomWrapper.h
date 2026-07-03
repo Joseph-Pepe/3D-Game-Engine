@@ -14,13 +14,22 @@
 
 // --- HARDWARE DETECTION & INCLUDES ---
 #if defined(__AVX2__)
+    // AVX2: Xbox Series X/S, PS5, Modern PC
     #include <immintrin.h>
     #define ENGINE_ARCH_AVX2 1
-#elif defined(__aarch64__)
+
+#elif defined(__aarch64__) || defined(_M_ARM64)
+    // ARM NEON: Apple Silicon, Switch 2, Android, Windows on ARM
     #include <arm_neon.h>
     #define ENGINE_ARCH_NEON 1
+
+#elif defined(__SSE4_1__)
+    // SSE4.1: Legacy PC Fallback
+    #include <immintrin.h> // immintrin handles all x86 SIMD headers
+    #define ENGINE_ARCH_SSE41 1
+
 #else
-    #error "Unsupported architecture. Fallback SSE4.1 required."
+    #error "Engine Compiler Error: Unsupported CPU architecture. AVX2, NEON, or SSE4.1 instruction sets are strictly required."
 #endif
 
 namespace Engine::ISAArch {
@@ -50,387 +59,395 @@ namespace Engine::ISAArch {
         // Primary template (Undefined)
         template <typename T, typename Abi> struct simd_traits;
 
-        // --- AVX2 BACKEND (Xbox Series X, PS5, PC) ---
-        template <> struct simd_traits<float, simd_abi::avx2> {
-            using register_type = __m256;
-            using mask_type     = __m256; // AVX2 masks are bit patterns in identical registers
-            static constexpr int size = 8;
-            
-            static inline register_type broadcast(float v) { return _mm256_set1_ps(v); }
-            static inline register_type load(const float* mem) { return _mm256_loadu_ps(mem); }
-            static inline void store(float* mem, register_type v) { _mm256_storeu_ps(mem, v); }
-            
-            static inline register_type add(register_type a, register_type b) { return _mm256_add_ps(a, b); }
-            static inline register_type mul(register_type a, register_type b) { return _mm256_mul_ps(a, b); }
-            static inline register_type sub(register_type a, register_type b) { return _mm256_sub_ps(a, b); }
-            static inline register_type div(register_type a, register_type b) { return _mm256_div_ps(a, b); }
-
-            static inline register_type min(register_type a, register_type b) { return _mm256_min_ps(a, b); }
-            static inline register_type max(register_type a, register_type b) { return _mm256_max_ps(a, b); }
-
-            static inline register_type rsqrt(register_type a) { return _mm256_rsqrt_ps(a); } // 1 / sqrt(x)
-            static inline register_type rcp(register_type a) { return _mm256_rcp_ps(a); }     // 1 / x
-
-            static inline register_type abs(register_type a) { 
-                // Clear the sign bit using bitwise AND
-                return _mm256_and_ps(a, _mm256_castsi256_ps(_mm256_set1_epi32(0x7FFFFFFF))); 
-            }
-            static inline register_type floor(register_type a) { return _mm256_floor_ps(a); }
-            static inline register_type ceil(register_type a) { return _mm256_ceil_ps(a); }
-            
-            // Relational Intrinsic
-            static inline mask_type cmp_gt(register_type a, register_type b) { return _mm256_cmp_ps(a, b, _CMP_GT_OQ); }
-            static inline mask_type cmp_lt(register_type a, register_type b) { return _mm256_cmp_ps(a, b, _CMP_LT_OQ); }
-            static inline mask_type cmp_eq(register_type a, register_type b) { return _mm256_cmp_ps(a, b, _CMP_EQ_OQ); }
-
-            // Mask Logic
-            static inline mask_type mask_not(mask_type a) { 
-                // XOR with all 1s (0xFFFFFFFF) flips every bit
-                return _mm256_xor_ps(a, _mm256_castsi256_ps(_mm256_set1_epi32(-1))); 
-            }
-            static inline mask_type mask_and(mask_type a, mask_type b) { return _mm256_and_ps(a, b); }
-            static inline mask_type mask_or(mask_type a, mask_type b) { return _mm256_or_ps(a, b); }
-
-            // ============================================
-            // FLOATING-POINT BITWISE LOGIC
-            // ============================================
-            /*
-                - To negate a float, multiplying it by -1.0f routes the data through the CPUs floating-point multiplier (takes 4-5 clock cycles).
-                - Bitwise XOR the float with 0x80000000 (-0.0f in binary), instantly flips the sign bit in 1 clock cycle using the CPUs integer execution ports.
-            */
-
-            // Floating-Point Bitwise Logic (Engine Extension)
-            static inline register_type bit_xor(register_type a, register_type b) { return _mm256_xor_ps(a, b); }
-            static inline register_type bit_and(register_type a, register_type b) { return _mm256_and_ps(a, b); }
-            static inline register_type bit_or(register_type a, register_type b)  { return _mm256_or_ps(a, b); }
-
-            // Fast Unary Negation
-            static inline register_type negate(register_type a) {
-                // -0.0f evaluates to exactly 0x80000000. 
-                // XORing by this flips the sign bit on all 8 floats instantly.
-                return _mm256_xor_ps(a, _mm256_set1_ps(-0.0f)); 
-            }
-            
-            // Branchless Conditional Blending
-            static inline register_type blend(mask_type mask, register_type true_v, register_type false_v) {
-                return _mm256_blendv_ps(false_v, true_v, mask);
-            }
-
-            // Hardware Math
-            static inline register_type fmadd(register_type a, register_type b, register_type c) {
-                return _mm256_fmadd_ps(a, b, c); // (a * b) + c
-            }
-            static inline register_type sqrt(register_type a) {
-                return _mm256_sqrt_ps(a);
-            }
-
-            // SIMD Casting AVX2 doesn't have a direct float-to-unsigned-int instruction, it only has float-to-signed-int. 
-            template <typename Target>
-            static inline __m256i cast_to(register_type a) {
-                static_assert(std::is_same_v<Target, uint32_t>, "Only float-to-uint32_t casting is currently implemented.");
-                return _mm256_cvttps_epi32(a); 
-            }
-
-            // Horizontal Reduction
-            // AVX2 doesn't have a single-instruction horizontal add across 256 bits, so we fold it in half repeatedly.
-            static inline float reduce_add(register_type a) {
-                // Step 1: Fold 256-bit into 128-bit
-                __m128 lo = _mm256_castps256_ps128(a);
-                __m128 hi = _mm256_extractf128_ps(a, 1);
-                lo = _mm_add_ps(lo, hi);
+        #if ENGINE_ARCH_AVX2
+            // ========================================================
+            // --- AVX2 BACKEND (Xbox Series X, PS5, PC) ---
+            // ========================================================
+            template <> struct simd_traits<float, simd_abi::avx2> {
+                using register_type = __m256;
+                using mask_type     = __m256; // AVX2 masks are bit patterns in identical registers
+                static constexpr int size = 8;
                 
-                // Step 2: Fold 128-bit down to 64-bit, then down to 32-bit scalar
-                __m128 shuf = _mm_movehdup_ps(lo);
-                __m128 sums = _mm_add_ps(lo, shuf);
-                shuf = _mm_movehl_ps(shuf, sums);
-                sums = _mm_add_ss(sums, shuf);
+                static inline register_type broadcast(float v) { return _mm256_set1_ps(v); }
+                static inline register_type load(const float* mem) { return _mm256_loadu_ps(mem); }
+                static inline void store(float* mem, register_type v) { _mm256_storeu_ps(mem, v); }
                 
-                return _mm_cvtss_f32(sums);
-            }
+                static inline register_type add(register_type a, register_type b) { return _mm256_add_ps(a, b); }
+                static inline register_type mul(register_type a, register_type b) { return _mm256_mul_ps(a, b); }
+                static inline register_type sub(register_type a, register_type b) { return _mm256_sub_ps(a, b); }
+                static inline register_type div(register_type a, register_type b) { return _mm256_div_ps(a, b); }
 
-            static inline bool mask_any(mask_type a) { 
-                return _mm256_movemask_ps(_mm256_castsi256_ps(a)) != 0; 
-            }
-            static inline bool mask_all(mask_type a) { 
-                return _mm256_movemask_ps(_mm256_castsi256_ps(a)) == 0xFF; 
-            }
+                static inline register_type min(register_type a, register_type b) { return _mm256_min_ps(a, b); }
+                static inline register_type max(register_type a, register_type b) { return _mm256_max_ps(a, b); }
 
-            // Hardware Vector Swizzling (Symmetric across 128-bit lanes)
-            template <int i0, int i1, int i2, int i3>
-            static inline register_type shuffle(register_type a) {
-                // _MM_SHUFFLE natively expects indices in reverse order (z, y, x, w)
-                // Template parameters are compile-time constants, making this perfectly safe.
-                return _mm256_permute_ps(a, _MM_SHUFFLE(i3, i2, i1, i0));
-            }
+                static inline register_type rsqrt(register_type a) { return _mm256_rsqrt_ps(a); } // 1 / sqrt(x)
+                static inline register_type rcp(register_type a) { return _mm256_rcp_ps(a); }     // 1 / x
 
-            // Hardware Gather (Scale = 4 bytes per float)
-            static inline register_type gather(const float* base_addr, __m256i indices) {
-                return _mm256_i32gather_ps(base_addr, indices, 4); 
-            }
-        };
-
-        // --- AVX2 UINT32 TRAITS ---
-        template <> struct simd_traits<uint32_t, simd_abi::avx2> {
-            using register_type = __m256i;
-            using mask_type     = __m256i; 
-            static constexpr int size = 8;
-            
-            // Memory
-            static inline register_type broadcast(uint32_t v) { return _mm256_set1_epi32(v); }
-            static inline register_type load(const uint32_t* mem) { return _mm256_loadu_si256(reinterpret_cast<const __m256i*>(mem)); }
-            static inline void store(uint32_t* mem, register_type v) { _mm256_storeu_si256(reinterpret_cast<__m256i*>(mem), v); }
-            
-            static inline register_type add(register_type a, register_type b) { return _mm256_add_epi32(a, b); }
-            static inline register_type sub(register_type a, register_type b) { return _mm256_sub_epi32(a, b); }
-            static inline register_type mul(register_type a, register_type b) { return _mm256_mullo_epi32(a, b); }
-
-            static inline register_type min(register_type a, register_type b) { return _mm256_min_epu32(a, b); }
-            static inline register_type max(register_type a, register_type b) { return _mm256_max_epu32(a, b); }
-
-            // Bitwise Math (Required for your expandBits_SIMD function)
-            static inline register_type bit_or(register_type a, register_type b) { return _mm256_or_si256(a, b); }
-            static inline register_type bit_and(register_type a, register_type b) { return _mm256_and_si256(a, b); }
-            static inline register_type shift_l(register_type a, int imm) { return _mm256_slli_epi32(a, imm); }
-            
-            static inline mask_type cmp_gt(register_type a, register_type b) { return _mm256_cmpgt_epi32(a, b); }
-            static inline mask_type cmp_lt(register_type a, register_type b) { return _mm256_cmpgt_epi32(b, a); } // Flipped operands for Less-Than
-            static inline mask_type cmp_eq(register_type a, register_type b) { return _mm256_cmpeq_epi32(a, b); }
-
-            static inline mask_type mask_not(mask_type a) { return _mm256_xor_si256(a, _mm256_set1_epi32(-1)); }
-            static inline mask_type mask_and(mask_type a, mask_type b) { return _mm256_and_si256(a, b); }
-            static inline mask_type mask_or(mask_type a, mask_type b) { return _mm256_or_si256(a, b); }
-
-            static inline register_type blend(mask_type mask, register_type true_v, register_type false_v) {
-                // Integer blending inherently looks at the highest bit of each byte
-                return _mm256_blendv_epi8(false_v, true_v, mask);
-            }
-
-            // Horizontal Integer Reduction
-            static inline uint32_t reduce_add(register_type a) {
-                __m128i lo = _mm256_castsi256_si128(a);
-                __m128i hi = _mm256_extracti128_si256(a, 1);
-                lo = _mm_add_epi32(lo, hi);
+                static inline register_type abs(register_type a) { 
+                    // Clear the sign bit using bitwise AND
+                    return _mm256_and_ps(a, _mm256_castsi256_ps(_mm256_set1_epi32(0x7FFFFFFF))); 
+                }
+                static inline register_type floor(register_type a) { return _mm256_floor_ps(a); }
+                static inline register_type ceil(register_type a) { return _mm256_ceil_ps(a); }
                 
-                // Shuffle and fold 128-bit down to scalar
-                __m128i shuf = _mm_shuffle_epi32(lo, _MM_SHUFFLE(1, 0, 3, 2));
-                __m128i sums = _mm_add_epi32(lo, shuf);
-                shuf = _mm_shuffle_epi32(sums, _MM_SHUFFLE(2, 3, 0, 1));
-                sums = _mm_add_epi32(sums, shuf);
+                // Relational Intrinsic
+                static inline mask_type cmp_gt(register_type a, register_type b) { return _mm256_cmp_ps(a, b, _CMP_GT_OQ); }
+                static inline mask_type cmp_lt(register_type a, register_type b) { return _mm256_cmp_ps(a, b, _CMP_LT_OQ); }
+                static inline mask_type cmp_eq(register_type a, register_type b) { return _mm256_cmp_ps(a, b, _CMP_EQ_OQ); }
+
+                // Mask Logic
+                static inline mask_type mask_not(mask_type a) { 
+                    // XOR with all 1s (0xFFFFFFFF) flips every bit
+                    return _mm256_xor_ps(a, _mm256_castsi256_ps(_mm256_set1_epi32(-1))); 
+                }
+                static inline mask_type mask_and(mask_type a, mask_type b) { return _mm256_and_ps(a, b); }
+                static inline mask_type mask_or(mask_type a, mask_type b) { return _mm256_or_ps(a, b); }
+
+                // ============================================
+                // FLOATING-POINT BITWISE LOGIC
+                // ============================================
+                /*
+                    - To negate a float, multiplying it by -1.0f routes the data through the CPUs floating-point multiplier (takes 4-5 clock cycles).
+                    - Bitwise XOR the float with 0x80000000 (-0.0f in binary), instantly flips the sign bit in 1 clock cycle using the CPUs integer execution ports.
+                */
+
+                // Floating-Point Bitwise Logic (Engine Extension)
+                static inline register_type bit_xor(register_type a, register_type b) { return _mm256_xor_ps(a, b); }
+                static inline register_type bit_and(register_type a, register_type b) { return _mm256_and_ps(a, b); }
+                static inline register_type bit_or(register_type a, register_type b)  { return _mm256_or_ps(a, b); }
+
+                // Fast Unary Negation
+                static inline register_type negate(register_type a) {
+                    // -0.0f evaluates to exactly 0x80000000. 
+                    // XORing by this flips the sign bit on all 8 floats instantly.
+                    return _mm256_xor_ps(a, _mm256_set1_ps(-0.0f)); 
+                }
                 
-                return _mm_cvtsi128_si32(sums);
-            }
+                // Branchless Conditional Blending
+                static inline register_type blend(mask_type mask, register_type true_v, register_type false_v) {
+                    return _mm256_blendv_ps(false_v, true_v, mask);
+                }
 
-            static inline bool mask_any(mask_type a) { 
-                return _mm256_movemask_ps(_mm256_castsi256_ps(a)) != 0; 
-            }
-            static inline bool mask_all(mask_type a) { 
-                return _mm256_movemask_ps(_mm256_castsi256_ps(a)) == 0xFF; 
-            }
+                // Hardware Math
+                static inline register_type fmadd(register_type a, register_type b, register_type c) {
+                    return _mm256_fmadd_ps(a, b, c); // (a * b) + c
+                }
+                static inline register_type sqrt(register_type a) {
+                    return _mm256_sqrt_ps(a);
+                }
 
-            // Hardware Vector Swizzling (Symmetric across 128-bit lanes)
-            template <int i0, int i1, int i2, int i3>
-            static inline register_type shuffle(register_type a) {
-                // AVX2 uses a dedicated integer shuffle instruction
-                return _mm256_shuffle_epi32(a, _MM_SHUFFLE(i3, i2, i1, i0));
-            }
+                // SIMD Casting AVX2 doesn't have a direct float-to-unsigned-int instruction, it only has float-to-signed-int. 
+                template <typename Target>
+                static inline __m256i cast_to(register_type a) {
+                    static_assert(std::is_same_v<Target, uint32_t>, "Only float-to-uint32_t casting is currently implemented.");
+                    return _mm256_cvttps_epi32(a); 
+                }
 
-            // Hardware Gather (Scale = 4 bytes per uint32)
-            static inline register_type gather(const uint32_t* base_addr, __m256i indices) {
-                // The intrinsic explicitly requires a const int* pointer
-                return _mm256_i32gather_epi32(reinterpret_cast<const int*>(base_addr), indices, 4); 
-            }
-        };
+                // Horizontal Reduction
+                // AVX2 doesn't have a single-instruction horizontal add across 256 bits, so we fold it in half repeatedly.
+                static inline float reduce_add(register_type a) {
+                    // Step 1: Fold 256-bit into 128-bit
+                    __m128 lo = _mm256_castps256_ps128(a);
+                    __m128 hi = _mm256_extractf128_ps(a, 1);
+                    lo = _mm_add_ps(lo, hi);
+                    
+                    // Step 2: Fold 128-bit down to 64-bit, then down to 32-bit scalar
+                    __m128 shuf = _mm_movehdup_ps(lo);
+                    __m128 sums = _mm_add_ps(lo, shuf);
+                    shuf = _mm_movehl_ps(shuf, sums);
+                    sums = _mm_add_ss(sums, shuf);
+                    
+                    return _mm_cvtss_f32(sums);
+                }
 
-        // --- NEON BACKEND (Nintendo Switch 2, Apple Silicon) ---
-        template <> struct simd_traits<float, simd_abi::neon> {
-            using register_type = float32x4_t;
-            using mask_type     = uint32x4_t; // NEON strictly separates math and mask register types
-            static constexpr int size = 4;
-            
-            static inline register_type broadcast(float v) { return vdupq_n_f32(v); }
-            static inline register_type load(const float* mem) { return vld1q_f32(mem); }
-            static inline void store(float* mem, register_type v) { vst1q_f32(mem, v); }
-            
-            static inline register_type add(register_type a, register_type b) { return vaddq_f32(a, b); }
-            static inline register_type mul(register_type a, register_type b) { return vmulq_f32(a, b); }
-            static inline register_type sub(register_type a, register_type b) { return vsubq_f32(a, b); }
-            static inline register_type div(register_type a, register_type b) { return vdivq_f32(a, b); }
+                static inline bool mask_any(mask_type a) { 
+                    return _mm256_movemask_ps(a) != 0; 
+                }
+                static inline bool mask_all(mask_type a) { 
+                    return _mm256_movemask_ps(a) == 0xFF; 
+                }
 
-            static inline register_type min(register_type a, register_type b) { return vminq_f32(a, b); }
-            static inline register_type max(register_type a, register_type b) { return vmaxq_f32(a, b); }
+                // Hardware Vector Swizzling (Symmetric across 128-bit lanes)
+                template <int i0, int i1, int i2, int i3>
+                static inline register_type shuffle(register_type a) {
+                    // _MM_SHUFFLE natively expects indices in reverse order (z, y, x, w)
+                    // Template parameters are compile-time constants, making this perfectly safe.
+                    return _mm256_permute_ps(a, _MM_SHUFFLE(i3, i2, i1, i0));
+                }
 
-            static inline register_type rsqrt(register_type a) { return vrsqrteq_f32(a); }
-            static inline register_type rcp(register_type a) { return vrecpeq_f32(a); }
+                // Hardware Gather (Scale = 4 bytes per float)
+                static inline register_type gather(const float* base_addr, __m256i indices) {
+                    return _mm256_i32gather_ps(base_addr, indices, 4); 
+                }
+            };
 
-            static inline register_type abs(register_type a) { return vabsq_f32(a); }
-            static inline register_type floor(register_type a) { return vrndmq_f32(a); } // Round towards Minus infinity
-            static inline register_type ceil(register_type a) { return vrndpq_f32(a); }  // Round towards Plus infinity
-            
-            static inline mask_type cmp_gt(register_type a, register_type b) { return vcgtq_f32(a, b); }
-            static inline mask_type cmp_lt(register_type a, register_type b) { return vcltq_f32(a, b); }
-            static inline mask_type cmp_eq(register_type a, register_type b) { return vceqq_f32(a, b); }
+            // --- AVX2 UINT32 TRAITS ---
+            template <> struct simd_traits<uint32_t, simd_abi::avx2> {
+                using register_type = __m256i;
+                using mask_type     = __m256i; 
+                static constexpr int size = 8;
+                
+                // Memory
+                static inline register_type broadcast(uint32_t v) { return _mm256_set1_epi32(v); }
+                static inline register_type load(const uint32_t* mem) { return _mm256_loadu_si256(reinterpret_cast<const __m256i*>(mem)); }
+                static inline void store(uint32_t* mem, register_type v) { _mm256_storeu_si256(reinterpret_cast<__m256i*>(mem), v); }
+                
+                static inline register_type add(register_type a, register_type b) { return _mm256_add_epi32(a, b); }
+                static inline register_type sub(register_type a, register_type b) { return _mm256_sub_epi32(a, b); }
+                static inline register_type mul(register_type a, register_type b) { return _mm256_mullo_epi32(a, b); }
 
-            static inline mask_type mask_not(mask_type a) { return vmvnq_u32(a); } // NEON Bitwise NOT
-            static inline mask_type mask_and(mask_type a, mask_type b) { return vandq_u32(a, b); }
-            static inline mask_type mask_or(mask_type a, mask_type b) { return vorrq_u32(a, b); }
+                static inline register_type min(register_type a, register_type b) { return _mm256_min_epu32(a, b); }
+                static inline register_type max(register_type a, register_type b) { return _mm256_max_epu32(a, b); }
 
-            // Floating-Point Bitwise Logic (Zero-cost reinterpret casting)
-            static inline register_type bit_xor(register_type a, register_type b) { 
-                return vreinterpretq_f32_u32(veorq_u32(vreinterpretq_u32_f32(a), vreinterpretq_u32_f32(b))); 
-            }
-            static inline register_type bit_and(register_type a, register_type b) { 
-                return vreinterpretq_f32_u32(vandq_u32(vreinterpretq_u32_f32(a), vreinterpretq_u32_f32(b))); 
-            }
-            static inline register_type bit_or(register_type a, register_type b) { 
-                return vreinterpretq_f32_u32(vorrq_u32(vreinterpretq_u32_f32(a), vreinterpretq_u32_f32(b))); 
-            }
+                // Bitwise Math (Required for your expandBits_SIMD function)
+                static inline register_type bit_or(register_type a, register_type b) { return _mm256_or_si256(a, b); }
+                static inline register_type bit_and(register_type a, register_type b) { return _mm256_and_si256(a, b); }
+                static inline register_type shift_l(register_type a, int imm) { return _mm256_slli_epi32(a, imm); }
+                
+                static inline mask_type cmp_gt(register_type a, register_type b) { return _mm256_cmpgt_epi32(a, b); }
+                static inline mask_type cmp_lt(register_type a, register_type b) { return _mm256_cmpgt_epi32(b, a); } // Flipped operands for Less-Than
+                static inline mask_type cmp_eq(register_type a, register_type b) { return _mm256_cmpeq_epi32(a, b); }
 
-            // Fast Unary Negation
-            static inline register_type negate(register_type a) {
-                // ARM NEON natively has a dedicated float negate instruction!
-                return vnegq_f32(a); 
-            }
-            
-            static inline register_type blend(mask_type mask, register_type true_v, register_type false_v) {
-                return vbslq_f32(mask, true_v, false_v);
-            }
+                static inline mask_type mask_not(mask_type a) { return _mm256_xor_si256(a, _mm256_set1_epi32(-1)); }
+                static inline mask_type mask_and(mask_type a, mask_type b) { return _mm256_and_si256(a, b); }
+                static inline mask_type mask_or(mask_type a, mask_type b) { return _mm256_or_si256(a, b); }
 
-            // Hardware Math
-            static inline register_type fmadd(register_type a, register_type b, register_type c) {
-                return vfmaq_f32(c, a, b); // accumulates (a * b) into c
-            }
-            static inline register_type sqrt(register_type a) {
-                return vsqrtq_f32(a);
-            }
+                static inline register_type blend(mask_type mask, register_type true_v, register_type false_v) {
+                    // Integer blending inherently looks at the highest bit of each byte
+                    return _mm256_blendv_epi8(false_v, true_v, mask);
+                }
 
-            // SIMD Casting: NEON explicitly supports float-to-unsigned-int conversion natively.
-            template <typename Target>
-            static inline uint32x4_t cast_to(register_type a) {
-                static_assert(std::is_same_v<Target, uint32_t>, "Only float-to-uint32_t casting is currently implemented.");
-                return vcvtq_u32_f32(a);
-            }
+                // Horizontal Integer Reduction
+                static inline uint32_t reduce_add(register_type a) {
+                    __m128i lo = _mm256_castsi256_si128(a);
+                    __m128i hi = _mm256_extracti128_si256(a, 1);
+                    lo = _mm_add_epi32(lo, hi);
+                    
+                    // Shuffle and fold 128-bit down to scalar
+                    __m128i shuf = _mm_shuffle_epi32(lo, _MM_SHUFFLE(1, 0, 3, 2));
+                    __m128i sums = _mm_add_epi32(lo, shuf);
+                    shuf = _mm_shuffle_epi32(sums, _MM_SHUFFLE(2, 3, 0, 1));
+                    sums = _mm_add_epi32(sums, shuf);
+                    
+                    return _mm_cvtsi128_si32(sums);
+                }
 
-            // Horizontal Reduction: Because the Switch 2 and Apple Silicon use AArch64, we don't have to do the folding dance like on AVX2. 
-            // We get to use a gorgeous, single-cycle hardware reduction instruction!
-            static inline float reduce_add(register_type a) {
-                return vaddvq_f32(a); 
-            }
+                static inline bool mask_any(mask_type a) { 
+                    return _mm256_movemask_ps(_mm256_castsi256_ps(a)) != 0; 
+                }
+                static inline bool mask_all(mask_type a) { 
+                    return _mm256_movemask_ps(_mm256_castsi256_ps(a)) == 0xFF; 
+                }
 
-            static inline bool mask_any(mask_type a) { 
-                // If the maximum value across the vector is > 0, at least one lane is true
-                return vmaxvq_u32(a) > 0; 
-            }
-            static inline bool mask_all(mask_type a) { 
-                // If the minimum value across the vector is > 0, all lanes are true
-                return vminvq_u32(a) > 0; 
-            }
+                // Hardware Vector Swizzling (Symmetric across 128-bit lanes)
+                template <int i0, int i1, int i2, int i3>
+                static inline register_type shuffle(register_type a) {
+                    // AVX2 uses a dedicated integer shuffle instruction
+                    return _mm256_shuffle_epi32(a, _MM_SHUFFLE(i3, i2, i1, i0));
+                }
 
-            // Hardware Vector Swizzling
-            template <int i0, int i1, int i2, int i3>
-            static inline register_type shuffle(register_type a) {
-                // Both MSVC and Clang will aggressively fold this into a single instruction.
-                register_type res = vdupq_n_f32(0.0f); 
-                res = vsetq_lane_f32(vgetq_lane_f32(a, i0), res, 0);
-                res = vsetq_lane_f32(vgetq_lane_f32(a, i1), res, 1);
-                res = vsetq_lane_f32(vgetq_lane_f32(a, i2), res, 2);
-                res = vsetq_lane_f32(vgetq_lane_f32(a, i3), res, 3);
-                return res;
-            }
+                // Hardware Gather (Scale = 4 bytes per uint32)
+                static inline register_type gather(const uint32_t* base_addr, __m256i indices) {
+                    // The intrinsic explicitly requires a const int* pointer
+                    return _mm256_i32gather_epi32(reinterpret_cast<const int*>(base_addr), indices, 4); 
+                }
+            };
+        #endif // ENGINE_ARCH_AVX2
 
-            // ========================================
-            // ARM NEON (AArch64)
-            // ========================================
-            /*
-                - ARM NEON does not have native 128-bit vector gather instruction.
-                - ARM SVE (Scalable Vector Extension) adds 128-bit vector gather instruction.
-                - We can emulate it.
-            */
+        #if ENGINE_ARCH_NEON
+            // ========================================================
+            // --- NEON BACKEND (Nintendo Switch 2, Apple Silicon) ---
+            // ========================================================
+            template <> struct simd_traits<float, simd_abi::neon> {
+                using register_type = float32x4_t;
+                using mask_type     = uint32x4_t; // NEON strictly separates math and mask register types
+                static constexpr int size = 4;
+                
+                static inline register_type broadcast(float v) { return vdupq_n_f32(v); }
+                static inline register_type load(const float* mem) { return vld1q_f32(mem); }
+                static inline void store(float* mem, register_type v) { vst1q_f32(mem, v); }
+                
+                static inline register_type add(register_type a, register_type b) { return vaddq_f32(a, b); }
+                static inline register_type mul(register_type a, register_type b) { return vmulq_f32(a, b); }
+                static inline register_type sub(register_type a, register_type b) { return vsubq_f32(a, b); }
+                static inline register_type div(register_type a, register_type b) { return vdivq_f32(a, b); }
 
-            // Emulated Hardware Gather
-            static inline register_type gather(const float* base_addr, uint32x4_t indices) {
-                register_type res = vdupq_n_f32(0.0f);
-                // Pointer arithmetic implicitly scales by 4 bytes (sizeof float)
-                res = vsetq_lane_f32(base_addr[vgetq_lane_u32(indices, 0)], res, 0);
-                res = vsetq_lane_f32(base_addr[vgetq_lane_u32(indices, 1)], res, 1);
-                res = vsetq_lane_f32(base_addr[vgetq_lane_u32(indices, 2)], res, 2);
-                res = vsetq_lane_f32(base_addr[vgetq_lane_u32(indices, 3)], res, 3);
-                return res;
-            }
-        };
+                static inline register_type min(register_type a, register_type b) { return vminq_f32(a, b); }
+                static inline register_type max(register_type a, register_type b) { return vmaxq_f32(a, b); }
 
-        // --- NEON UINT32 TRAITS ---
-        template <> struct simd_traits<uint32_t, simd_abi::neon> {
-            using register_type = uint32x4_t;
-            using mask_type     = uint32x4_t;
-            static constexpr int size = 4;
-            
-            // Memory
-            static inline register_type broadcast(uint32_t v) { return vdupq_n_u32(v); }
-            static inline register_type load(const uint32_t* mem) { return vld1q_u32(mem); }
-            static inline void store(uint32_t* mem, register_type v) { vst1q_u32(mem, v); }
+                static inline register_type rsqrt(register_type a) { return vrsqrteq_f32(a); }
+                static inline register_type rcp(register_type a) { return vrecpeq_f32(a); }
 
-            static inline register_type add(register_type a, register_type b) { return vaddq_u32(a, b); }
-            static inline register_type sub(register_type a, register_type b) { return vsubq_u32(a, b); }
-            static inline register_type mul(register_type a, register_type b) { return vmulq_u32(a, b); }
+                static inline register_type abs(register_type a) { return vabsq_f32(a); }
+                static inline register_type floor(register_type a) { return vrndmq_f32(a); } // Round towards Minus infinity
+                static inline register_type ceil(register_type a) { return vrndpq_f32(a); }  // Round towards Plus infinity
+                
+                static inline mask_type cmp_gt(register_type a, register_type b) { return vcgtq_f32(a, b); }
+                static inline mask_type cmp_lt(register_type a, register_type b) { return vcltq_f32(a, b); }
+                static inline mask_type cmp_eq(register_type a, register_type b) { return vceqq_f32(a, b); }
 
-            static inline register_type min(register_type a, register_type b) { return vminq_f32(a, b); }
-            static inline register_type max(register_type a, register_type b) { return vmaxq_f32(a, b); }
-            
-            // Bitwise Math
-            static inline register_type bit_or(register_type a, register_type b) { return vorrq_u32(a, b); }
-            static inline register_type bit_and(register_type a, register_type b) { return vandq_u32(a, b); }
-            static inline register_type shift_l(register_type a, int imm) { 
-                // Broadcast the scalar 'imm' into a signed 32x4 vector, then shift
-                return vshlq_u32(a, vdupq_n_s32(imm)); 
-            }
-            
-            static inline mask_type cmp_gt(register_type a, register_type b) { return vcgtq_u32(a, b); }
-            static inline mask_type cmp_lt(register_type a, register_type b) { return vcltq_u32(a, b); }
-            static inline mask_type cmp_eq(register_type a, register_type b) { return vceqq_u32(a, b); }
+                static inline mask_type mask_not(mask_type a) { return vmvnq_u32(a); } // NEON Bitwise NOT
+                static inline mask_type mask_and(mask_type a, mask_type b) { return vandq_u32(a, b); }
+                static inline mask_type mask_or(mask_type a, mask_type b) { return vorrq_u32(a, b); }
 
-            static inline mask_type mask_not(mask_type a) { return vmvnq_u32(a); }
-            static inline mask_type mask_and(mask_type a, mask_type b) { return vandq_u32(a, b); }
-            static inline mask_type mask_or(mask_type a, mask_type b) { return vorrq_u32(a, b); }
+                // Floating-Point Bitwise Logic (Zero-cost reinterpret casting)
+                static inline register_type bit_xor(register_type a, register_type b) { 
+                    return vreinterpretq_f32_u32(veorq_u32(vreinterpretq_u32_f32(a), vreinterpretq_u32_f32(b))); 
+                }
+                static inline register_type bit_and(register_type a, register_type b) { 
+                    return vreinterpretq_f32_u32(vandq_u32(vreinterpretq_u32_f32(a), vreinterpretq_u32_f32(b))); 
+                }
+                static inline register_type bit_or(register_type a, register_type b) { 
+                    return vreinterpretq_f32_u32(vorrq_u32(vreinterpretq_u32_f32(a), vreinterpretq_u32_f32(b))); 
+                }
 
-            static inline register_type blend(mask_type mask, register_type true_v, register_type false_v) {
-                return vbslq_u32(mask, true_v, false_v);
-            }
+                // Fast Unary Negation
+                static inline register_type negate(register_type a) {
+                    // ARM NEON natively has a dedicated float negate instruction!
+                    return vnegq_f32(a); 
+                }
+                
+                static inline register_type blend(mask_type mask, register_type true_v, register_type false_v) {
+                    return vbslq_f32(mask, true_v, false_v);
+                }
 
-            // Horizontal Integer Reduction
-            static inline uint32_t reduce_add(register_type a) {
-                return vaddvq_u32(a); 
-            }
+                // Hardware Math
+                static inline register_type fmadd(register_type a, register_type b, register_type c) {
+                    return vfmaq_f32(c, a, b); // accumulates (a * b) into c
+                }
+                static inline register_type sqrt(register_type a) {
+                    return vsqrtq_f32(a);
+                }
 
-            static inline bool mask_any(mask_type a) { 
-                // If the maximum value across the vector is > 0, at least one lane is true
-                return vmaxvq_u32(a) > 0; 
-            }
-            static inline bool mask_all(mask_type a) { 
-                // If the minimum value across the vector is > 0, all lanes are true
-                return vminvq_u32(a) > 0; 
-            }
+                // SIMD Casting: NEON explicitly supports float-to-unsigned-int conversion natively.
+                template <typename Target>
+                static inline uint32x4_t cast_to(register_type a) {
+                    static_assert(std::is_same_v<Target, uint32_t>, "Only float-to-uint32_t casting is currently implemented.");
+                    return vcvtq_u32_f32(a);
+                }
 
-            // Hardware Vector Swizzling
-            template <int i0, int i1, int i2, int i3>
-            static inline register_type shuffle(register_type a) {
-                register_type res = vdupq_n_u32(0); 
-                res = vsetq_lane_u32(vgetq_lane_u32(a, i0), res, 0);
-                res = vsetq_lane_u32(vgetq_lane_u32(a, i1), res, 1);
-                res = vsetq_lane_u32(vgetq_lane_u32(a, i2), res, 2);
-                res = vsetq_lane_u32(vgetq_lane_u32(a, i3), res, 3);
-                return res;
-            }
+                // Horizontal Reduction: Because the Switch 2 and Apple Silicon use AArch64, we don't have to do the folding dance like on AVX2. 
+                // We get to use a gorgeous, single-cycle hardware reduction instruction!
+                static inline float reduce_add(register_type a) {
+                    return vaddvq_f32(a); 
+                }
 
-            // Emulated Hardware Gather
-            static inline register_type gather(const uint32_t* base_addr, uint32x4_t indices) {
-                register_type res = vdupq_n_u32(0);
-                res = vsetq_lane_u32(base_addr[vgetq_lane_u32(indices, 0)], res, 0);
-                res = vsetq_lane_u32(base_addr[vgetq_lane_u32(indices, 1)], res, 1);
-                res = vsetq_lane_u32(base_addr[vgetq_lane_u32(indices, 2)], res, 2);
-                res = vsetq_lane_u32(base_addr[vgetq_lane_u32(indices, 3)], res, 3);
-                return res;
-            }
-        };
+                static inline bool mask_any(mask_type a) { 
+                    // If the maximum value across the vector is > 0, at least one lane is true
+                    return vmaxvq_u32(a) > 0; 
+                }
+                static inline bool mask_all(mask_type a) { 
+                    // If the minimum value across the vector is > 0, all lanes are true
+                    return vminvq_u32(a) > 0; 
+                }
+
+                // Hardware Vector Swizzling
+                template <int i0, int i1, int i2, int i3>
+                static inline register_type shuffle(register_type a) {
+                    // Both MSVC and Clang will aggressively fold this into a single instruction.
+                    register_type res = vdupq_n_f32(0.0f); 
+                    res = vsetq_lane_f32(vgetq_lane_f32(a, i0), res, 0);
+                    res = vsetq_lane_f32(vgetq_lane_f32(a, i1), res, 1);
+                    res = vsetq_lane_f32(vgetq_lane_f32(a, i2), res, 2);
+                    res = vsetq_lane_f32(vgetq_lane_f32(a, i3), res, 3);
+                    return res;
+                }
+
+                // ========================================
+                // ARM NEON (AArch64)
+                // ========================================
+                /*
+                    - ARM NEON does not have native 128-bit vector gather instruction.
+                    - ARM SVE (Scalable Vector Extension) adds 128-bit vector gather instruction.
+                    - We can emulate it.
+                */
+
+                // Emulated Hardware Gather
+                static inline register_type gather(const float* base_addr, uint32x4_t indices) {
+                    register_type res = vdupq_n_f32(0.0f);
+                    // Pointer arithmetic implicitly scales by 4 bytes (sizeof float)
+                    res = vsetq_lane_f32(base_addr[vgetq_lane_u32(indices, 0)], res, 0);
+                    res = vsetq_lane_f32(base_addr[vgetq_lane_u32(indices, 1)], res, 1);
+                    res = vsetq_lane_f32(base_addr[vgetq_lane_u32(indices, 2)], res, 2);
+                    res = vsetq_lane_f32(base_addr[vgetq_lane_u32(indices, 3)], res, 3);
+                    return res;
+                }
+            };
+
+            // --- NEON UINT32 TRAITS ---
+            template <> struct simd_traits<uint32_t, simd_abi::neon> {
+                using register_type = uint32x4_t;
+                using mask_type     = uint32x4_t;
+                static constexpr int size = 4;
+                
+                // Memory
+                static inline register_type broadcast(uint32_t v) { return vdupq_n_u32(v); }
+                static inline register_type load(const uint32_t* mem) { return vld1q_u32(mem); }
+                static inline void store(uint32_t* mem, register_type v) { vst1q_u32(mem, v); }
+
+                static inline register_type add(register_type a, register_type b) { return vaddq_u32(a, b); }
+                static inline register_type sub(register_type a, register_type b) { return vsubq_u32(a, b); }
+                static inline register_type mul(register_type a, register_type b) { return vmulq_u32(a, b); }
+
+                static inline register_type min(register_type a, register_type b) { return vminq_f32(a, b); }
+                static inline register_type max(register_type a, register_type b) { return vmaxq_f32(a, b); }
+                
+                // Bitwise Math
+                static inline register_type bit_or(register_type a, register_type b) { return vorrq_u32(a, b); }
+                static inline register_type bit_and(register_type a, register_type b) { return vandq_u32(a, b); }
+                static inline register_type shift_l(register_type a, int imm) { 
+                    // Broadcast the scalar 'imm' into a signed 32x4 vector, then shift
+                    return vshlq_u32(a, vdupq_n_s32(imm)); 
+                }
+                
+                static inline mask_type cmp_gt(register_type a, register_type b) { return vcgtq_u32(a, b); }
+                static inline mask_type cmp_lt(register_type a, register_type b) { return vcltq_u32(a, b); }
+                static inline mask_type cmp_eq(register_type a, register_type b) { return vceqq_u32(a, b); }
+
+                static inline mask_type mask_not(mask_type a) { return vmvnq_u32(a); }
+                static inline mask_type mask_and(mask_type a, mask_type b) { return vandq_u32(a, b); }
+                static inline mask_type mask_or(mask_type a, mask_type b) { return vorrq_u32(a, b); }
+
+                static inline register_type blend(mask_type mask, register_type true_v, register_type false_v) {
+                    return vbslq_u32(mask, true_v, false_v);
+                }
+
+                // Horizontal Integer Reduction
+                static inline uint32_t reduce_add(register_type a) {
+                    return vaddvq_u32(a); 
+                }
+
+                static inline bool mask_any(mask_type a) { 
+                    // If the maximum value across the vector is > 0, at least one lane is true
+                    return vmaxvq_u32(a) > 0; 
+                }
+                static inline bool mask_all(mask_type a) { 
+                    // If the minimum value across the vector is > 0, all lanes are true
+                    return vminvq_u32(a) > 0; 
+                }
+
+                // Hardware Vector Swizzling
+                template <int i0, int i1, int i2, int i3>
+                static inline register_type shuffle(register_type a) {
+                    register_type res = vdupq_n_u32(0); 
+                    res = vsetq_lane_u32(vgetq_lane_u32(a, i0), res, 0);
+                    res = vsetq_lane_u32(vgetq_lane_u32(a, i1), res, 1);
+                    res = vsetq_lane_u32(vgetq_lane_u32(a, i2), res, 2);
+                    res = vsetq_lane_u32(vgetq_lane_u32(a, i3), res, 3);
+                    return res;
+                }
+
+                // Emulated Hardware Gather
+                static inline register_type gather(const uint32_t* base_addr, uint32x4_t indices) {
+                    register_type res = vdupq_n_u32(0);
+                    res = vsetq_lane_u32(base_addr[vgetq_lane_u32(indices, 0)], res, 0);
+                    res = vsetq_lane_u32(base_addr[vgetq_lane_u32(indices, 1)], res, 1);
+                    res = vsetq_lane_u32(base_addr[vgetq_lane_u32(indices, 2)], res, 2);
+                    res = vsetq_lane_u32(base_addr[vgetq_lane_u32(indices, 3)], res, 3);
+                    return res;
+                }
+            };
+        #endif // ENGINE_ARCH_NEON
     }
 
     // ==========================================
@@ -454,6 +471,11 @@ namespace Engine::ISAArch {
 
     public:
         simd_mask() = default;
+
+        // Allows safe construction from raw hardware masks
+        static inline simd_mask from_native(typename Traits::mask_type mask) { 
+            return simd_mask(mask); 
+        }
 
         // --- MIXED-TYPE MASK CASTING ---
         template <typename U>
@@ -630,10 +652,16 @@ namespace Engine::ISAArch {
         // --- RELATIONAL & CONDITIONALS ---
         // In C++26, comparison returns a mask, not a boolean
         friend inline mask_type operator>(const simd& a, const simd& b) {
-            return mask_type(Traits::cmp_gt(a.m_data, b.m_data));
+            return mask_type::from_native(Traits::cmp_gt(a.m_data, b.m_data));
         }
-        friend inline mask_type operator<(const simd& a, const simd& b) { return mask_type(Traits::cmp_lt(a.m_data, b.m_data)); }
-        friend inline mask_type operator==(const simd& a, const simd& b) { return mask_type(Traits::cmp_eq(a.m_data, b.m_data)); }
+        
+        friend inline mask_type operator<(const simd& a, const simd& b) { 
+            return mask_type::from_native(Traits::cmp_lt(a.m_data, b.m_data)); 
+        }
+        
+        friend inline mask_type operator==(const simd& a, const simd& b) { 
+            return mask_type::from_native(Traits::cmp_eq(a.m_data, b.m_data)); 
+        }
 
         // Google Highway's "IfThenElse" equivalent
         // The C++26 proposal suggests letting `mask ? a : b` work natively, but 
