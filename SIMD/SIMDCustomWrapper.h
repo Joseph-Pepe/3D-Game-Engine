@@ -333,6 +333,55 @@ namespace Engine::ISAArch {
                 static inline bool mask_all(mask_type a) { return a == 0xFFFFFFFFFFFFFFFFULL; }
             };
 
+            // --- AVX-512 INT16 TRAITS (32 Elements per Register) ---
+            template <> struct simd_traits<int16_t, simd_abi::avx512> {
+                using register_type = __m512i;
+                using mask_type     = __mmask32; // 32-bit hardware mask!
+                static constexpr int size = 32;
+
+                static inline register_type broadcast(int16_t v) { return _mm512_set1_epi16(v); }
+                static inline register_type load(const int16_t* mem) { return _mm512_loadu_si512(reinterpret_cast<const void*>(mem)); }
+                static inline void store(int16_t* mem, register_type v) { _mm512_storeu_si512(reinterpret_cast<void*>(mem), v); }
+                
+                static inline register_type add(register_type a, register_type b) { return _mm512_add_epi16(a, b); }
+                static inline register_type sub(register_type a, register_type b) { return _mm512_sub_epi16(a, b); }
+                static inline register_type mul(register_type a, register_type b) { return _mm512_mullo_epi16(a, b); }
+                
+                // SIGNED Saturating Arithmetic (Audio Clipping Prevention)
+                static inline register_type add_sat(register_type a, register_type b) { return _mm512_adds_epi16(a, b); }
+                static inline register_type sub_sat(register_type a, register_type b) { return _mm512_subs_epi16(a, b); }
+
+                static inline mask_type cmp_gt(register_type a, register_type b) { return _mm512_cmpgt_epi16_mask(a, b); }
+                static inline mask_type cmp_lt(register_type a, register_type b) { return _mm512_cmplt_epi16_mask(a, b); }
+                static inline mask_type cmp_eq(register_type a, register_type b) { return _mm512_cmpeq_epi16_mask(a, b); }
+
+                static inline mask_type mask_not(mask_type a) { return _knot_mask32(a); }
+                static inline mask_type mask_and(mask_type a, mask_type b) { return _kand_mask32(a, b); }
+                static inline mask_type mask_or(mask_type a, mask_type b) { return _kor_mask32(a, b); }
+
+                static inline register_type min(register_type a, register_type b) { return _mm512_min_epi16(a, b); }
+                static inline register_type max(register_type a, register_type b) { return _mm512_max_epi16(a, b); }
+
+                static inline register_type bit_xor(register_type a, register_type b) { return _mm512_xor_epi32(a, b); }
+                static inline register_type bit_or(register_type a, register_type b) { return _mm512_or_epi32(a, b); }
+                static inline register_type bit_and(register_type a, register_type b) { return _mm512_and_epi32(a, b); }
+                static inline register_type shift_l(register_type a, int imm) { return _mm512_slli_epi16(a, imm); }
+                static inline register_type shift_r(register_type a, int imm) { return _mm512_srai_epi16(a, imm); }
+
+                static inline register_type blend(mask_type mask, register_type true_v, register_type false_v) {
+                    return _mm512_mask_blend_epi16(mask, false_v, true_v);
+                }
+
+                static inline bool mask_any(mask_type a) { return a != 0; }
+                static inline bool mask_all(mask_type a) { return a == 0xFFFFFFFF; }
+
+                // Mismatch guard: Cannot easily cast 32 ints into 16 floats in one register
+                template <typename Target>
+                static inline __m512 cast_to(register_type a) { 
+                    static_assert(sizeof(Target) == 0, "SIMD Mismatch: Cannot cast 32x16-bit to 16x32-bit directly."); return _mm512_setzero_ps(); 
+                }
+            };
+
             // --- AVX-512 UINT32 TRAITS ---
             template <> struct simd_traits<uint32_t, simd_abi::avx512> {
                 using register_type = __m512i;
@@ -689,6 +738,56 @@ namespace Engine::ISAArch {
 
                 static inline bool mask_any(mask_type a) { return _mm_movemask_epi8(a) != 0; }
                 static inline bool mask_all(mask_type a) { return _mm_movemask_epi8(a) == 0xFFFF; }
+            };
+
+            // --- SSE4.1 INT16 TRAITS (8 Elements per Register) ---
+            template <> struct simd_traits<int16_t, simd_abi::sse41> {
+                using register_type = __m128i;
+                using mask_type     = __m128i; 
+                static constexpr int size = 8;
+                
+                static inline register_type broadcast(int16_t v) { return _mm_set1_epi16(v); }
+                static inline register_type load(const int16_t* mem) { return _mm_loadu_si128(reinterpret_cast<const __m128i*>(mem)); }
+                static inline void store(int16_t* mem, register_type v) { _mm_storeu_si128(reinterpret_cast<__m128i*>(mem), v); }
+                
+                static inline register_type add(register_type a, register_type b) { return _mm_add_epi16(a, b); }
+                static inline register_type sub(register_type a, register_type b) { return _mm_sub_epi16(a, b); }
+                static inline register_type mul(register_type a, register_type b) { return _mm_mullo_epi16(a, b); }
+                
+                // SIGNED Saturating Arithmetic
+                static inline register_type add_sat(register_type a, register_type b) { return _mm_adds_epi16(a, b); }
+                static inline register_type sub_sat(register_type a, register_type b) { return _mm_subs_epi16(a, b); }
+
+                static inline register_type min(register_type a, register_type b) { return _mm_min_epi16(a, b); }
+                static inline register_type max(register_type a, register_type b) { return _mm_max_epi16(a, b); }
+
+                static inline register_type bit_or(register_type a, register_type b) { return _mm_or_si128(a, b); }
+                static inline register_type bit_and(register_type a, register_type b) { return _mm_and_si128(a, b); }
+                static inline register_type bit_xor(register_type a, register_type b) { return _mm_xor_si128(a, b); }
+                static inline register_type shift_l(register_type a, int imm) { return _mm_slli_epi16(a, imm); }
+                static inline register_type shift_r(register_type a, int imm) { return _mm_srai_epi16(a, imm); } // Arithmetic (preserves negative sound wave phase)
+                
+                // Native Signed Comparison
+                static inline mask_type cmp_gt(register_type a, register_type b) { return _mm_cmpgt_epi16(a, b); }
+                static inline mask_type cmp_lt(register_type a, register_type b) { return _mm_cmplt_epi16(a, b); }
+                static inline mask_type cmp_eq(register_type a, register_type b) { return _mm_cmpeq_epi16(a, b); }
+
+                static inline mask_type mask_not(mask_type a) { 
+                    __m128i all_ones = _mm_cmpeq_epi32(_mm_setzero_si128(), _mm_setzero_si128());
+                    return _mm_xor_si128(a, all_ones);
+                }
+                static inline mask_type mask_and(mask_type a, mask_type b) { return _mm_and_si128(a, b); }
+                static inline mask_type mask_or(mask_type a, mask_type b) { return _mm_or_si128(a, b); }
+
+                static inline register_type blend(mask_type mask, register_type true_v, register_type false_v) {
+                    return _mm_blendv_epi8(false_v, true_v, mask); // epi8 blending works identically for epi16 memory layouts
+                }
+
+                static inline bool mask_any(mask_type a) { return _mm_movemask_epi8(a) != 0; }
+                static inline bool mask_all(mask_type a) { return _mm_movemask_epi8(a) == 0xFFFF; }
+
+                template <typename Target>
+                static inline __m128 cast_to(register_type a) { static_assert(sizeof(Target) == 0, "SIMD Mismatch: Cannot cast 8x16-bit to 4x32-bit directly."); return _mm_setzero_ps(); }
             };
 
             // --- SSE4.1 UINT32 TRAITS ---
@@ -1102,6 +1201,54 @@ namespace Engine::ISAArch {
                 static inline bool mask_any(mask_type a) { return _mm256_movemask_epi8(a) != 0; }
                 // _mm256_movemask_epi8 extracts the top bit of all 32 bytes. If all are true, the result is 32 1s (0xFFFFFFFF)
                 static inline bool mask_all(mask_type a) { return _mm256_movemask_epi8(a) == (int)0xFFFFFFFF; }
+            };
+
+            // --- AVX2 INT16 TRAITS (16 Elements per Register) ---
+            template <> struct simd_traits<int16_t, simd_abi::avx2> {
+                using register_type = __m256i;
+                using mask_type     = __m256i; 
+                static constexpr int size = 16;
+                
+                static inline register_type broadcast(int16_t v) { return _mm256_set1_epi16(v); }
+                static inline register_type load(const int16_t* mem) { return _mm256_loadu_si256(reinterpret_cast<const __m256i*>(mem)); }
+                static inline void store(int16_t* mem, register_type v) { _mm256_storeu_si256(reinterpret_cast<__m256i*>(mem), v); }
+                
+                static inline register_type add(register_type a, register_type b) { return _mm256_add_epi16(a, b); }
+                static inline register_type sub(register_type a, register_type b) { return _mm256_sub_epi16(a, b); }
+                static inline register_type mul(register_type a, register_type b) { return _mm256_mullo_epi16(a, b); }
+                
+                // SIGNED Saturating Hardware Arithmetic
+                static inline register_type add_sat(register_type a, register_type b) { return _mm256_adds_epi16(a, b); }
+                static inline register_type sub_sat(register_type a, register_type b) { return _mm256_subs_epi16(a, b); }
+
+                static inline register_type min(register_type a, register_type b) { return _mm256_min_epi16(a, b); }
+                static inline register_type max(register_type a, register_type b) { return _mm256_max_epi16(a, b); }
+
+                static inline register_type bit_xor(register_type a, register_type b) { return _mm256_xor_si256(a, b); }
+                static inline register_type bit_or(register_type a, register_type b) { return _mm256_or_si256(a, b); }
+                static inline register_type bit_and(register_type a, register_type b) { return _mm256_and_si256(a, b); }
+                static inline register_type shift_l(register_type a, int imm) { return _mm256_slli_epi16(a, imm); }
+                static inline register_type shift_r(register_type a, int imm) { return _mm256_srai_epi16(a, imm); }
+                
+                // Native Signed Limits
+                static inline mask_type cmp_gt(register_type a, register_type b) { return _mm256_cmpgt_epi16(a, b); }
+                static inline mask_type cmp_lt(register_type a, register_type b) { return _mm256_cmpgt_epi16(b, a); }
+                static inline mask_type cmp_eq(register_type a, register_type b) { return _mm256_cmpeq_epi16(a, b); }
+
+                static inline mask_type mask_not(mask_type a) { 
+                    __m256i all_ones = _mm256_cmpeq_epi32(_mm256_setzero_si256(), _mm256_setzero_si256());
+                    return _mm256_xor_si256(a, all_ones);
+                }
+                static inline mask_type mask_and(mask_type a, mask_type b) { return _mm256_and_si256(a, b); }
+                static inline mask_type mask_or(mask_type a, mask_type b) { return _mm256_or_si256(a, b); }
+
+                static inline register_type blend(mask_type mask, register_type true_v, register_type false_v) { return _mm256_blendv_epi8(false_v, true_v, mask); }
+
+                static inline bool mask_any(mask_type a) { return _mm256_movemask_epi8(a) != 0; }
+                static inline bool mask_all(mask_type a) { return _mm256_movemask_epi8(a) == (int)0xFFFFFFFF; }
+
+                template <typename Target>
+                static inline __m256 cast_to(register_type a) { static_assert(sizeof(Target) == 0, "SIMD Mismatch: Cannot cast 16x16-bit to 8x32-bit directly."); return _mm256_setzero_ps(); }
             };
 
             // --- AVX2 UINT32 TRAITS ---
@@ -1646,6 +1793,53 @@ namespace Engine::ISAArch {
                     return vcvtq_f32_s32(a);
                 }
             };
+
+            // --- NEON INT16 TRAITS (8 Elements per Register) ---
+            template <> struct simd_traits<int16_t, simd_abi::neon> {
+                using register_type = int16x8_t;
+                using mask_type     = uint16x8_t;
+                static constexpr int size = 8;
+                
+                static inline register_type broadcast(int16_t v) { return vdupq_n_s16(v); }
+                static inline register_type load(const int16_t* mem) { return vld1q_s16(mem); }
+                static inline void store(int16_t* mem, register_type v) { vst1q_s16(mem, v); }
+
+                static inline register_type add(register_type a, register_type b) { return vaddq_s16(a, b); }
+                static inline register_type sub(register_type a, register_type b) { return vsubq_s16(a, b); }
+                static inline register_type mul(register_type a, register_type b) { return vmulq_s16(a, b); }
+                
+                // Saturating Hardware Arithmetic
+                static inline register_type add_sat(register_type a, register_type b) { return vqaddq_s16(a, b); }
+                static inline register_type sub_sat(register_type a, register_type b) { return vqsubq_s16(a, b); }
+
+                static inline register_type min(register_type a, register_type b) { return vminq_s16(a, b); }
+                static inline register_type max(register_type a, register_type b) { return vmaxq_s16(a, b); }
+                
+                static inline register_type bit_or(register_type a, register_type b) { return vorrq_s16(a, b); }
+                static inline register_type bit_and(register_type a, register_type b) { return vandq_s16(a, b); }
+                static inline register_type bit_xor(register_type a, register_type b) { return veorq_s16(a, b); }
+                static inline register_type shift_l(register_type a, int imm) { return vshlq_s16(a, vdupq_n_s32(imm)); }
+                static inline register_type shift_r(register_type a, int imm) { return vshlq_s16(a, vdupq_n_s32(-imm)); }
+                
+                // Relational
+                static inline mask_type cmp_gt(register_type a, register_type b) { return vcgtq_s16(a, b); }
+                static inline mask_type cmp_lt(register_type a, register_type b) { return vcltq_s16(a, b); }
+                static inline mask_type cmp_eq(register_type a, register_type b) { return vceqq_s16(a, b); }
+
+                static inline mask_type mask_not(mask_type a) { return vmvnq_u16(a); }
+                static inline mask_type mask_and(mask_type a, mask_type b) { return vandq_u16(a, b); }
+                static inline mask_type mask_or(mask_type a, mask_type b) { return vorrq_u16(a, b); }
+
+                static inline register_type blend(mask_type mask, register_type true_v, register_type false_v) {
+                    return vbslq_s16(mask, true_v, false_v);
+                }
+
+                static inline bool mask_any(mask_type a) { return vmaxvq_u32(vreinterpretq_u32_u16(a)) > 0; }
+                static inline bool mask_all(mask_type a) { return vminvq_u32(vreinterpretq_u32_u16(a)) > 0; }
+
+                template <typename Target>
+                static inline float32x4_t cast_to(register_type a) { static_assert(sizeof(Target) == 0, "SIMD Mismatch: Cannot cast 8x16-bit to 4x32-bit directly."); return vdupq_n_f32(0.0f); }
+            };
         #endif // ENGINE_ARCH_NEON
     }
 
@@ -1796,12 +1990,12 @@ namespace Engine::ISAArch {
         }
 
         // --- SATURATING ARITHMETIC (Clamps instead of wrapping) ---
-        // Exclusively unlocked for 8-bit integers (Colors, Voxels)
-        friend inline simd add_sat(const simd& a, const simd& b) requires (sizeof(T) == 1) {
+        // Unlocked for 8-bit integers (Colors) and 16-bit integers (Audio)
+        friend inline simd add_sat(const simd& a, const simd& b) requires (sizeof(T) == 1 || sizeof(T) == 2) {
             return simd(Traits::add_sat(a.m_data, b.m_data));
         }
 
-        friend inline simd sub_sat(const simd& a, const simd& b) requires (sizeof(T) == 1) {
+        friend inline simd sub_sat(const simd& a, const simd& b) requires (sizeof(T) == 1 || sizeof(T) == 2) {
             return simd(Traits::sub_sat(a.m_data, b.m_data));
         }
 
@@ -2047,11 +2241,12 @@ namespace Engine::ISAArch {
     using WideBatch = simd<T, simd_abi::native<T>>;
     
     // Engine-wide typedefs for data processing
-    using WideFloat  = WideBatch<float>;
-    using WideDouble = WideBatch<double>;
-    using WideUInt8  = WideBatch<uint8_t>;
-    using WideUInt32 = WideBatch<uint32_t>;
-    using WideInt32  = WideBatch<int32_t>;
+    using WideFloat  = WideBatch<float>;          // High-throughput SOA physics and ECS iteration.
+    using WideDouble = WideBatch<double>;         // 64-bit Large World Coordinates
+    using WideInt16  = WideBatch<int16_t>;        // 16 lanes audio mixing.
+    using WideInt32  = WideBatch<int32_t>;        // High-throughput SOA physics and ECS iteration.
+    using WideUInt8  = WideBatch<uint8_t>;        // 32 lanes voxel/color processing.
+    using WideUInt32 = WideBatch<uint32_t>;       
 
     // ========================================================
     // TIER 2: AOS (Array of Structs) - "The Geometric Standard"
@@ -2071,11 +2266,12 @@ namespace Engine::ISAArch {
     #endif
     
     // Engine-wide typedefs for geometry
-    using FixedFloat4 = FixedBatch4<float>;
-    using FixedDouble = FixedBatch4<double>;
-    using FixedUInt8  = FixedBatch4<uint8_t>;
-    using FixedUInt32 = FixedBatch4<uint32_t>;
-    using FixedInt32  = FixedBatch4<int32_t>;
+    using FixedFloat4  = FixedBatch4<float>;   // Guaranteed 16-byte aligned geometry/matrices for GPU uniform buffers.
+    using FixedDouble  = FixedBatch4<double>;
+    using FixedInt16_8 = FixedBatch4<int16_t>; // Note: A 128-bit 'Fixed' register holds EIGHT 16-bit values, not 4!
+    using FixedInt32   = FixedBatch4<int32_t>;
+    using FixedUInt8   = FixedBatch4<uint8_t>;
+    using FixedUInt32  = FixedBatch4<uint32_t>;
 
     /*
         // 1. PERFECT GPU VEC4 (Guaranteed 16 Bytes on all consoles/PC)
