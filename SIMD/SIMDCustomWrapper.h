@@ -2242,10 +2242,10 @@ namespace Engine::ISAArch {
     
     // Engine-wide typedefs for data processing
     using WideFloat  = WideBatch<float>;          // High-throughput SOA physics and ECS iteration.
-    using WideDouble = WideBatch<double>;         // 64-bit Large World Coordinates
-    using WideInt16  = WideBatch<int16_t>;        // 16 lanes audio mixing.
+    using WideDouble = WideBatch<double>;         // 64-bit Large World Coordinates (e.g., space simulator 10,000 asteroids orbit the sun at massive coordinates)
+    using WideInt16  = WideBatch<int16_t>;        // 16 lanes audio mixing (e.g., combine multiple sound effects into a master bus, mix 16 audio samples per clock cycle).
     using WideInt32  = WideBatch<int32_t>;        // High-throughput SOA physics and ECS iteration.
-    using WideUInt8  = WideBatch<uint8_t>;        // 32 lanes voxel/color processing.
+    using WideUInt8  = WideBatch<uint8_t>;        // 32 lanes voxel/color processing (e.g., image processing, post processing, particle color lifecycles, 8 RGBA pixels in a single clock cycle).
     using WideUInt32 = WideBatch<uint32_t>;       
 
     // ========================================================
