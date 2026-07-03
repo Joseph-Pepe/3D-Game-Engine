@@ -1088,8 +1088,9 @@ namespace Engine::ISAArch {
         // C++26 guarantees default simds are uninitialized, just like raw floats!
         simd() = default; 
         
-        // Broadcast Constructor
-        simd(T value) : m_data(Traits::broadcast(value)) {} 
+        // Broadcast Constructor that can take an integer (0), cast i to a u32int_t, and broadcast it.
+        template <typename U> requires std::is_convertible_v<U, T>
+        simd(U value) : m_data(Traits::broadcast(static_cast<T>(value))) {}
         
         // C++26 Memory Load (P1928 allows implicit load from memory)
         explicit simd(const T* mem) : m_data(Traits::load(mem)) {}
