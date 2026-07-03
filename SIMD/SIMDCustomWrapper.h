@@ -2,6 +2,7 @@
 #include <concepts>
 #include <cstdint>
 #include <type_traits>
+#include <format>
 
 // ==================================================
 // INSTRUCTION SET ARCHITECTURES (ISA)
@@ -17,20 +18,27 @@
     // AVX2: Xbox Series X/S, PS5, Modern PC
     #include <immintrin.h>
     #define ENGINE_ARCH_AVX2 1
-
 #elif defined(__aarch64__) || defined(_M_ARM64)
     // ARM NEON: Apple Silicon, Switch 2, Android, Windows on ARM
     #include <arm_neon.h>
     #define ENGINE_ARCH_NEON 1
-
 #elif defined(__SSE4_1__)
     // SSE4.1: Legacy PC Fallback
     #include <immintrin.h> // immintrin handles all x86 SIMD headers
     #define ENGINE_ARCH_SSE41 1
-
 #else
     #error "Engine Compiler Error: Unsupported CPU architecture. AVX2, NEON, or SSE4.1 instruction sets are strictly required."
 #endif
+
+void LogHardwareArchitecture() {
+    #if defined(ENGINE_ARCH_AVX2)
+        std::println("[AVX2, X86]: Intel/AMD based architecture detected.");
+    #elif defined(ENGINE_ARCH_NEON)
+        std::println("[ARM64]: ARM based architecture detected.");
+    #elif defined(ENGINE_ARCH_SSE41)
+        std::println("[SSE4.1]: Legacy based architecture detected.");
+    #endif
+}
 
 namespace Engine::ISAArch {
     // ==========================================
