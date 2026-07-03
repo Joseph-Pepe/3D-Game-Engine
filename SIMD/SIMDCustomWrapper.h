@@ -14,7 +14,11 @@
     - Legacy: Baseline Legacy PC | SSE4.1 (128 bit registers)
 */
 
-// --- HARDWARE DETECTION & INCLUDES ---
+// --- HARDWARE DETECTION ---
+#if defined(__F16C__) && !defined(_MSC_VER)
+    #include <f16cintrin.h> // Required for Clang/GCC on Linux
+#endif
+
 #if defined(__AVX2__)
     // AVX2: Xbox Series X/S, PS5, Modern PC
     #include <immintrin.h>
@@ -26,9 +30,26 @@
 #elif defined(__SSE4_1__)
     // SSE4.1: Legacy PC Fallback
     #include <immintrin.h> // immintrin handles all x86 SIMD headers
+
+    // SSE 4.1 hardware (pre-2012 CPU) does not support Float16 compression, it belongs to the FC16 hardware extension.
+    // Enforces [SSE4.1 + FC16 extension]
+    #if !defined(__F16C__) && (defined(__clang__) || defined(__GNUC__))
+        #error "Engine Compiler Error: SSE4.1 fallback strictly requires the F16C extension for Float16 memory compression. Please compile with -mf16c."
+    #endif
     #define ENGINE_ARCH_SSE41 1
 #else
     #error "Engine Compiler Error: Unsupported CPU architecture. AVX2, NEON, or SSE4.1 instruction sets are strictly required."
+#endif
+
+// --- HARDWARE EXTENSIONS ---
+
+#if defined(__AVX512F__)
+    #define ENGINE_ARCH_AVX512 1
+#endif
+#if defined(__ARM_FEATURE_SVE)   
+    // Apple Silicon (M4+)
+    #include <arm_sve.h>
+    #define ENGINE_ARCH_SVE 1
 #endif
 
 // ===================================================
@@ -55,6 +76,8 @@
     #define RESTRICT __restrict
 #elif defined(__clang__) || defined(__GNUC__)
     #define RESTRICT __restrict__
+#else
+    #define RESTRICT // Fallback to nothing if unsupported
 #endif
 
 void LogHardwareArchitecture() {
@@ -75,15 +98,21 @@ namespace Engine::ISAArch {
         struct scalar {};
         struct avx2 {};
         struct neon {};
+        struct avx512 {};
+        struct sve {}; // Scalable Vector Extension (vector sizes change at runtime based on the silicon from 128-bits to 2048-bits)
 
         // C++26 'native' alias: Automatically deduces the best hardware vector length at compile time based on your compiler flags (e.g., /arch:AVX2).
         template <typename T>
-        #if ENGINE_ARCH_AVX2
+        #if ENGINE_ARCH_AVX512
+            using native = avx512;   // Supercomputers (512-bit (16 floats))
+        #elif ENGINE_ARCH_AVX2
             using native = avx2;     // Xbox/PS5/PC (256-bit (8 floats))
         #elif ENGINE_ARCH_NEON
             using native = neon;     // Nintendo Switch 2 / Apple Silicon (128-bit (4 floats))
+        #elif ENGINE_ARCH_SSE41
+            using native = sse41;    // Legacy PC Fallback (128-bit (4 floats))
         #else
-            using native = scalar;   // Legacy PC
+            using native = scalar;   // Fallback
         #endif
     }
 
@@ -93,6 +122,147 @@ namespace Engine::ISAArch {
     namespace detail {
         // Primary template (Undefined)
         template <typename T, typename Abi> struct simd_traits;
+
+        #if ENGINE_ARCH_AVX512
+            // ========================================================
+            // --- AVX-512 BACKEND (16-Wide Processing) ---
+            // ========================================================
+            template <> struct simd_traits<float, simd_abi::avx512> {
+                using register_type = __m512;
+                using mask_type     = __mmask16; // Dedicated 16-bit hardware mask!
+                static constexpr int size = 16;
+                
+                static inline register_type broadcast(float v) { return _mm512_set1_ps(v); }
+                static inline register_type load(const float* mem) { return _mm512_loadu_ps(mem); }
+                static inline void store(float* mem, register_type v) { _mm512_storeu_ps(mem, v); }
+                
+                static inline register_type add(register_type a, register_type b) { return _mm512_add_ps(a, b); }
+                static inline register_type mul(register_type a, register_type b) { return _mm512_mul_ps(a, b); }
+                
+                // Mask Generation directly returns a __mmask16 integer
+                static inline mask_type cmp_gt(register_type a, register_type b) { return _mm512_cmp_ps_mask(a, b, _CMP_GT_OQ); }
+                
+                // Mask Logic operates on standard CPU integer registers, completely bypassing the vector ALU
+                static inline mask_type mask_not(mask_type a) { return _knot_mask16(a); }
+                static inline mask_type mask_and(mask_type a, mask_type b) { return _kand_mask16(a, b); }
+
+                static inline bool mask_any(mask_type a) { return a != 0; }
+                static inline bool mask_all(mask_type a) { return a == 0xFFFF; }
+                
+                // Native hardware blending using the dedicated mask register
+                static inline register_type blend(mask_type mask, register_type true_v, register_type false_v) {
+                    return _mm512_mask_blend_ps(mask, false_v, true_v);
+                }
+                
+                // AVX-512 FMA
+                static inline register_type fmadd(register_type a, register_type b, register_type c) {
+                    return _mm512_fmadd_ps(a, b, c);
+                }
+                
+                static inline float reduce_add(register_type a) {
+                    return _mm512_reduce_add_ps(a); // AVX-512 finally has native horizontal reduction!
+                }
+
+                // --- AVX-512 FLOAT ARITHMETIC ---
+                static inline register_type sub(register_type a, register_type b) { return _mm512_sub_ps(a, b); }
+                static inline register_type div(register_type a, register_type b) { return _mm512_div_ps(a, b); }
+                static inline register_type min(register_type a, register_type b) { return _mm512_min_ps(a, b); }
+                static inline register_type max(register_type a, register_type b) { return _mm512_max_ps(a, b); }
+                static inline register_type sqrt(register_type a) { return _mm512_sqrt_ps(a); }
+
+                // --- AVX-512 NEWTON-RAPHSON ---
+                static inline register_type rsqrt(register_type a) { 
+                    __m512 approx = _mm512_rsqrt14_ps(a); // AVX-512 uses a 14-bit estimate native instruction
+                    __m512 half_a = _mm512_mul_ps(_mm512_set1_ps(0.5f), a);
+                    __m512 x0_sq  = _mm512_mul_ps(approx, approx);
+                    return _mm512_mul_ps(approx, _mm512_fnmadd_ps(half_a, x0_sq, _mm512_set1_ps(1.5f)));
+                }
+                static inline register_type rcp(register_type a) { 
+                    __m512 approx = _mm512_rcp14_ps(a);
+                    return _mm512_mul_ps(approx, _mm512_fnmadd_ps(a, approx, _mm512_set1_ps(2.0f)));
+                }
+
+                // --- AVX-512 BITWISE & LOGIC ---
+                static inline register_type abs(register_type a) { return _mm512_and_ps(a, _mm512_castsi512_ps(_mm512_set1_epi32(0x7FFFFFFF))); }
+                static inline register_type floor(register_type a) { return _mm512_floor_ps(a); }
+                static inline register_type ceil(register_type a) { return _mm512_ceil_ps(a); }
+                static inline mask_type cmp_lt(register_type a, register_type b) { return _mm512_cmp_ps_mask(a, b, _CMP_LT_OQ); }
+                static inline mask_type cmp_eq(register_type a, register_type b) { return _mm512_cmp_ps_mask(a, b, _CMP_EQ_OQ); }
+
+                static inline register_type bit_xor(register_type a, register_type b) { return _mm512_xor_ps(a, b); }
+                static inline register_type bit_and(register_type a, register_type b) { return _mm512_and_ps(a, b); }
+                static inline register_type bit_or(register_type a, register_type b)  { return _mm512_or_ps(a, b); }
+                static inline register_type negate(register_type a) { return _mm512_xor_ps(a, _mm512_set1_ps(-0.0f)); }
+
+                // --- AVX-512 CASTING, SHUFFLE, & GATHER ---
+                template <typename Target>
+                static inline __m512i cast_to(register_type a) { 
+                    static_assert(std::is_same_v<Target, uint32_t>, "Only float-to-uint32_t supported.");
+                    return _mm512_cvttps_epi32(a); 
+                }
+
+                template <int i0, int i1, int i2, int i3>
+                static inline register_type shuffle(register_type a) { return _mm512_shuffle_ps(a, a, _MM_SHUFFLE(i3, i2, i1, i0)); }
+
+                static inline register_type gather(const float* base_addr, __m512i indices) { return _mm512_i32gather_ps(indices, base_addr, 4); }
+
+                // Loads 256-bits of RAM and expands to a 512-bit register
+                static inline register_type load_half(const uint16_t* mem) {
+                    return _mm512_cvtph_ps(_mm256_loadu_si256(reinterpret_cast<const __m256i*>(mem)));
+                }
+                // Compresses a 512-bit register down to 256-bits of RAM
+                static inline void store_half(uint16_t* mem, register_type v) {
+                    _mm256_storeu_si256(reinterpret_cast<__m256i*>(mem), _mm512_cvtps_ph(v, _MM_FROUND_TO_NEAREST_INT));
+                }
+            };
+
+            // --- AVX-512 UINT32 TRAITS ---
+            template <> struct simd_traits<uint32_t, simd_abi::avx512> {
+                using register_type = __m512i;
+                using mask_type     = __mmask16; 
+                static constexpr int size = 16;
+
+                template <typename Target>
+                static inline __m512 cast_to(register_type a) {
+                    static_assert(std::is_same_v<Target, float>, "uint32_t-to-float cast.");
+                    return _mm512_cvtepi32_ps(a); 
+                }
+                
+                static inline register_type broadcast(uint32_t v) { return _mm512_set1_epi32(v); }
+                static inline register_type load(const uint32_t* mem) { return _mm512_loadu_si512(reinterpret_cast<const void*>(mem)); }
+                static inline void store(uint32_t* mem, register_type v) { _mm512_storeu_si512(reinterpret_cast<void*>(mem), v); }
+                
+                static inline register_type add(register_type a, register_type b) { return _mm512_add_epi32(a, b); }
+                static inline register_type sub(register_type a, register_type b) { return _mm512_sub_epi32(a, b); }
+                static inline register_type mul(register_type a, register_type b) { return _mm512_mullo_epi32(a, b); }
+                
+                static inline mask_type cmp_gt(register_type a, register_type b) { return _mm512_cmpgt_epi32_mask(a, b); }
+                static inline mask_type cmp_lt(register_type a, register_type b) { return _mm512_cmplt_epi32_mask(a, b); }
+                static inline mask_type cmp_eq(register_type a, register_type b) { return _mm512_cmpeq_epi32_mask(a, b); }
+
+                static inline mask_type mask_not(mask_type a) { return _knot_mask16(a); }
+                static inline mask_type mask_and(mask_type a, mask_type b) { return _kand_mask16(a, b); }
+                static inline mask_type mask_or(mask_type a, mask_type b) { return _kor_mask16(a, b); }
+
+                // Bitwise Math
+                static inline register_type bit_or(register_type a, register_type b) { return _mm512_or_si512(a, b); }
+                static inline register_type bit_and(register_type a, register_type b) { return _mm512_and_si512(a, b); }
+                static inline register_type shift_l(register_type a, int imm) { return _mm512_slli_epi32(a, imm); }
+
+                static inline register_type blend(mask_type mask, register_type true_v, register_type false_v) {
+                    return _mm512_mask_blend_epi32(mask, false_v, true_v);
+                }
+
+                static inline uint32_t reduce_add(register_type a) {
+                    return _mm512_reduce_add_epi32(a); 
+                }
+
+                // Hardware Gather for AVX-512 (Scale = 4 bytes)
+                static inline register_type gather(const uint32_t* base_addr, __m512i indices) {
+                    return _mm512_i32gather_epi32(indices, base_addr, 4); 
+                }
+            };
+        #endif
 
         #if ENGINE_ARCH_AVX2 || ENGINE_ARCH_SSE41
             // ========================================================
@@ -210,6 +380,21 @@ namespace Engine::ISAArch {
                         base_addr[_mm_extract_epi32(indices, 1)], 
                         base_addr[_mm_extract_epi32(indices, 0)]
                     );
+                }
+
+                // ==================================
+                // MEMORY COMPRESSION (Float16)
+                // ==================================
+                // Loads 64-bits of RAM (4 x 16-bit floats) and expands to a 128-bit register
+                static inline register_type load_half(const uint16_t* mem) {
+                    // Cast the pointer to __m128i* and load the 64-bit chunk natively
+                    __m128i half_data = _mm_loadl_epi64(reinterpret_cast<const __m128i*>(mem));
+                    return _mm_cvtph_ps(half_data);
+                }
+                // Compresses a 128-bit register down to 64-bits of RAM
+                static inline void store_half(uint16_t* mem, register_type v) {
+                    __m128i half_data = _mm_cvtps_ph(v, _MM_FROUND_TO_NEAREST_INT);
+                    _mm_storel_epi64(reinterpret_cast<__m128i*>(mem), half_data);
                 }
             };
 
@@ -429,6 +614,20 @@ namespace Engine::ISAArch {
                 // Hardware Gather (Scale = 4 bytes per float)
                 static inline register_type gather(const float* base_addr, __m256i indices) {
                     return _mm256_i32gather_ps(base_addr, indices, 4); 
+                }
+
+                // ==================================
+                // MEMORY COMPRESSION (Float16)
+                // ==================================
+                // Store data in memory as 16-bit floats, cutting bandwidth by 50%, instantly decode them to 32-bit __mm256 registers.
+
+                // Loads 128-bits of RAM (8 x 16-bit floats) and expands to a 256-bit register
+                static inline register_type load_half(const uint16_t* mem) {
+                    return _mm256_cvtph_ps(_mm_loadu_si128(reinterpret_cast<const __m128i*>(mem)));
+                }
+                // Compresses a 256-bit register down to 128-bits of RAM (Rounding to nearest)
+                static inline void store_half(uint16_t* mem, register_type v) {
+                    _mm_storeu_si128(reinterpret_cast<__m128i*>(mem), _mm256_cvtps_ph(v, _MM_FROUND_TO_NEAREST_INT));
                 }
             };
 
@@ -651,6 +850,13 @@ namespace Engine::ISAArch {
                     res = vsetq_lane_f32(base_addr[vgetq_lane_u32(indices, 3)], res, 3);
                     return res;
                 }
+
+                static inline register_type load_half(const uint16_t* mem) {
+                    return vcvt_f32_f16(vld1_f16(reinterpret_cast<const float16_t*>(mem)));
+                }
+                static inline void store_half(uint16_t* mem, register_type v) {
+                    vst1_f16(reinterpret_cast<float16_t*>(mem), vcvt_f16_f32(v));
+                }
             };
 
             // --- NEON UINT32 TRAITS ---
@@ -773,8 +979,8 @@ namespace Engine::ISAArch {
                     return simd_mask<U, Abi>(_mm256_castsi256_ps(m_mask));
                 } else if constexpr (std::is_same_v<Abi, simd_abi::sse41>) {
                     return simd_mask<U, Abi>(_mm_castsi128_ps(m_mask));
-                } else if constexpr (std::is_same_v<Abi, simd_abi::neon>) {
-                    return simd_mask<U, Abi>(m_mask);
+                } else if constexpr (std::is_same_v<Abi, simd_abi::neon> || std::is_same_v<Abi, simd_abi::avx512>) {
+                    return simd_mask<U, Abi>(m_mask); // AVX-512 and NEON bypass casting!
                 }
             } // FLOAT to UINT32
             else if constexpr (std::is_same_v<T, float> && std::is_same_v<U, uint32_t>) {
@@ -782,8 +988,8 @@ namespace Engine::ISAArch {
                     return simd_mask<U, Abi>(_mm256_castps_si256(m_mask));
                 } else if constexpr (std::is_same_v<Abi, simd_abi::sse41>) {
                     return simd_mask<U, Abi>(_mm_castps_si128(m_mask));
-                } else if constexpr (std::is_same_v<Abi, simd_abi::neon>) {
-                    return simd_mask<U, Abi>(m_mask);
+                } else if constexpr (std::is_same_v<Abi, simd_abi::neon> || std::is_same_v<Abi, simd_abi::avx512>) {
+                    return simd_mask<U, Abi>(m_mask); // AVX-512 and NEON bypass casting!
                 }
             } else {
                 static_assert(sizeof(U) == 0, "Unsupported mask cast.");
@@ -863,6 +1069,14 @@ namespace Engine::ISAArch {
         friend inline simd abs(const simd& a) requires std::is_floating_point_v<T> { return simd(Traits::abs(a.m_data)); }
         friend inline simd floor(const simd& a) requires std::is_floating_point_v<T> { return simd(Traits::floor(a.m_data)); }
         friend inline simd ceil(const simd& a) requires std::is_floating_point_v<T> { return simd(Traits::ceil(a.m_data)); }
+
+        // Float16 Memory Gateway
+        static simd load_f16(const uint16_t* mem) requires std::is_floating_point_v<T> {
+            return simd(Traits::load_half(mem));
+        }
+        void store_f16(uint16_t* mem) const requires std::is_floating_point_v<T> {
+            Traits::store_half(mem, m_data);
+        }
 
         // =======================================================================
         // VECTORIZED TRIGONOMETRY (MINIMAX POLYNOMIAL APPROX & HORNER'S METHOD)
