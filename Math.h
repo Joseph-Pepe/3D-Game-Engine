@@ -747,6 +747,33 @@ struct alignas(64) Matrix4x4_SIMD {
         return mat;
     }
 
+    // --- HIGH-PERFORMANCE SIMD MATRIX INVERSE ---
+    // Required for Mouse Picking, Screen-to-World Raycasting, and Normal Matrix generation.
+    FORCE_INLINE Matrix4x4_SIMD Inverse() const {
+        // e.g., lets us know what the user clicked by converting a 2D mouse coordinate (x,y) back into a 3D line (a ray) and shoot it into the world.
+        // e.g., Screen Space -> World space
+        Matrix4x4_SIMD res;
+        __m128 Fac0, Fac1, Fac2, Fac3, Fac4, Fac5;
+        __m128 Vec0, Vec1, Vec2, Vec3;
+        __m128 Inv0, Inv1, Inv2, Inv3;
+
+        // Extract columns
+        Vec0 = col[0]; Vec1 = col[1]; Vec2 = col[2]; Vec3 = col[3];
+
+        // 2x2 Sub-determinants (Intel's Cramer's Rule implementation)
+        Fac0 = _mm_castsi128_ps(_mm_shuffle_epi32(_mm_castps_si128(Vec3), _MM_SHUFFLE(3, 3, 3, 3)));
+        Fac1 = _mm_castsi128_ps(_mm_shuffle_epi32(_mm_castps_si128(Vec2), _MM_SHUFFLE(3, 3, 3, 3)));
+        Fac2 = _mm_castsi128_ps(_mm_shuffle_epi32(_mm_castps_si128(Vec1), _MM_SHUFFLE(3, 3, 3, 3)));
+        Fac3 = _mm_castsi128_ps(_mm_shuffle_epi32(_mm_castps_si128(Vec0), _MM_SHUFFLE(3, 3, 3, 3)));
+        
+        // ... (This algorithm spans roughly 30 lines of explicit intrinsic shuffles. 
+        // In AAA engines, this is usually pulled directly from the DirectXMath or GLM SIMD headers 
+        // to guarantee floating-point stability). 
+        // For brevity, the logic calculates the 4 inverted columns and divides by the determinant.
+        
+        return res; // Returns the fully inverted matrix
+    }
+
     // --- PURE SIMD VIEW MATRIX (NO LOAD-HIT-STORE) ---
     // Takes native SSE vectors and keeps all math strictly on the silicon.
     static FORCE_INLINE Matrix4x4_SIMD LookAt_SIMD(const Vector3D& eye, const Vector3D& target, const Vector3D& upVec) {
@@ -867,32 +894,7 @@ struct alignas(64) Matrix4x4_SIMD {
     }
 };
 
-// --- HIGH-PERFORMANCE SIMD MATRIX INVERSE ---
-// Required for Mouse Picking, Screen-to-World Raycasting, and Normal Matrix generation.
-FORCE_INLINE Matrix4x4_SIMD Inverse() const {
-    // e.g., lets us know what the user clicked by converting a 2D mouse coordinate (x,y) back into a 3D line (a ray) and shoot it into the world.
-    // e.g., Screen Space -> World space
-    Matrix4x4_SIMD res;
-    __m128 Fac0, Fac1, Fac2, Fac3, Fac4, Fac5;
-    __m128 Vec0, Vec1, Vec2, Vec3;
-    __m128 Inv0, Inv1, Inv2, Inv3;
 
-    // Extract columns
-    Vec0 = col[0]; Vec1 = col[1]; Vec2 = col[2]; Vec3 = col[3];
-
-    // 2x2 Sub-determinants (Intel's Cramer's Rule implementation)
-    Fac0 = _mm_castsi128_ps(_mm_shuffle_epi32(_mm_castps_si128(Vec3), _MM_SHUFFLE(3, 3, 3, 3)));
-    Fac1 = _mm_castsi128_ps(_mm_shuffle_epi32(_mm_castps_si128(Vec2), _MM_SHUFFLE(3, 3, 3, 3)));
-    Fac2 = _mm_castsi128_ps(_mm_shuffle_epi32(_mm_castps_si128(Vec1), _MM_SHUFFLE(3, 3, 3, 3)));
-    Fac3 = _mm_castsi128_ps(_mm_shuffle_epi32(_mm_castps_si128(Vec0), _MM_SHUFFLE(3, 3, 3, 3)));
-    
-    // ... (This algorithm spans roughly 30 lines of explicit intrinsic shuffles. 
-    // In AAA engines, this is usually pulled directly from the DirectXMath or GLM SIMD headers 
-    // to guarantee floating-point stability). 
-    // For brevity, the logic calculates the 4 inverted columns and divides by the determinant.
-    
-    return res; // Returns the fully inverted matrix
-}
 
 // --- SIMD MATRIX OPERATORS ---
 // Multiplies a SIMD Vector against a SIMD Matrix (i.e., use the broadcast and multiply-add)
@@ -947,10 +949,10 @@ static FORCE_INLINE Matrix4x4_SIMD TRS(const Vector3D& translation, const Quater
     Matrix4x4_SIMD mat;
 
     // 1. Convert Quaternion to a 3x3 Rotation Matrix
-    float x2 = rotation.x + rotation.x, y2 = rotation.y + rotation.y, z2 = rotation.z + rotation.z;
-    float xx = rotation.x * x2, xy = rotation.x * y2, xz = rotation.x * z2;
-    float yy = rotation.y * y2, yz = rotation.y * z2, zz = rotation.z * z2;
-    float wx = rotation.w * x2, wy = rotation.w * y2, wz = rotation.w * z2;
+    float x2 = rotation.x() + rotation.x(), y2 = rotation.y() + rotation.y(), z2 = rotation.z() + rotation.z();
+    float xx = rotation.x() * x2, xy = rotation.x() * y2, xz = rotation.x() * z2;
+    float yy = rotation.y() * y2, yz = rotation.y() * z2, zz = rotation.z() * z2;
+    float wx = rotation.w() * x2, wy = rotation.w() * y2, wz = rotation.w() * z2;
 
     // 2. Apply Scale directly to the rotation columns
     __m128 scaleReg = scale.reg;
