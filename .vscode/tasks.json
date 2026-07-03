@@ -21,6 +21,7 @@
                 "/Zi", // Generate debug info
                 "/EHsc",
                 "/nologo",
+                "/arch:AVX2",
                 "/Fe${fileDirname}\\${fileBasenameNoExtension}.exe",
                 "/std:c++latest",
                 "${file}"
