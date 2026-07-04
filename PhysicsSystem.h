@@ -18,15 +18,6 @@
 #include "MortonCode.h"
 
 
-// Cross-platform restrict macro for pointer aliasing guarantees
-#if defined(_MSC_VER)
-    #define ENGINE_RESTRICT __restrict
-#elif defined(__clang__) || defined(__GNUC__)
-    #define ENGINE_RESTRICT __restrict__
-#else
-    #define ENGINE_RESTRICT
-#endif
-
 class ParticlePhysicsSOA {
 public:
     // C++20 Spans are lightweight, zero cost abstractions that act exactly like arrays, but does not try to free() its memory when it goes out of scope.
