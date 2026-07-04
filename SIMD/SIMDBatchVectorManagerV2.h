@@ -185,12 +185,13 @@ namespace Engine::ISAArch {
 
         FORCE_INLINE void processBatch(float stepX, float stepY, float stepZ) {
             constexpr size_t stride = WideFloat::size();
-            
-            // AVX-256: Broadcast the scalars into all  8 slots of the 256-bit registers
-            // AVX-512: Broadcast the scalars into all 16 slots of the 512-bit registers
-            WideFloat sX(stepX);           // AVX-256: __m256 sX       = _mm256_set1_ps(stepX);    AVX-512: __m512 sX =       _mm512_set1_ps(stepX);
-            WideFloat sY(stepY);           // AVX-256: __m256 sY       = _mm256_set1_ps(stepY);    AVX-512: __m512 sY =       _mm512_set1_ps(stepY);
-            WideFloat sZ(stepZ);           // AVX-256: __m256 sZ       = _mm256_set1_ps(stepZ);    AVX-512: __m512 sZ =       _mm512_set1_ps(stepZ);
+        
+            // Broadcast the scalars into all [8 slots of the 256-bit registers (AVX-256)] (or) all [16 slots of the 512-bit registers (AVX-512)].
+            // AVX-256: [32-bits (float) x  8 slots (vectors) = 256-bits] 
+            // AVX-512: [32-bits (float) x 16 slots (vectors) = 512-bits]
+            WideFloat sX(stepX);           // AVX-256: __m256 sX       = _mm256_set1_ps(stepX);    AVX-512: __m512 sX       = _mm512_set1_ps(stepX);
+            WideFloat sY(stepY);           // AVX-256: __m256 sY       = _mm256_set1_ps(stepY);    AVX-512: __m512 sY       = _mm512_set1_ps(stepY);
+            WideFloat sZ(stepZ);           // AVX-256: __m256 sZ       = _mm256_set1_ps(stepZ);    AVX-512: __m512 sZ       = _mm512_set1_ps(stepZ);
             WideFloat smallVal(0.00001f);  // AVX-256: __m256 smallVal = _mm256_set1_ps(0.00001f); AVX-512: __m512 smallVal = _mm512_set1_ps(0.00001f);
 
             float* ptrX = xs.data();
