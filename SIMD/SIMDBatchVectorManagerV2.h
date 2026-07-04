@@ -211,20 +211,33 @@ namespace Engine::ISAArch {
                 for (uint32_t chunkIdx = start; chunkIdx < end; ++chunkIdx) {
                     size_t i = chunkIdx * stride;
 
+                    // 1. Load (32 bytes per load) (AVX-256: 8 vectors at once, AVX-512: 16 vectors at once).
+                    // We use _loadu_ps (Unaligned) instead of _load_ps (Aligned)
                     SOA_Batch batch = { 
-                        WideFloat(ptrX + i), 
-                        WideFloat(ptrY + i), 
-                        WideFloat(ptrZ + i) 
+                        WideFloat(ptrX + i),  // AVX-256: _mm256_loadu_ps(&xs[i]);  AVX-512: _mm512_loadu_ps(&xs[i]);
+                        WideFloat(ptrY + i),  // AVX-256: _mm256_loadu_ps(&ys[i]);  AVX-512: _mm512_loadu_ps(&ys[i]);
+                        WideFloat(ptrZ + i)   // AVX-256: _mm256_loadu_ps(&zs[i]);  AVX-512: _mm512_loadu_ps(&zs[i]);
                     };
 
-                    batch.add(sX, sY, sZ);
+                    // 2. Addition (AVX-256: 8 at once, AVX-512: 16 at once)
+                    batch.add(sX, sY, sZ);    // AVX-256: x = _mm256_add_ps(x, bx);  AVX-512: x = _mm512_add_ps(x, bx);
+                                              // AVX-256: y = _mm256_add_ps(y, by);  AVX-512: y = _mm512_add_ps(y, by);
+                                              // AVX-256: z = _mm256_add_ps(z, bz);  AVX-512: z = _mm512_add_ps(z, bz);
+
+                    // 3. Dot Product
                     WideFloat d = batch.dot_fma(sX, sY, sZ);
-                    batch.x += d * smallVal;
+
+                    // 4. Update X, Single element update (x += d * small)
+                    batch.x += d * smallVal;  // AVX-256: batch.x = _mm256_add_ps(batch.x, _mm256_mul_ps(d, smallVal));
+                                              // AVX-512: batch.x = _mm512_add_ps(batch.x, _mm512_mul_ps(d, smallVal));
+
+                    // 5. Cross Product (AVX-256: 8 simultaneous cross products, AVX-512: 16 simultaneous cross products)
                     batch.cross(sX, sY, sZ);
 
-                    batch.x.copy_to(ptrX + i);
-                    batch.y.copy_to(ptrY + i);
-                    batch.z.copy_to(ptrZ + i);
+                    // 6. Store (AVX-256: 8, AVX-512: 16) results back 
+                    batch.x.copy_to(ptrX + i);  // AVX-256: _mm256_storeu_ps(&xs[i], batch.x);  AVX-512: _mm512_storeu_ps(&xs[i], batch.x);
+                    batch.y.copy_to(ptrY + i);  // AVX-256: _mm256_storeu_ps(&ys[i], batch.y);  AVX-512: _mm512_storeu_ps(&ys[i], batch.y);
+                    batch.z.copy_to(ptrZ + i);  // AVX-256: _mm256_storeu_ps(&zs[i], batch.z);  AVX-512: _mm512_storeu_ps(&zs[i], batch.z);
                 }
 
                 // If MSVC's /O2 optimizer is being stubborn, you brute-force it by manually unrolling:
