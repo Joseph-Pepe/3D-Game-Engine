@@ -66,14 +66,39 @@
 // ===================================================
 // UNIFORM MEMORY ALIGNMENT MACROS (MSVC, Clang, GCC)
 // ===================================================
-// Cache line sizes are typically 64 bytes on modern CPUs.
-// Vulkan/DirectX require 16-byte alignment for vec4.
-// Prevents the compiler from padding our structs differently on a Nintendo Switch vs PC. 
+/* 
+    - Cache line sizes are typically 64 bytes on modern CPUs.
+    - Vulkan/DirectX require 16-byte alignment for vec4.
+    - Prevents the compiler from padding our structs differently on a Nintendo Switch vs PC. 
+*/
 #define CACHE_CHUNK_ALIGN_16 alignas(16)
 #define CACHE_CHUNK_ALIGN_32 alignas(32)
 #define CACHE_CHUNK_ALIGN_64 alignas(64)
 
-// inline is a suggestion to the compiler, __forceinline will force the compiler to flatten the math directly into the execution path.
+// ==================================================
+// LOOP UNROLLING (COMPILER OPTIMIZATION)
+// ==================================================
+/*
+    - MSVC lacks an unroll pragma. 
+    - We use 'ivdep' to guarantee no memory aliasing, which gives the MSVC optimizer the green light to aggressively unroll it for us.
+*/
+#if defined(_MSC_VER) && !defined(__clang__)
+    #define ENGINE_UNROLL_4 __pragma(loop(ivdep))
+#elif defined(__clang__)
+    #define ENGINE_UNROLL_4 _Pragma("unroll 4")
+#elif defined(__GNUC__)
+    #define ENGINE_UNROLL_4 _Pragma("GCC unroll 4")
+#else
+    #define ENGINE_UNROLL_4 // Fallback to nothing if unsupported
+#endif
+
+// ==================================================
+// FORCE INLINE (COMPILER OPTIMIZATION)
+// ==================================================
+/*
+    - inline is a suggestion to the compiler.
+    - __forceinline will force the compiler to flatten the math directly into the execution path.
+*/
 #if defined(_MSC_VER)
     #define FORCE_INLINE __forceinline
 #elif defined(__clang__) || defined(__GNUC__)
@@ -82,7 +107,13 @@
     #define FORCE_INLINE inline
 #endif
 
-// Makes a promise to the compiler that data arrays never overlap.
+// ==================================================
+// RESTRICT (COMPILER OPTIMIZATION)
+// ==================================================
+/*
+    - Makes a promise to the compiler that data arrays never overlap.
+    - Cross-platform restrict macro for pointer aliasing guarantees.
+*/
 #if defined(_MSC_VER)
     #define RESTRICT __restrict
 #elif defined(__clang__) || defined(__GNUC__)
