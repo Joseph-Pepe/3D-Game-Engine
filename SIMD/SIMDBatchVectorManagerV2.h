@@ -266,7 +266,7 @@ namespace Engine::ISAArch {
             //     size_t i = chunkIdx * stride;
 
             //     // LOAD: Vector_aligned portable loads! This emits the fastest possible assembly.
-            //     SIMDVectorP batch = { 
+            //     SIMDVector3D batch = { 
             //         NativeFloatSIMD(ptrX + i, simd::vector_aligned), 
             //         NativeFloatSIMD(ptrY + i, simd::vector_aligned), 
             //         NativeFloatSIMD(ptrZ + i, simd::vector_aligned) 
