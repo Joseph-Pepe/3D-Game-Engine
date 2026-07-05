@@ -24,6 +24,15 @@
 #include <new>         // C++17/26 hardware interference sizes
 #include <memory>      // C++20/26 std::assume_aligned
 
+/* [Trinity SIMD Performance]
+    - Alignment, Intrinsics, Release Mode Optimization
+    - Manual AOS SIMD is not always faster than the compiler. 
+    - Changing the data layout from AOS to SOA is more powerful than just applying instructions (SIMD) to bad layouts (AOS).
+    - Prefer SOA over AOS when dealing with more than 100 objects.
+    - Organize your data first, and speed will follow (i.e., data layout dictates performance).
+    - AAA Game Engines: Organize data flat (SOA, AoSoA), widen the math (AVX2), wake up the cores (Threads).
+*/
+
 // --- COMPILER MACROS ---
 #ifndef FORCE_INLINE
     #ifdef _MSC_VER
