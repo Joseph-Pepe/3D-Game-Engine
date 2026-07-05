@@ -1,12 +1,9 @@
 #pragma once
 
-#include "../Math.h"
-
 #include <vector>
 #include <execution>
 #include <ranges>
 #include <algorithm>
-#include <immintrin.h>
 
 // ======================================================================
 // COMPILER PROBING: Check if C++26 SIMD is available
