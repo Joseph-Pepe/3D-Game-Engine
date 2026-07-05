@@ -88,48 +88,13 @@ namespace Engine::ISAArch {
         // ARM NEON and SSE4.1 do not suffer from state-transition penalties, so they do nothing.
     }
 
-    // ======================================================================
-    // CUSTOM ALIGNED ALLOCATOR
-    // ======================================================================
-    template <typename T, std::size_t Alignment>
-    struct DynamicAlignedAllocator {
-        using value_type = T;
-
-        template <class U>
-        struct rebind {
-            using other = DynamicAlignedAllocator<U, Alignment>;
-        };
-
-        DynamicAlignedAllocator() noexcept = default;
-        template <typename U> DynamicAlignedAllocator(const DynamicAlignedAllocator<U, Alignment>&) noexcept {}
-
-        T* allocate(std::size_t n) {
-            if (n == 0) return nullptr;
-            void* ptr = nullptr;
-            #if defined(_MSC_VER)
-                ptr = _aligned_malloc(n * sizeof(T), Alignment);
-            #else
-                if (posix_memalign(&ptr, Alignment, n * sizeof(T)) != 0) ptr = nullptr;
-            #endif
-            if (!ptr) throw std::bad_alloc();
-            return static_cast<T*>(ptr);
-        }
-
-        void deallocate(T* p, std::size_t) noexcept {
-            #if defined(_MSC_VER)
-                _aligned_free(p);
-            #else
-                free(p);
-            #endif
-        }
-    };
-
+    // Dynamically requests standard C++17 aligned memory based on the native hardware SIMD width
     template<typename T>
-    using NativeAlignedVector = std::vector<T, DynamicAlignedAllocator<T, alignof(WideBatch<T>)>>;
+    using NativeAlignedVector = std::vector<T, AlignedAllocator<T, alignof(WideBatch<T>)>>;
 
+    // Dynamically requests standard C++17 aligned memory for 128-bit GPU geometry
     template<typename T>
-    using FixedAlignedVector = std::vector<T, DynamicAlignedAllocator<T, alignof(FixedBatch4<T>)>>;
-
+    using FixedAlignedVector = std::vector<T, AlignedAllocator<T, alignof(FixedBatch4<T>)>>;
 
     // ======================================================================
     // 1. THE AOSOA BLOCK (The Cache-Friendly Data Chunk)
@@ -170,7 +135,7 @@ namespace Engine::ISAArch {
     class VectorManagerAoSoA_Portable {
     public:
         // Automatically enforces the hardware-specific memory boundary!
-        std::vector<PortableParticleBlock, DynamicAlignedAllocator<PortableParticleBlock, NATIVE_HARDWARE_ALIGNMENT>> blocks;
+        std::vector<PortableParticleBlock, AlignedAllocator<PortableParticleBlock, NATIVE_HARDWARE_ALIGNMENT>> blocks;
 
         VectorManagerAoSoA_Portable(size_t particleCount) {
             // Divide total particles by the hardware's native batch size, rounding up.
@@ -485,7 +450,7 @@ namespace Engine::ISAArch {
     class VectorManagerAoSoA_Macro {
     public:
         // Guaranteed allocation on the exact boundaries required by the silicon
-        std::vector<OptimalParticleMacroChunk, DynamicAlignedAllocator<OptimalParticleMacroChunk, L1_CACHE_CHUNK_SIZE>> chunks;
+        std::vector<OptimalParticleMacroChunk, AlignedAllocator<OptimalParticleMacroChunk, L1_CACHE_CHUNK_SIZE>> chunks;
 
         VectorManagerAoSoA_Macro(size_t particleCount) {
             // Calculate exactly how many 3072-byte chunks we need
