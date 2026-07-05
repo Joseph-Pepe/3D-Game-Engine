@@ -20,7 +20,7 @@
 #endif
 
 #if defined(__AVX512F__)
-    #include <immintrin.h>
+    #include <immintrin.h> // Header for SIMD intrinsics
 
     // AVX512: Next-Gen (AVX512 silicon intrinsically includes AVX2 and SSE4.1)
     #define ENGINE_ARCH_AVX512 1
@@ -133,6 +133,16 @@ void LogHardwareArchitecture() {
         std::println("[SSE4.1]: Legacy based architecture detected.");
     #endif
 }
+
+// ===================================
+// SIMD Intrinsics & Memory Alignment
+// ===================================
+/*
+    - SIMD: Single Instruction (SI), Multiple Data (MD)
+    - SIMD and aligned memory is a great way to squeeze performance out of modern CPUs.
+    - Allows us to perform operations on all components (x, y, z) simultaneoulsy in a single CPU cycle.
+    - Compiler intrinsics are special functions that map directly to specific assembly instructions on your CPU.
+*/
 
 namespace Engine::ISAArch {
     // ==========================================
