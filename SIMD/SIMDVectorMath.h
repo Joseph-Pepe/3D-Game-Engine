@@ -997,8 +997,7 @@ namespace Engine::Physics {
 
                 // --- THE MASK GENERATOR ---
                 // 1. Are they touching? (distSq < diameterSq)
-                // 2. Prevent division by zero (distSq > epsilon)
-                auto spatialMask = (distSq < diameterSq) && (distSq > epsilon);
+                auto spatialMask = (distSq < diameterSq);
 
                 // 1. Calculate the scalar offset and strictly cast it to uint32_t
                 uint32_t batchOffset = static_cast<uint32_t>(batchJ * NATIVE_BATCH_SIZE);
@@ -1011,11 +1010,20 @@ namespace Engine::Physics {
                 auto validCollisionMask = spatialMask && (absoluteJ > static_cast<uint32_t>(i));
                 // auto validCollisionMask = spatialMask && (absoluteJ > i).cast_to<float>();
 
+                // --- 2. BREAKING PERFECT OVERLAP SYMMETRY ---
+                // Detect particles that are occupying the exact same space.
+                auto perfectOverlapMask = validCollisionMask && (distSq < epsilon);
+
+                // Artificially nudge overlapping particles along the X-axis by 0.1mm (1e-4f). 
+                // This gives the physics solver a non-zero vector to calculate a push direction.
+                Engine::ISAArch::where(perfectOverlapMask, dx) = 1e-4f;
+                Engine::ISAArch::where(perfectOverlapMask, distSq) = 1e-8f; // (1e-4f)^2
+
                 // --- SIMD PENETRATION RESOLUTION ---
-                // If validCollisionMask is false, we set distSq to diameterSq so the penetration depth becomes exactly 0.0f (preventing NaN math).
+                // Safely overwrite non-colliding lanes to diameterSq (penetration becomes 0.0f)
                 Engine::ISAArch::where(!validCollisionMask, distSq) = diameterSq;
 
-                // Math: penetration = diameter - sqrt(distSq)
+                // Math: penetration = diameter - sqrt(distSq), actualDist can never be zero
                 NativeFloatSIMDBatch actualDist = sqrt(distSq);
                 NativeFloatSIMDBatch penetration = diameter - actualDist;
 
