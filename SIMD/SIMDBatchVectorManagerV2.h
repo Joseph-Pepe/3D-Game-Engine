@@ -6,6 +6,8 @@
 #include <execution>
 #include <algorithm>
 #include <cstdlib>
+#include <new>     // C++17/26 hardware interference sizes
+#include <memory>  // C++20/26 std::assume_aligned
 
 // ======================================================================
 // C++26: NATIVE SIMD ARCHITECTURE for MSVC build v14.51 and newer.
@@ -20,6 +22,16 @@
 */
 
 namespace Engine::ISAArch {
+
+    // ======================================================================
+    // C++26: HARDWARE-AWARE CACHE ALIGNMENT
+    // ======================================================================
+    // Dynamically queries the silicon compiling the code (Intel, AMD, ARM) for its exact L1 cache chunk size (almost universally 64 bytes).
+    #ifdef __cpp_lib_hardware_interference_size
+        constexpr size_t L1_CACHE_CHUNK_SIZE = std::hardware_constructive_interference_size;
+    #else
+        constexpr size_t L1_CACHE_CHUNK_SIZE = 64; // Fallback for older compilers
+    #endif
 
     FORCE_INLINE void clear_registers() {
         #if defined(ENGINE_ARCH_AVX2) || defined(ENGINE_ARCH_AVX512)
@@ -283,4 +295,144 @@ namespace Engine::ISAArch {
         }
     };
 
+    // ======================================================================
+    // THE MACRO-CHUNK (The Perfect AoSoA Memory Layout)
+    // ======================================================================
+    /*
+        - We group 256 particles into a single block. 
+        - 256 floats = 1024 bytes per axis. Total size = 3072 bytes.
+        - 3072 is a perfect multiple of 64 (L1 Cache Line). No 'w' padding required.
+        - 3072 bytes fits entirely inside a standard 4KB OS Memory Page. Zero TLB Thrashing!
+        - Writing sequentially to x[0], x[1]... perfectly saturates the CPU Write-Combine buffer.
+    */
+    // constexpr size_t MACRO_CHUNK_PARTICLES = 256;
+    // constexpr size_t REGISTERS_PER_CHUNK = MACRO_CHUNK_PARTICLES / WideFloat::size();
+
+    // struct alignas(L1_CACHE_CHUNK_SIZE) PortableParticleMacroChunk {
+    //     WideFloat x[REGISTERS_PER_CHUNK];
+    //     WideFloat y[REGISTERS_PER_CHUNK];
+    //     WideFloat z[REGISTERS_PER_CHUNK];
+
+    //     // The math is localized to operate on specific register lanes within the chunk
+    //     FORCE_INLINE void process_lane(size_t j, const WideFloat& sX, const WideFloat& sY, const WideFloat& sZ, const WideFloat& smallVal) {
+    //         // 1. Addition
+    //         x[j] += sX;
+    //         y[j] += sY;
+    //         z[j] += sZ;
+
+    //         // 2. FMA Dot Product
+    //         WideFloat res = x[j] * sX;
+    //         res = fma(y[j], sY, res);
+    //         res = fma(z[j], sZ, res);
+
+    //         // 3. Scale
+    //         x[j] += res * smallVal;
+
+    //         // 4. Cross Product (Reading locally avoids register spilling)
+    //         WideFloat rx = fma(y[j], sZ, -(z[j] * sY));
+    //         WideFloat ry = fma(z[j], sX, -(x[j] * sZ));
+    //         WideFloat rz = fma(x[j], sY, -(y[j] * sX));
+            
+    //         x[j] = rx; 
+    //         y[j] = ry; 
+    //         z[j] = rz;
+    //     }
+    // };
+
+    // ======================================================================
+    // THE MACRO-CHUNK (The Perfect AoSoA Memory Layout)
+    // ======================================================================    
+    // The "Sweet Spot" Macro Chunk (Perfect Cache Line Multiples, No Padding)
+    // AVX2 = 32 particles. AVX-512 = 64 particles.
+    constexpr size_t REGISTERS_PER_CHUNK = 4; 
+
+    // Particles per chunk now scales natively! 
+    // AVX2 = 4 * 8 = 32. NEON = 4 * 4 = 16. AVX-512 = 4 * 16 = 64.
+    constexpr size_t MACRO_CHUNK_PARTICLES = REGISTERS_PER_CHUNK * WideFloat::size();
+    
+    struct alignas(L1_CACHE_CHUNK_SIZE) OptimalParticleMacroChunk {
+        WideFloat x[REGISTERS_PER_CHUNK];
+        WideFloat y[REGISTERS_PER_CHUNK];
+        WideFloat z[REGISTERS_PER_CHUNK];
+
+        FORCE_INLINE void process_chunk(const WideFloat& sX, const WideFloat& sY, const WideFloat& sZ, const WideFloat& smallVal) {
+            
+            // 1. ADDITION (Planar Execution)
+            // The CPU executes these linearly, maxing out the ALU without spilling registers.
+            x[0] += sX; x[1] += sX; x[2] += sX; x[3] += sX;
+            y[0] += sY; y[1] += sY; y[2] += sY; y[3] += sY;
+            z[0] += sZ; z[1] += sZ; z[2] += sZ; z[3] += sZ;
+
+            // 2. DOT PRODUCT & SCALE
+            // Let the compiler decide unrolling for the complex math
+            for(int i=0; i < REGISTERS_PER_CHUNK; i++){
+                WideFloat res = fma(z[i], sZ, fma(y[i], sY, x[i] * sX));
+                x[i] += res * smallVal;
+            }
+
+            // 3. CROSS PRODUCT
+            for(int i=0; i < REGISTERS_PER_CHUNK; i++){
+                 WideFloat rx = fma(y[i], sZ, -(z[i] * sY));
+                 WideFloat ry = fma(z[i], sX, -(x[i] * sZ));
+                 WideFloat rz = fma(x[i], sY, -(y[i] * sX));
+                 x[i] = rx; y[i] = ry; z[i] = rz;
+            }
+        }
+    };
+
+    class VectorManagerAoSoA_Macro {
+    public:
+        // Guaranteed allocation on the exact boundaries required by the silicon
+        std::vector<OptimalParticleMacroChunk, DynamicAlignedAllocator<OptimalParticleMacroChunk, L1_CACHE_CHUNK_SIZE>> chunks;
+
+        VectorManagerAoSoA_Macro(size_t particleCount) {
+            // Calculate exactly how many 3072-byte chunks we need
+            size_t chunkCount = (particleCount + MACRO_CHUNK_PARTICLES - 1) / MACRO_CHUNK_PARTICLES;
+            chunks.resize(chunkCount);
+
+            // Broadcast initialize the chunks
+            for (auto& chunk : chunks) {
+                for (size_t j = 0; j < REGISTERS_PER_CHUNK; ++j) {
+                    chunk.x[j] = WideFloat(1.0f);
+                    chunk.y[j] = WideFloat(2.0f);
+                    chunk.z[j] = WideFloat(3.0f);
+                }
+            }
+        }
+
+        FORCE_INLINE void processBatch(float stepX, float stepY, float stepZ) {
+            uint32_t chunkCount = static_cast<uint32_t>(chunks.size());
+            uint32_t threadCount = g_JobSystem.nextWorkerId.load(std::memory_order_relaxed);
+            
+            // Because each chunk is doing more work (e.g. 32 particles on AVX2), 
+            // we scale down the target chunks per thread to maintain work-stealing balance.
+            uint32_t targetChunksPerThread = 4; 
+            uint32_t JOB_CHUNK_SIZE = std::max(256u, chunkCount / (threadCount * targetChunksPerThread));
+
+            // Extract the raw pointer and apply C++20/26 std::assume_aligned.
+            // This legally guarantees to the compiler that it is safe to use aligned stores
+            // (e.g., vmovaps) instead of unaligned stores (vmovups), unlocking the final 1% of pipelining.
+            auto* RESTRICT alignedChunks = std::assume_aligned<L1_CACHE_CHUNK_SIZE>(chunks.data());
+
+            // Capture the raw scalar floats (stepX, stepY, stepZ). 
+            // These are 4 bytes each, meaning the lambda struct is tiny and alignment-safe.
+            g_JobSystem.DispatchAndWait(chunkCount, JOB_CHUNK_SIZE, [=](uint32_t start, uint32_t end) {
+
+                // Broadcast into SIMD registers natively on the worker thread!
+                WideFloat sX(stepX);
+                WideFloat sY(stepY);
+                WideFloat sZ(stepZ);
+                WideFloat smallVal(0.00001f);
+
+                for (uint32_t i = start; i < end; ++i) {
+                    
+                    // We map a reference directly over the heap memory. 
+                    // No copying the struct to the stack! The CPU executes directly against the L1 cache.
+                    OptimalParticleMacroChunk& chunk = alignedChunks[i];
+                    chunk.process_chunk(sX, sY, sZ, smallVal);
+                }
+                clear_registers();
+            });
+        }
+    };
 }
