@@ -20,7 +20,7 @@
 #endif
 
 #if defined(__AVX512F__)
-    #include <immintrin.h> // Header for SIMD intrinsics
+    #include <immintrin.h> // SIMD intrinsics (AVX, SSE (128-bit), MMX (64-bit))
 
     // AVX512: Next-Gen (AVX512 silicon intrinsically includes AVX2 and SSE4.1)
     #define ENGINE_ARCH_AVX512 1
