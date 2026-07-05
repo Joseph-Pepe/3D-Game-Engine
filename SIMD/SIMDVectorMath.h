@@ -494,13 +494,28 @@ namespace Engine::Physics {
     // ==================================================================================
     // BULK DATA PROCESSING (SOA) - SCALES TO ANY CPU AUTOMATICALLY
     // ==================================================================================
+    /*
+        - Instead of manual __m256 or __m512 loads, you use a template that automatically picks the widest register the hardware supports.
+        - Under the hood, this is __m128, __m256, __m512, or float32x4_t. Your code no longer cares.
+
+          AVX-256 (__m256):
+
+            [v1.x, v2.x, v3.x, v4.x, v5.x, v6.x, v7.x, v8.x]
+            [v1.y, v2.y, v3.y, v4.y, v5.y, v6.y, v7.y, v8.y]
+            [v1.z, v2.z, v3.z, v4.z, v5.z, v6.z, v7.z, v8.z]
+
+          AVX-512 (__m512): 
+          
+            [v1.x, v2.x, v3.x, v4.x, v5.x, v6.x, v7.x, v8.x, v9.x, v10.x, v11.x, v12.x, v13.x, v14.x, v15.x, v16.x]
+            [v1.y, v2.y, v3.y, v4.y, v5.y, v6.y, v7.y, v8.y, v9.y, v10.y, v11.y, v12.y, v13.y, v14.y, v15.y, v16.y]
+            [v1.z, v2.z, v3.z, v4.z, v5.z, v6.z, v7.z, v8.z, v9.z, v10.z, v11.z, v12.z, v13.z, v14.z, v15.z, v16.z]
+    */
+
     // Dynamic Alignment Wrapper: [AVX-512: 64-byte alignment], [AVX-256: 32-byte alignment], [ARM NEON: 16-byte alignment]
     struct alignas(NATIVE_SIMD_BATCH_ALIGN) SIMDVector3D {
-        // Instead of manual __m256 or __m512 loads, you use a template that automatically picks the widest register the hardware supports.
-        // Under the hood, this is __m128, __m256, __m512, or float32x4_t. Your code no longer cares.
-        NativeFloatSIMDBatch x; // AVX-256: [v1.x, v2.x, v3.x, v4.x, v5.x, v6.x, v7.x, v8.x], AVX-512: [v1.x, v2.x, v3.x, v4.x, v5.x, v6.x, v7.x, v8.x, v9.x, v10.x, v11.x, v12.x, v13.x, v14.x, v15.x, v16.x]
-        NativeFloatSIMDBatch y; // AVX-256: [v1.y, v2.y, v3.y, v4.y, v5.y, v6.y, v7.y, v8.y], AVX-512: [v1.y, v2.y, v3.y, v4.y, v5.y, v6.y, v7.y, v8.y, v9.y, v10.y, v11.y, v12.y, v13.y, v14.y, v15.y, v16.y]
-        NativeFloatSIMDBatch z; // AVX-256: [v1.z, v2.z, v3.z, v4.z, v5.z, v6.z, v7.z, v8.z], AVX-512: [v1.z, v2.z, v3.z, v4.z, v5.z, v6.z, v7.z, v8.z, v9.z, v10.z, v11.z, v12.z, v13.z, v14.z, v15.z, v16.z]
+        NativeFloatSIMDBatch x; // [v1.x, v2.x, v3.x, v4.x, ...]
+        NativeFloatSIMDBatch y; // [v1.y, v2.y, v3.y, v4.y, ...]
+        NativeFloatSIMDBatch z; // [v1.z, v2.z, v3.z, v4.z, ...]
 
         // Standard Addition
         FORCE_INLINE void add(const NativeFloatSIMDBatch& bx, const NativeFloatSIMDBatch& by, const NativeFloatSIMDBatch& bz) {
