@@ -21,7 +21,6 @@
     - Engine::ISAArch::simd generated assembly is identical to manual intrinsics (1:1 match). You lose zero performance.
 */
 namespace Engine::ISAArch {
-
     // ======================================================================
     // HARDWARE PROBING
     // ======================================================================
