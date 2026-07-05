@@ -1,5 +1,7 @@
 #pragma once
 
+#include "SIMD/SIMDVectorMath.h"
+
 #include <vector>
 #include <new>
 #include <limits>
@@ -44,11 +46,11 @@
     inline constexpr std::size_t ENGINE_CACHE_CHUNK_SIZE = 64; // Standard L1 cache line size
 #endif
 
-// ==================================================================================
-// C++26 SIMD DETECTION, NATIVE SIMD ALIGNMENT
-// ==================================================================================
+// =================================================================================================
+// COMPILER PROBING (C++26 SIMD DETECTION, NATIVE SIMD ALIGNMENT): Check if C++26 SIMD is available.
+// =================================================================================================
 
-// Check if the header exists AND if the compiler is running in C++26 (or newer) mode
+// Check if the header exists AND if the compiler is running in C++26 (or newer) mode.
 #if __has_include(<simd>) && (defined(__cplusplus) && __cplusplus > 202302L || defined(_MSVC_LANG) && _MSVC_LANG > 202302L)
     // C++26 features are unlocked (Optional) Include <simd> if you want the portable vector typedefs
     #include <simd>
@@ -313,7 +315,17 @@ public:
 
     // 2. Define a ArenaArray that automatically aligns to the current machine's architecture
     template <typename T>
-    using NativeAlignedArray = ArenaArray<T, NATIVE_SIMD_ALIGN>; // Assuming custom array
+    using NativeAlignedArray = ArenaArray<T, NATIVE_SIMD_ALIGN>;
+#else
+    // C++26 standardizes ABI tags for hardware detection
+    using NativeFloatSIMD = Engine::ISAArch::simd<float, Engine::ISAArch::simd_abi::native<float>>; // (or) its implicit equivalent "Engine::ISAArch::WideFloat", both mean [NativeFloatSIMD =  WideFloat]
+
+    // 1. Detect the hardware's preferred alignment at compile time! Because our custom SIMD class wraps native __m256/__m512 types, the compiler natively understands the required byte alignment.
+    constexpr std::size_t NATIVE_SIMD_ALIGN = alignof(NativeFloatSIMD);
+
+    // 2. Define an ArenaArray that automatically aligns to the current machine's architecture
+    template <typename T>
+    using NativeAlignedArray = ArenaArray<T, NATIVE_SIMD_ALIGN>;
 #endif
 
 // ==================================================================================
