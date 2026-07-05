@@ -8,7 +8,6 @@
 #include <algorithm>
 #include <cstring>
 
-
 // --- ENGINE ASSERTION MACRO ---
 // In a real engine, this routes to your custom crash handler.
 // By default, it traps the debugger instantly on console hardware.
@@ -30,8 +29,18 @@
     #define ENGINE_ASSUME(condition) __assume(condition)
 #elif defined(__clang__)
     #define ENGINE_ASSUME(condition) __builtin_assume(condition)
+#elif defined(__GNUC__)
+    #define ENGINE_ASSUME(condition) do { if (!(condition)) __builtin_unreachable(); } while(false)
 #else
     #define ENGINE_ASSUME(condition) do {} while(false)
+#endif
+
+// Detect Trivial Relocatability (Clang/GCC extension, fallback to trivial_copyable for MSVC)
+#if defined(__clang__) || defined(__GNUC__)
+    #define ENGINE_IS_RELOCATABLE(T) __is_trivially_relocatable(T)
+#else
+    // Fallback for MSVC until P1144 is fully merged into the compiler frontend
+    #define ENGINE_IS_RELOCATABLE(T) std::is_trivially_copyable_v<T>
 #endif
 
 namespace Engine::STLContainer {
@@ -41,7 +50,7 @@ namespace Engine::STLContainer {
         static_assert(Capacity > 0, "inplace_vector capacity must be strictly greater than 0.");
 
     public:
-        // --- Standard Library Typedefs (For algorithm/iterator compatibility) ---
+        // --- Standard Library Interface (For algorithm/iterator compatibility) ---
         using value_type      = T;
         using size_type       = std::size_t;
         using difference_type = std::ptrdiff_t;
@@ -54,13 +63,14 @@ namespace Engine::STLContainer {
 
     private:
         // =====================================================================
-        // C++26 CONSTEXPR STORAGE UNION
+        // CONSTEXPR STORAGE UNION (C++20/26 Compliant)
         // =====================================================================
         // Prior to C++20, developers used alignas(T) std::byte array[...].
-        // However, reinterpret_cast is forbidden in constexpr contexts. By using a union, we can maintain completely uninitialized memory 
-        // that is fully C++26 constexpr compliant!
+        // By using a union, we can maintain completely uninitialized memory that is fully C++26 constexpr compliant!
+        // Union allows uninitialized memory to be valid in constexpr contexts.
+        // We manage the exact lifetime of 'm_data' elements manually.
         union Storage {
-            char m_buffer; // Active member initially (empty state)
+            struct EmptyState {} m_empty; // Active member initially (empty state)
             T m_data[Capacity];
 
             constexpr Storage() : m_buffer{} {}
@@ -69,6 +79,8 @@ namespace Engine::STLContainer {
 
         Storage m_storage;
         size_type m_size = 0;
+
+        // reinterpret_cast is forbidden in constexpr contexts. 
 
         // C++17 compliant aligned uninitialized storage.
         // alignas(T) std::byte m_buffer[Capacity * sizeof(T)];
@@ -98,39 +110,38 @@ namespace Engine::STLContainer {
             if constexpr (std::is_trivially_copyable_v<T>) {
                 if consteval {
                     // For compile-time, we must loop and construct
-                    for (std::size_t i = 0; i < other.m_size; ++i) {
+                    for (size_type i = 0; i < other.m_size; ++i) {
                         std::construct_at(&m_storage.m_data[i], other.m_storage.m_data[i]);
                     }
                 } else {
                     // For runtime, raw memory copy is the absolute fastest path
                     std::memcpy(m_storage.m_data, other.m_storage.m_data, other.m_size * sizeof(T));
                 }
-                m_size = other.m_size; // Safe to batch-assign size for trivial types
             } else {
-                for (std::size_t i = 0; i < other.m_size; ++i) {
+                for (size_type i = 0; i < other.m_size; ++i) {
                     std::construct_at(&m_storage.m_data[i], other.m_storage.m_data[i]);
-                    ++m_size; // Increment safely one-by-one
                 }
             }
+            m_size = other.m_size; // Safe to batch-assign size for trivial types
         }
 
         constexpr inplace_vector(inplace_vector&& other) noexcept(std::is_nothrow_move_constructible_v<T>) {
-            if constexpr (std::is_trivially_copyable_v<T>) {
+            if constexpr (ENGINE_IS_RELOCATABLE(T)) {
                 if consteval {
-                    for (std::size_t i = 0; i < other.m_size; ++i) {
+                    for (size_type i = 0; i < other.m_size; ++i) {
                         std::construct_at(&m_storage.m_data[i], std::move(other.m_storage.m_data[i]));
                     }
                 } else {
+                    // Memcpy is mathematically safe for trivially relocatable types, bypassing move constructors entirely.
                     std::memcpy(m_storage.m_data, other.m_storage.m_data, other.m_size * sizeof(T));
                 }
-                m_size = other.m_size;
             } else {
-                for (std::size_t i = 0; i < other.m_size; ++i) {
+                for (size_type i = 0; i < other.m_size; ++i) {
                     std::construct_at(&m_storage.m_data[i], std::move(other.m_storage.m_data[i]));
-                    ++m_size; 
                 }
             }
-            other.m_size = 0; // Clear the moved-from container safely
+            m_size = other.m_size;
+            other.clear(); // Ensure moved-from container obeys lifetime rules
         }
 
         // --- DESTRUCTOR ---
@@ -146,20 +157,16 @@ namespace Engine::STLContainer {
             if (this != &other) {
                 clear(); // Sets m_size to 0
                 if constexpr (std::is_trivially_copyable_v<T>) {
-                    if consteval {
-                        for (size_type i = 0; i < other.m_size; ++i) {
-                            std::construct_at(&m_storage.m_data[i], other.m_storage.m_data[i]);
-                        }
-                    } else {
+                    if !consteval {
                         std::memcpy(m_storage.m_data, other.m_storage.m_data, other.m_size * sizeof(T));
-                    }
-                    m_size = other.m_size;
-                } else {
-                    for (size_type i = 0; i < other.m_size; ++i) {
-                        std::construct_at(&m_storage.m_data[i], other.m_storage.m_data[i]);
-                        ++m_size;
-                    }
+                        m_size = other.m_size;
+                        return *this;
+                    } 
+                } 
+                for (size_type i = 0; i < other.m_size; ++i) {
+                    std::construct_at(&m_storage.m_data[i], other.m_storage.m_data[i]);
                 }
+                m_size = other.m_size;
             }
             return *this;
         }
@@ -167,31 +174,22 @@ namespace Engine::STLContainer {
         constexpr inplace_vector& operator=(inplace_vector&& other) noexcept(std::is_nothrow_move_constructible_v<T>) {
             if (this != &other) {
                 clear();
-                if constexpr (std::is_trivially_copyable_v<T>) {
-                    if consteval {
-                        for (size_type i = 0; i < other.m_size; ++i) {
-                            std::construct_at(&m_storage.m_data[i], std::move(other.m_storage.m_data[i]));
-                        }
-                    } else {
+                if constexpr (ENGINE_IS_RELOCATABLE(T)) {
+                    if !consteval {
                         std::memcpy(m_storage.m_data, other.m_storage.m_data, other.m_size * sizeof(T));
-                    }
-                    m_size = other.m_size;
-                } else {
-                    for (size_type i = 0; i < other.m_size; ++i) {
-                        std::construct_at(&m_storage.m_data[i], std::move(other.m_storage.m_data[i]));
-                        ++m_size;
+                        m_size = other.m_size;
+                        other.m_size = 0;
+                        return *this;
                     }
                 }
+                for (size_type i = 0; i < other.m_size; ++i) {
+                    std::construct_at(&m_storage.m_data[i], std::move(other.m_storage.m_data[i]));
+                }
+                m_size = other.m_size;
                 other.m_size = 0;
             }
             return *this;
         }
-
-        // --- ITERATORS (Enables C++ ranges and algorithms) ---
-        [[nodiscard]] constexpr iterator begin() noexcept { return m_storage.m_data; }
-        [[nodiscard]] constexpr const_iterator begin() const noexcept { return m_storage.m_data; }
-        [[nodiscard]] constexpr iterator end() noexcept { return m_storage.m_data + m_size; }
-        [[nodiscard]] constexpr const_iterator end() const noexcept { return m_storage.m_data + m_size; }
 
         // --- CAPACITY & SIZE ---
         [[nodiscard]] constexpr size_type size() const noexcept { return m_size; }
@@ -199,9 +197,40 @@ namespace Engine::STLContainer {
         [[nodiscard]] constexpr bool empty() const noexcept { return m_size == 0; }
         [[nodiscard]] constexpr bool full() const noexcept { return m_size == Capacity; }
 
+        // OPTIMIZATION: If the object is purely data (like a float or a Matrix), we skip the destruction loop entirely and just set size to 0. 
+        constexpr void clear() noexcept {
+            // This turns an O(N) operation into an O(1) operation.
+            if constexpr (!std::is_trivially_destructible_v<T>) {
+                // Destruction of containers entries must occur in reverse order of construction! Prevents bugs.
+                for (size_type i = m_size; i > 0; --i) {
+                    std::destroy_at(&m_storage.m_data[i - 1]);
+                }
+            }
+            m_size = 0;
+        }
+
         // --- DATA ACCESS ---
         [[nodiscard]] constexpr pointer data() noexcept { return m_storage.m_data; }
         [[nodiscard]] constexpr const_pointer data() const noexcept { return m_storage.m_data; }
+
+        // --- ITERATORS (Enables C++ ranges and algorithms) ---
+        [[nodiscard]] constexpr iterator begin() noexcept { return m_storage.m_data; }
+        [[nodiscard]] constexpr const_iterator begin() const noexcept { return m_storage.m_data; }
+        [[nodiscard]] constexpr iterator end() noexcept { return m_storage.m_data + m_size; }
+        [[nodiscard]] constexpr const_iterator end() const noexcept { return m_storage.m_data + m_size; }
+
+        // --- DATA INDEX ACCESS ---
+        [[nodiscard]] constexpr reference operator[](size_type index) noexcept {
+            ENGINE_ASSERT(index < m_size && "Index out of bounds!"); // For the debugger
+            ENGINE_ASSUME(index < m_size);                           // For the optimizer
+            return m_storage.m_data[index];
+        }
+
+        [[nodiscard]] constexpr const_reference operator[](size_type index) const noexcept {
+            ENGINE_ASSERT(index < m_size && "Index out of bounds!"); // For the debugger
+            ENGINE_ASSUME(index < m_size);                           // For the optimizer
+            return m_storage.m_data[index];
+        }
 
         [[nodiscard]] constexpr reference front() noexcept { 
             ENGINE_ASSUME(m_size > 0); 
@@ -221,59 +250,60 @@ namespace Engine::STLContainer {
             return operator[](m_size - 1); 
         }
 
-        // --- DATA INDEX ACCESS ---
-        [[nodiscard]] constexpr reference operator[](size_type index) noexcept {
-            ENGINE_ASSERT(index < m_size && "Index out of bounds!"); // For the debugger
-            ENGINE_ASSUME(index < m_size);                           // For the optimizer
-            return m_storage.m_data[index];
-        }
+        // =====================================================================
+        // INSERTION / MODIFIERS
+        // =====================================================================
 
-        [[nodiscard]] constexpr const_reference operator[](size_type index) const noexcept {
-            ENGINE_ASSERT(index < m_size && "Index out of bounds!"); // For the debugger
-            ENGINE_ASSUME(index < m_size);                           // For the optimizer
-            return m_storage.m_data[index];
-        }
-
-        // --- MODIFIERS ---
-        // Safe push_back (Traps in debug if full)
+        // Standard safe push
         constexpr void push_back(const T& value) {
             ENGINE_ASSERT(m_size < Capacity && "inplace_vector overflow, capacity exceeded!");
             // std::construct_at is a C++20 requirement for constexpr dynamic object creation
-            std::construct_at(m_storage.m_data + m_size, value);
-            ++m_size;
+            std::construct_at(&m_storage.m_data[m_size], value);
+            return m_storage.m_data[m_size++];
         }
 
         constexpr void push_back(T&& value) {
             ENGINE_ASSERT(m_size < Capacity && "inplace_vector overflow, capacity exceeded!");
-            std::construct_at(m_storage.m_data + m_size, std::move(value));
-            ++m_size;
+            std::construct_at(&m_storage.m_data[m_size], std::move(value));
+            return m_storage.m_data[m_size++];
         }
 
-        template <typename... Args>
-        constexpr reference emplace_back(Args&&... args) {
-            ENGINE_ASSERT(m_size < Capacity && "inplace_vector overflow, capacity exceeded!");
-            pointer ptr = m_storage.m_data + m_size;
-            std::construct_at(ptr, std::forward<Args>(args)...);
-            ++m_size;
-            return *ptr;
+        // C++26 standard: try_push_back (Safe boundary testing without assertions)
+        [[nodiscard]] constexpr pointer try_push_back(const T& value) noexcept {
+            if (m_size >= Capacity) [[unlikely]] return nullptr;
+            std::construct_at(&m_storage.m_data[m_size], value);
+            return &m_storage.m_data[m_size++];
+        }
+
+        [[nodiscard]] constexpr pointer try_push_back(T&& value) noexcept {
+            if (m_size >= Capacity) [[unlikely]] return nullptr;
+            std::construct_at(&m_storage.m_data[m_size], std::move(value));
+            return &m_storage.m_data[m_size++];
         }
 
         // =====================================================================
         // UNCHECKED ACCESS
         // =====================================================================
-        // When your physics loop guarantees it will only ever process N elements,
-        // bounds checking is wasted CPU cycles. These bypass the assert completely and force the compiler to drop all branching logic.
+        // When your physics loop guarantees it will only ever process N elements, bounds checking is wasted CPU cycles. These bypass the assert completely and force the compiler to drop all branching logic.
+        // High-performance bypass: Guarantees compiler auto-vectorization
         constexpr void unchecked_push_back(const T& value) {
             // The auto-vectorizer will completely strip bounds-checking branches from this loop!
             ENGINE_ASSUME(m_size < Capacity);
-            std::construct_at(m_storage.m_data + m_size, value);
-            ++m_size;
+            std::construct_at(&m_storage.m_data[m_size], value);
+            return m_storage.m_data[m_size++];
         }
 
         constexpr void unchecked_push_back(T&& value) {
             ENGINE_ASSUME(m_size < Capacity);
-            std::construct_at(m_storage.m_data + m_size, std::move(value));
-            ++m_size;
+            std::construct_at(&m_storage.m_data[m_size], std::move(value));
+            return m_storage.m_data[m_size++];
+        }
+
+        template <typename... Args>
+        constexpr reference emplace_back(Args&&... args) {
+            ENGINE_ASSERT(m_size < Capacity && "inplace_vector overflow, capacity exceeded!");
+            std::construct_at(&m_storage.m_data[m_size], std::forward<Args>(args)...);
+            return m_storage.m_data[m_size++];
         }
 
         constexpr void pop_back() noexcept {
@@ -281,23 +311,15 @@ namespace Engine::STLContainer {
             --m_size;
             // Only call the destructor if the type actually needs it!
             if constexpr (!std::is_trivially_destructible_v<T>) {
-                std::destroy_at(m_storage.m_data + m_size);
+                std::destroy_at(&m_storage.m_data[m_size]);
             }
         }
 
-        // OPTIMIZATION: If the object is purely data (like a float or a Matrix), we skip the destruction loop entirely and just set size to 0. 
-        constexpr void clear() noexcept {
-            // This turns an O(N) operation into an O(1) operation.
-            if constexpr (!std::is_trivially_destructible_v<T>) {
-                // All arrays and containers must destroy its entries in strict reverse order of construction! Prevents bugs.
-                for (size_type i = m_size; i > 0; --i) {
-                    std::destroy_at(&m_storage.m_data[i - 1]);
-                }
-            }
-            m_size = 0;
-        }
+        // =====================================================================
+        // ENGINE SPECIFIC OPERATIONS
+        // =====================================================================
 
-        // --- FAST ENGINE ERASURE (O(1)) ---
+        // --- FAST ENGINE ERASURE (O(1)) DATA-ORIENTED PIPELINES ---
         // Overwrites the target element with the last element in the array, then pops the back. Destroys the original ordering of the array.
         // Game Engine: We don't really care about maintaining the order of an array when killing a particle or destroying an entity.
         constexpr void erase_unsorted(const_iterator pos) {
