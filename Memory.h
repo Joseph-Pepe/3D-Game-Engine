@@ -290,19 +290,18 @@ public:
     - AVX-512 [__m512] demands exactly 64 bytes of data.
 */
 
-#if defined(__AVX512F__)
-    // --- 16-BYTE ALIGNED ALLOCATOR FOR SSE ALIGNMENT ---
-    template <typename T> 
-    using AlignedVector16 = std::vector<T, AlignedAllocator<T, 16>>; // SSE     (16-byte aligned vector)
+// --- 16-BYTE ALIGNED ALLOCATOR FOR SSE ALIGNMENT ---
+template <typename T> 
+using AlignedVector16 = std::vector<T, AlignedAllocator<T, 16>>; // SSE     (16-byte aligned vector)
 
-    // --- 32-BYTE ALIGNED ALLOCATOR FOR AVX2 ALIGNMENT ---
-    template <typename T>
-    using AlignedVector32 = std::vector<T, AlignedAllocator<T, 32>>; // AVX2    (32-byte aligned vector)
+// --- 32-BYTE ALIGNED ALLOCATOR FOR AVX2 ALIGNMENT ---
+template <typename T>
+using AlignedVector32 = std::vector<T, AlignedAllocator<T, 32>>; // AVX2    (32-byte aligned vector)
 
-    // --- 64-BYTE ALIGNED ALLOCATOR FOR AVX-512 ALIGNMENT ---
-    template <typename T>
-    using AlignedVector64 = std::vector<T, AlignedAllocator<T, 64>>; // AVX-512 (64-byte aligned vector)
-#endif
+// --- 64-BYTE ALIGNED ALLOCATOR FOR AVX-512 ALIGNMENT ---
+template <typename T>
+using AlignedVector64 = std::vector<T, AlignedAllocator<T, 64>>; // AVX-512 (64-byte aligned vector)
+    
 
 // ==================================================================================
 // C++26 DYNAMIC HARDWARE ALIGNMENT (Portable SIMD)
