@@ -24,7 +24,10 @@
 #include <new>         // C++17/26 hardware interference sizes
 #include <memory>      // C++20/26 std::assume_aligned
 
-/* [Trinity SIMD Performance]
+// ======================================================================
+// TRINITY SIMD PERFORMANCE 
+// ======================================================================
+/* 
     - Alignment, Intrinsics, Release Mode Optimization
     - Manual AOS SIMD is not always faster than the compiler. 
     - Changing the data layout from AOS to SOA is more powerful than just applying instructions (SIMD) to bad layouts (AOS).
