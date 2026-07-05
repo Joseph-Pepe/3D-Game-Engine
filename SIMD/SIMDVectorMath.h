@@ -37,19 +37,6 @@
     #include <inplace_vector> // C++26 API provides a vector that stores data locally without ever touching the heap allocator.
 #endif 
 
-// ======================================================================
-// C++26: NATIVE SIMD ARCHITECTURE for MSVC build v14.51 and newer.
-// ======================================================================
-/*
-    - This now scales to ARM (Apple Silicon M1/M2/M3), NEON, AMD (Playstation/Xbox) and Intel (AVX-512) automatically once compiled without a total rewrite of code (i.e., seamlessly maps those registers, cross-platform).
-    - No need to use bitwise mask hacks (_mm512_cmp_ps_mask, _mm512_maskz_mul_ps) anymore b/c the compiler automatically translates these logical operators into hardware masks.
-    - No more Intel-specific _mm256! 
-    - Never hardcode instruction sets into your datastructures. Write once and rely on the compiler to traslate it into the widest register the hardware supports.
-    - No longer need to manually hardcode intrinsics for __mm256, __mm512 versions, the C++ compiler will figure out what the native hardware is based on the build flag (e.g., -march=native, -mavx512f, -mcpu=apple-1).
-    - Decouples the engine from Intel by changing the compiler target flag in CMake.
-    - std::simd generated assembly is identical to manual intrinsics (1:1 match). You lose zero performance.
-*/
-
 // Check if the header exists AND if the compiler is running in C++26 (or newer) mode
 #if __has_include(<simd>) && (defined(__cplusplus) && __cplusplus > 202302L || defined(_MSVC_LANG) && _MSVC_LANG > 202302L)
     // C++26 features are unlocked (Optional) Include <simd> if you want the portable vector typedefs
