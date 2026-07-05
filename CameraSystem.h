@@ -10,19 +10,33 @@
 #include "Math.h"
 #include "BVHGrid.h"
 #include "GPURHI.h"
-#include "STLContainers/InplaceVector.h"
 
-// #if __has_include(<inplace_vector>)
-//     /*
-//         // Replaces (std::vector). Zero heap allocations. Data is perfectly contiguous on the stack.
-//         // Extremely cache friendly for your SIMD wrappers.
-//         std::inplace_vector<Vector3D, 64> localCluster;
-//     */
-//     #include <inplace_vector> // C++26 API provides a vector that stores data locally without ever touching the heap allocator.
-//     #define ENGINE_HAS_CXX26_INPLACE_VECTOR 1
-// #else
-//     #define ENGINE_HAS_CXX26_INPLACE_VECTOR 0
-// #endif
+// Check if the compiler has shipped the C++26 inplace_vector
+#if __has_include(<inplace_vector>)
+    #include <inplace_vector> // C++26 API provides a vector that stores data locally without ever touching the heap allocator.
+    /*
+        // Replaces (std::vector). Zero heap allocations. Data is perfectly contiguous on the stack.
+        // Extremely cache friendly for your SIMD wrappers.
+        std::inplace_vector<Vector3D, 64> localCluster;
+    */
+
+    // Alias the standard version into the engine namespace
+    namespace Engine {
+        template <typename T, std::size_t Capacity>
+        using inplace_vector = std::inplace_vector<T, Capacity>;
+    }
+    #define ENGINE_HAS_CXX26_INPLACE_VECTOR 1
+#else
+    // Fallback to your custom implementation until MSVC updates
+    #include "STLContainers/InplaceVector.h"
+
+    namespace Engine {
+        template <typename T, std::size_t Capacity>
+        using inplace_vector = Engine::STLContainer::inplace_vector<T, Capacity>;
+    }
+
+    #define ENGINE_HAS_CXX26_INPLACE_VECTOR 0
+#endif
 
 #if __has_include(<meta>) && (defined(__cplusplus) && __cplusplus > 202302L || defined(_MSVC_LANG) && _MSVC_LANG > 202302L)
     #include <meta>        // Required for C++26 reflection
