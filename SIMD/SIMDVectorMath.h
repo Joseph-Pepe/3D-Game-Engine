@@ -364,57 +364,17 @@ namespace Engine::ISAArch {
 
     // ======================================================================
     // THE MACRO-CHUNK (The Perfect AoSoA Memory Layout)
-    // ======================================================================
-    /*
-        - We group 256 particles into a single block. 
-        - 256 floats = 1024 bytes per axis. Total size = 3072 bytes.
-        - 3072 is a perfect multiple of 64 (L1 Cache Line). No 'w' padding required.
-        - 3072 bytes fits entirely inside a standard 4KB OS Memory Page. Zero TLB Thrashing!
-        - Writing sequentially to x[0], x[1]... perfectly saturates the CPU Write-Combine buffer.
-    */
-    // constexpr size_t MACRO_CHUNK_PARTICLES = 256;
-    // constexpr size_t REGISTERS_PER_CHUNK = MACRO_CHUNK_PARTICLES / WideFloat::size();
-
-    // struct alignas(L1_CACHE_CHUNK_SIZE) PortableParticleMacroChunk {
-    //     WideFloat x[REGISTERS_PER_CHUNK];
-    //     WideFloat y[REGISTERS_PER_CHUNK];
-    //     WideFloat z[REGISTERS_PER_CHUNK];
-
-    //     // The math is localized to operate on specific register lanes within the chunk
-    //     FORCE_INLINE void process_lane(size_t j, const WideFloat& sX, const WideFloat& sY, const WideFloat& sZ, const WideFloat& smallVal) {
-    //         // 1. Addition
-    //         x[j] += sX;
-    //         y[j] += sY;
-    //         z[j] += sZ;
-
-    //         // 2. FMA Dot Product
-    //         WideFloat res = x[j] * sX;
-    //         res = fma(y[j], sY, res);
-    //         res = fma(z[j], sZ, res);
-
-    //         // 3. Scale
-    //         x[j] += res * smallVal;
-
-    //         // 4. Cross Product (Reading locally avoids register spilling)
-    //         WideFloat rx = fma(y[j], sZ, -(z[j] * sY));
-    //         WideFloat ry = fma(z[j], sX, -(x[j] * sZ));
-    //         WideFloat rz = fma(x[j], sY, -(y[j] * sX));
-            
-    //         x[j] = rx; 
-    //         y[j] = ry; 
-    //         z[j] = rz;
-    //     }
-    // };
-
-    // ======================================================================
-    // THE MACRO-CHUNK (The Perfect AoSoA Memory Layout)
     // ======================================================================    
+    /*
+        - 4 REGISTERS (X) + 4 REGISTERS (Y) + 4 REGISTERS (Z) = 12 REQUIRED VECTOR REGISTERS
+        - Fits inside AVX2's 16 available registers, leaving 4 registers left over for temporary math variables (sX, sY, sZ, smallVal)
+    */
+
     // The "Sweet Spot" Macro Chunk (Perfect Cache Line Multiples, No Padding)
-    // AVX2 = 32 particles. AVX-512 = 64 particles.
     constexpr size_t REGISTERS_PER_CHUNK = 4; 
 
-    // Particles per chunk now scales natively! 
-    // AVX2 = 4 * 8 = 32. NEON = 4 * 4 = 16. AVX-512 = 4 * 16 = 64.
+    // Particles per chunk now scales natively! [AVX2 = (4 * 8) = 32, NEON = (4 * 4) = 16, AVX-512 = (4 * 16) = 64].
+    // AVX2 = 32 particles per chunk. AVX-512 = 64 particles per chunk.
     constexpr size_t MACRO_CHUNK_PARTICLES = REGISTERS_PER_CHUNK * WideFloat::size();
     
     struct alignas(L1_CACHE_CHUNK_SIZE) OptimalParticleMacroChunk {
