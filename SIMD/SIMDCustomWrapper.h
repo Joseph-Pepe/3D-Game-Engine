@@ -2093,6 +2093,17 @@ namespace Engine::ISAArch {
         // --- C++26 OPERATORS (HIDDEN FRIENDS) ---
         // Using friends prevents ambiguous overload resolution and ensures identical inline compilation
 
+        // --- SCALAR LANE ACCESS ---
+        // Dynamically reads or writes an individual scalar lane within the SIMD register.
+        FORCE_INLINE T& operator[](size_t index) {
+            return reinterpret_cast<T*>(&m_data)[index];
+        }
+
+        // FORCE_INLINE ensures the compiler is strictly forbidden from ever emitting an actual function call overhead.
+        FORCE_INLINE const T& operator[](size_t index) const {
+            return reinterpret_cast<const T*>(&m_data)[index];
+        }
+
         // --- ARITHMETIC OPERATORS ---
         friend inline simd operator+(const simd& a, const simd& b) {
             return simd(Traits::add(a.m_data, b.m_data));
