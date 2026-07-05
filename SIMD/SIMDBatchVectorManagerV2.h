@@ -1,11 +1,23 @@
 #pragma once
 
-#include "SIMD/SIMDCustomWrapper.h" // Ensure this matches your custom SIMD wrapper filename
+#include "SIMD/SIMDCustomWrapper.h"
 #include "../JobSystem.h"
 #include <vector>
 #include <execution>
 #include <algorithm>
 #include <cstdlib>
+
+// ======================================================================
+// C++26: NATIVE SIMD ARCHITECTURE for MSVC build v14.51 and newer.
+// ======================================================================
+/*
+    - This now scales to ARM NEON (Apple Silicon M1/M2/M3/M4+), AMD (Playstation 5, Xbox Series X) and Intel (SSE, AVX-256, AVX-512) automatically once compiled without a total rewrite of code (i.e., seamlessly maps those registers, cross-platform).
+    - No need to use bitwise mask hacks (_mm512_cmp_ps_mask, _mm512_maskz_mul_ps) anymore b/c the compiler automatically translates these logical operators into hardware masks.
+    - Never hardcode instruction sets into your datastructures. Write once and rely on the compiler to traslate it into the widest register the hardware supports.
+    - No longer need to manually hardcode intrinsics for Intel-specific __mm256, __mm512 versions, the C++ compiler will figure out what the native hardware is based on the build flag (e.g., -march=native, -mavx512f, -mcpu=apple-1).
+    - Decouples the engine from Intel by changing the compiler target flag in CMake.
+    - Engine::ISAArch::simd generated assembly is identical to manual intrinsics (1:1 match). You lose zero performance.
+*/
 
 namespace Engine::ISAArch {
 
