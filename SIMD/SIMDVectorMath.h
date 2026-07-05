@@ -50,15 +50,6 @@
     #include <linear_algebra>
 #endif
 
-#if __has_include(<inplace_vector>)
-    /*
-        // Replaces (std::vector). Zero heap allocations. Data is perfectly contiguous on the stack.
-        // Extremely cache friendly for your SIMD wrappers.
-        std::inplace_vector<Vector3D, 64> localCluster;
-    */
-    #include <inplace_vector> // C++26 API provides a vector that stores data locally without ever touching the heap allocator.
-#endif 
-
 // ======================================================================
 // C++26: NATIVE SIMD ARCHITECTURE for MSVC build v14.51 and newer.
 // ======================================================================
