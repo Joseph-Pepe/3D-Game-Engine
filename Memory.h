@@ -81,7 +81,7 @@
     - Ensures AVX reads will not straddle two different 64-byte cache chunk lines.
 */
 
-// A standard-compliant allocator that guarantees strict memory alignment
+// A standard-compliant allocator that guarantees strict memory alignment (cross-platform)
 template <typename T, std::size_t Alignment = 32>
 struct AlignedAllocator {
     // Standard STL Allocator Typedefs (MSVC template deduction)
