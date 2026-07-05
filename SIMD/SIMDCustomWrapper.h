@@ -1548,14 +1548,20 @@ namespace Engine::ISAArch {
 
                 // Hardware Vector Swizzling
                 template <int i0, int i1, int i2, int i3>
-                static inline register_type shuffle(register_type a) {
-                    // Both MSVC and Clang will aggressively fold this into a single instruction.
-                    register_type res = vdupq_n_f32(0.0f); 
-                    res = vsetq_lane_f32(vgetq_lane_f32(a, i0), res, 0);
-                    res = vsetq_lane_f32(vgetq_lane_f32(a, i1), res, 1);
-                    res = vsetq_lane_f32(vgetq_lane_f32(a, i2), res, 2);
-                    res = vsetq_lane_f32(vgetq_lane_f32(a, i3), res, 3);
-                    return res;
+                static FORCE_INLINE register_type shuffle(register_type a) {
+                    // Nintendo Switch 2 and Apple Silicon are compiled almost exclusively via Clang/LLVM.
+                    #if defined(__clang__)
+                        return __builtin_shufflevector(a, a, i0, i1, i2, i3);
+                    #else
+                        // Fallback for GCC/MSVC on ARM
+                        // MSVC will aggressively fold this into a single instruction.
+                        register_type res = vdupq_n_f32(0.0f); 
+                        res = vsetq_lane_f32(vgetq_lane_f32(a, i0), res, 0);
+                        res = vsetq_lane_f32(vgetq_lane_f32(a, i1), res, 1);
+                        res = vsetq_lane_f32(vgetq_lane_f32(a, i2), res, 2);
+                        res = vsetq_lane_f32(vgetq_lane_f32(a, i3), res, 3);
+                        return res;
+                    #endif
                 }
 
                 // ========================================
@@ -2065,10 +2071,30 @@ namespace Engine::ISAArch {
             // Map the arbitrary angle 'x' perfectly into the [-PI, PI] window.
             // Math: cycles = floor((x / 2PI) + 0.5)
             simd cycles = floor(fma(x, INV_TWO_PI, simd(0.5f)));
+
+            // ==========================
+            // FLOATING-POINT PRECISION
+            // ==========================
+            /*
+                - All floating-point numbers lose precision as they grow.
+                - Use Cody-Waite Range Reduction to preserve the mantissa bits no matter the scale (i.e., open-world games with large distances).
+                - Split the 2PI contant into two parts to preserve precision.
+                - Prevents catastrophic floating-point cancellations when generating waves or wind at massive distances/times.
+            */
             
+            // 1. Core Constants
+            const simd INV_TWO_PI(0.159154943f);
+            const simd TWO_PI_A(-6.28318501f);    // High precision chunk
+            const simd TWO_PI_B(-2.96690463e-7f); // Low precision tail
+
+            // 2. Range Reduction
+            simd cycles = floor(fma(x, INV_TWO_PI, simd(0.5f)));
+
+            // Cody-Waite 2-part FMA subtraction preserves mantissa precision perfectly!
             // Math: x_wrapped = x - (cycles * 2PI)
             // We use FMA to subtract without losing precision: x_wrapped = fma(cycles, -2PI, x)
-            simd x_wrapped = fma(cycles, simd(-6.283185307f), x);
+            simd x_wrapped = fma(cycles, TWO_PI_A, x);    // simd x_wrapped = fma(cycles, simd(-6.283185307f), x);
+            x_wrapped = fma(cycles, TWO_PI_B, x_wrapped);
 
             // 3. Prepare x^2 for the polynomial
             simd x2 = x_wrapped * x_wrapped;
