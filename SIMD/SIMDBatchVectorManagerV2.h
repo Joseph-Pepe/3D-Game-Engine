@@ -20,8 +20,18 @@
     - Decouples the engine from Intel by changing the compiler target flag in CMake.
     - Engine::ISAArch::simd generated assembly is identical to manual intrinsics (1:1 match). You lose zero performance.
 */
-
 namespace Engine::ISAArch {
+
+    // ======================================================================
+    // HARDWARE PROBING
+    // ======================================================================
+    /*
+        - Let the compiler determine the optimal register width and memory alignment for the target platform.
+        - e.g., 16 bytes for ARM NEON, 32 for AVX2, 64 for AVX-512.
+    */
+    using NativeFloatSIMD = Engine::ISAArch::simd<float, Engine::ISAArch::simd_abi::native<float>>; // (or) its implicit equivalent "Engine::ISAArch::WideFloat", both mean [NativeFloatSIMD =  WideFloat]
+    constexpr size_t NATIVE_BATCH_SIZE = NativeFloatSIMD::size();  // (or) its equivalent "WideFloat::size()"
+    constexpr size_t NATIVE_HARDWARE_ALIGNMENT = alignof(NativeFloatSIMD); // (or) its equivalent "alignof(WideFloat)"
 
     // ======================================================================
     // C++26: HARDWARE-AWARE CACHE ALIGNMENT
@@ -87,29 +97,31 @@ namespace Engine::ISAArch {
     // 1. THE AOSOA BLOCK (The Cache-Friendly Data Chunk)
     // ======================================================================
     // Force the struct itself to align to 32-bytes (3x32 = 96-bytes), not 128-bytes.
-    struct alignas(alignof(WideFloat)) PortableParticleBlock {
-        WideFloat x; // 32-bytes
-        WideFloat y; // 32-bytes
-        WideFloat z; // 32-bytes
-        // WideFloat w; // By adding w as padding to force a 128-byte alignment, it will tank performance because it needs to move 33% more memory on every single iteration (CPU load and stores).
+    // This perfectly sizes itself to the hardware. The alignas tag guarantees it never straddles a cache-line boundary, preventing CPU stalling.
+    struct alignas(NATIVE_HARDWARE_ALIGNMENT) PortableParticleBlock {
+        NativeFloatSIMD x; // 32-bytes 
+        NativeFloatSIMD y; // 32-bytes
+        NativeFloatSIMD z; // 32-bytes
+        // NativeFloatSIMD w; // 32-bytes Padding: Forces the struct to a power-of-2 size for optimal L1 cache streaming. By adding w as padding to force a 128-byte alignment, it will tank performance because it needs to move 33% more memory on every single iteration (CPU load and stores).
 
-        FORCE_INLINE void add(const WideFloat& bx, const WideFloat& by, const WideFloat& bz) {
+        // Built-in Math Functions (Keeps the processing loop clean)
+        FORCE_INLINE void add(const NativeFloatSIMD& bx, const NativeFloatSIMD& by, const NativeFloatSIMD& bz) {
             x += bx;
             y += by;
             z += bz;
         }
-
-        FORCE_INLINE WideFloat dot_fma(const WideFloat& bx, const WideFloat& by, const WideFloat& bz) const {
-            WideFloat res = x * bx;
+        
+        FORCE_INLINE WideFloat dot_fma(const NativeFloatSIMD& bx, const NativeFloatSIMD& by, const NativeFloatSIMD& bz) const {
+            NativeFloatSIMD res = x * bx;
             res = fma(y, by, res);
             res = fma(z, bz, res);
             return res;
         }
 
-        FORCE_INLINE void cross(const WideFloat& bx, const WideFloat& by, const WideFloat& bz) {
-            WideFloat rx = fma(y, bz, -(z * by));
-            WideFloat ry = fma(z, bx, -(x * bz));
-            WideFloat rz = fma(x, by, -(y * bx));
+        FORCE_INLINE void cross(const NativeFloatSIMD& bx, const NativeFloatSIMD& by, const NativeFloatSIMD& bz) {
+            NativeFloatSIMD rx = fma(y, bz, -(z * by));
+            NativeFloatSIMD ry = fma(z, bx, -(x * bz));
+            NativeFloatSIMD rz = fma(x, by, -(y * bx));
             x = rx; y = ry; z = rz;
         }
     };
@@ -119,25 +131,29 @@ namespace Engine::ISAArch {
     // ======================================================================
     class VectorManagerAoSoA_Portable {
     public:
-        std::vector<PortableParticleBlock, DynamicAlignedAllocator<PortableParticleBlock, alignof(WideFloat)>> blocks;
+        // Automatically enforces the hardware-specific memory boundary!
+        std::vector<PortableParticleBlock, DynamicAlignedAllocator<PortableParticleBlock, NATIVE_HARDWARE_ALIGNMENT>> blocks;
 
         VectorManagerAoSoA_Portable(size_t particleCount) {
-            size_t blockCount = (particleCount + WideFloat::size() - 1) / WideFloat::size();
+            // Divide total particles by the hardware's native batch size, rounding up.
+            size_t blockCount = (particleCount + NATIVE_BATCH_SIZE - 1) / NATIVE_BATCH_SIZE;
             blocks.resize(blockCount);
 
+            // Broadcast initialize (WideFloat constructor copies scalar to all hardware lanes)
             for (auto& b : blocks) {
-                b.x = WideFloat(1.0f);
-                b.y = WideFloat(2.0f);
-                b.z = WideFloat(3.0f);
-                // b.w = WideFloat(0.0f);
+                b.x = NativeFloatSIMD(1.0f);
+                b.y = NativeFloatSIMD(2.0f);
+                b.z = NativeFloatSIMD(3.0f);
+                // b.w = NativeFloatSIMD(0.0f);
             }
         }
 
         FORCE_INLINE void processBatch(float stepX, float stepY, float stepZ) {
-            WideFloat sX(stepX);
-            WideFloat sY(stepY);
-            WideFloat sZ(stepZ);
-            WideFloat smallVal(0.00001f);
+            // 1. Broadcast the scalar inputs directly into SIMD registers once
+            NativeFloatSIMD sX(stepX);
+            NativeFloatSIMD sY(stepY);
+            NativeFloatSIMD sZ(stepZ);
+            NativeFloatSIMD smallVal(0.00001f);
 
             uint32_t blockCount = static_cast<uint32_t>(blocks.size());
             uint32_t threadCount = g_JobSystem.nextWorkerId.load(std::memory_order_relaxed);
@@ -147,21 +163,33 @@ namespace Engine::ISAArch {
             uint32_t CHUNK_SIZE = std::max(1024u, blockCount / (threadCount * targetChunksPerThread));
 
             g_JobSystem.DispatchAndWait(blockCount, CHUNK_SIZE, [&](uint32_t start, uint32_t end) {
+
+                // std::execution::par_unseq maps directly to your CPU's thread pool
+                // std::for_each(std::execution::par_unseq, blocks.begin(), blocks.end(), [=](PortableParticleBlock& batch) { 
+                //     // Because the struct is perfectly aligned, modifying 'batch.x' triggers the compiler 
+                //     // to generate the exact same aligned-load/store assembly automatically.
+                //     batch.add(sX, sY, sZ);
+                //     WideFloat d = batch.dot_fma(sX, sY, sZ);
+                //     batch.x += d * smallVal;
+                //     batch.cross(sX, sY, sZ);
+                // });
+
+                // 2. The Execution Loop
                 for (uint32_t i = start; i < end; ++i) {
                     
-                    // 1. LOAD: Copy from heap memory into CPU registers (No '&' reference!)
+                    // 3. LOAD: Copy from heap memory into CPU registers (No '&' reference!)
                     PortableParticleBlock batch = blocks[i]; 
                     
-                    // 2. MATH: Pure register execution (Zero RAM access)
+                    // 4. MATH: Pure register execution (Zero RAM access). Notice there are no manual loads (_mm_load_ps) or stores (_mm_store_ps).
                     batch.add(sX, sY, sZ);
-                    WideFloat d = batch.dot_fma(sX, sY, sZ);
+                    NativeFloatSIMD d = batch.dot_fma(sX, sY, sZ);
                     batch.x += d * smallVal;
                     batch.cross(sX, sY, sZ);
 
                     // Emits a generic memory copy rather than aligned AVX stores, better to break it up by parts.
                     // blocks[i] = batch;
 
-                    // 3. STORE: Write the final computed result back to memory, break it apart to match AVX2 speed.
+                    // 5. STORE: Write the final computed result back to memory, break it apart to match AVX2 speed.
                     blocks[i].x = batch.x;
                     blocks[i].y = batch.y;
                     blocks[i].z = batch.z;
@@ -177,6 +205,7 @@ namespace Engine::ISAArch {
     // ======================================================================
     class VectorManagerSOA_Portable {
     public:
+        // Memory is perfectly aligned for the target hardware!
         NativeAlignedVector<float> xs, ys, zs;
 
         // AlignedVector32<float> xs, ys, zs;           // AVX-256: 32-byte aligned vectors
@@ -186,8 +215,12 @@ namespace Engine::ISAArch {
             // size_t paddedCount = (count + 15) & ~15; // Pad to nearest multiple of 16 for AVX-512 boundaries
             // size_t paddedCount = (count + 7) & ~7;   // Pad to nearest multiple of  8 for AVX-256 boundaries
              
-            constexpr size_t stride = WideFloat::size();
+            constexpr size_t stride = NativeFloatSIMD::size();
+
+            // Dynamic padding: hardware-agnostic boundary alignment (i.e., for ANY hardware architecture)
             size_t remainder = count % stride;
+
+            // Safely pad to the nearest multiple of whatever 'stride' the hardware chose (i.e., engine automatically adapts its memory allocation, so it never crashes at the end of an array).
             size_t paddedCount = (remainder == 0) ? count : count + (stride - remainder);
             
             xs.resize(paddedCount, 1.0f);
@@ -208,19 +241,50 @@ namespace Engine::ISAArch {
         };
 
         FORCE_INLINE void processBatch(float stepX, float stepY, float stepZ) {
-            constexpr size_t stride = WideFloat::size();
+            // NativeFloatSIMD::size tells us exactly how many floats fit in one register.
+            constexpr size_t stride = NativeFloatSIMD::size();
         
-            // Broadcast the scalars into all [8 slots of the 256-bit registers (AVX-256)] (or) all [16 slots of the 512-bit registers (AVX-512)].
+            // Broadcast the scalars directly into all the portable SIMD types [8 slots of the 256-bit registers (AVX-256)] (or) all [16 slots of the 512-bit registers (AVX-512)].
             // AVX-256: [32-bits (float) x  8 slots (vectors) = 256-bits] 
             // AVX-512: [32-bits (float) x 16 slots (vectors) = 512-bits]
-            WideFloat sX(stepX);           // AVX-256: __m256 sX       = _mm256_set1_ps(stepX);    AVX-512: __m512 sX       = _mm512_set1_ps(stepX);
-            WideFloat sY(stepY);           // AVX-256: __m256 sY       = _mm256_set1_ps(stepY);    AVX-512: __m512 sY       = _mm512_set1_ps(stepY);
-            WideFloat sZ(stepZ);           // AVX-256: __m256 sZ       = _mm256_set1_ps(stepZ);    AVX-512: __m512 sZ       = _mm512_set1_ps(stepZ);
-            WideFloat smallVal(0.00001f);  // AVX-256: __m256 smallVal = _mm256_set1_ps(0.00001f); AVX-512: __m512 smallVal = _mm512_set1_ps(0.00001f);
+            NativeFloatSIMD sX(stepX);           // AVX-256: __m256 sX       = _mm256_set1_ps(stepX);    AVX-512: __m512 sX       = _mm512_set1_ps(stepX);
+            NativeFloatSIMD sY(stepY);           // AVX-256: __m256 sY       = _mm256_set1_ps(stepY);    AVX-512: __m512 sY       = _mm512_set1_ps(stepY);
+            NativeFloatSIMD sZ(stepZ);           // AVX-256: __m256 sZ       = _mm256_set1_ps(stepZ);    AVX-512: __m512 sZ       = _mm512_set1_ps(stepZ);
+            NativeFloatSIMD smallVal(0.00001f);  // AVX-256: __m256 smallVal = _mm256_set1_ps(0.00001f); AVX-512: __m512 smallVal = _mm512_set1_ps(0.00001f);
 
+            // Extract raw pointers to guarantee contiguous memory
             float* ptrX = xs.data();
             float* ptrY = ys.data();
             float* ptrZ = zs.data();
+
+            // Use a standard algorithm with the par_unseq policy
+            // In C++26, the compiler is significantly better at "auto-vectorizing" standard containers when using the execution policies.
+            // auto indices = std::views::iota(0uz, xs.size() / stride);
+
+            // Safely capture raw pointers by value [=]
+            // std::for_each(std::execution::par_unseq, indices.begin(), indices.end(), [=](size_t chunkIdx) {
+            //     size_t i = chunkIdx * stride;
+
+            //     // LOAD: Vector_aligned portable loads! This emits the fastest possible assembly.
+            //     SIMDVectorP batch = { 
+            //         NativeFloatSIMD(ptrX + i, simd::vector_aligned), 
+            //         NativeFloatSIMD(ptrY + i, simd::vector_aligned), 
+            //         NativeFloatSIMD(ptrZ + i, simd::vector_aligned) 
+            //     };
+
+            //     // MATH
+            //     batch.add(sX, sY, sZ);
+            //     NativeFloatSIMD d = batch.dot_fma(sX, sY, sZ);
+                
+            //     // The old _mm512_add_ps(x, _mm512_mul_ps(d, smallVal)) collapses into standard C++ syntax while maintaining identical silicon execution.
+            //     batch.x += d * smallVal;
+            //     batch.cross(sX, sY, sZ);
+
+            //     // STORE: Vector_aligned stores write directly to the hardware's Write-Combine buffer.
+            //     batch.x.copy_to(ptrX + i, simd::vector_aligned);
+            //     batch.y.copy_to(ptrY + i, simd::vector_aligned);
+            //     batch.z.copy_to(ptrZ + i, simd::vector_aligned);
+            // });
 
             // Calculate chunks based on hardware SIMD width
             uint32_t chunkCount = static_cast<uint32_t>(xs.size() / stride);
@@ -238,18 +302,18 @@ namespace Engine::ISAArch {
                     // 1. Load (32 bytes per load) (AVX-256: 8 vectors at once, AVX-512: 16 vectors at once).
                     // We use _loadu_ps (Unaligned) instead of _load_ps (Aligned)
                     SOA_Batch batch = { 
-                        WideFloat(ptrX + i),  // AVX-256: _mm256_loadu_ps(&xs[i]);  AVX-512: _mm512_loadu_ps(&xs[i]);
-                        WideFloat(ptrY + i),  // AVX-256: _mm256_loadu_ps(&ys[i]);  AVX-512: _mm512_loadu_ps(&ys[i]);
-                        WideFloat(ptrZ + i)   // AVX-256: _mm256_loadu_ps(&zs[i]);  AVX-512: _mm512_loadu_ps(&zs[i]);
+                        NativeFloatSIMD(ptrX + i),  // AVX-256: _mm256_loadu_ps(&xs[i]);  AVX-512: _mm512_loadu_ps(&xs[i]);
+                        NativeFloatSIMD(ptrY + i),  // AVX-256: _mm256_loadu_ps(&ys[i]);  AVX-512: _mm512_loadu_ps(&ys[i]);
+                        NativeFloatSIMD(ptrZ + i)   // AVX-256: _mm256_loadu_ps(&zs[i]);  AVX-512: _mm512_loadu_ps(&zs[i]);
                     };
 
                     // 2. Addition (AVX-256: 8 at once, AVX-512: 16 at once)
-                    batch.add(sX, sY, sZ);    // AVX-256: x = _mm256_add_ps(x, bx);  AVX-512: x = _mm512_add_ps(x, bx);
-                                              // AVX-256: y = _mm256_add_ps(y, by);  AVX-512: y = _mm512_add_ps(y, by);
-                                              // AVX-256: z = _mm256_add_ps(z, bz);  AVX-512: z = _mm512_add_ps(z, bz);
+                    batch.add(sX, sY, sZ);          // AVX-256: x = _mm256_add_ps(x, bx);  AVX-512: x = _mm512_add_ps(x, bx);
+                                                    // AVX-256: y = _mm256_add_ps(y, by);  AVX-512: y = _mm512_add_ps(y, by);
+                                                    // AVX-256: z = _mm256_add_ps(z, bz);  AVX-512: z = _mm512_add_ps(z, bz);
 
                     // 3. Dot Product
-                    WideFloat d = batch.dot_fma(sX, sY, sZ);
+                    NativeFloatSIMD d = batch.dot_fma(sX, sY, sZ);
 
                     // 4. Update X, Single element update (x += d * small)
                     batch.x += d * smallVal;  // AVX-256: batch.x = _mm256_add_ps(batch.x, _mm256_mul_ps(d, smallVal));
