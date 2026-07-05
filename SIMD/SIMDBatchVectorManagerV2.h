@@ -229,13 +229,13 @@ namespace Engine::ISAArch {
         }
 
         struct SOA_Batch {
-            WideFloat x, y, z;
-            FORCE_INLINE void add(const WideFloat& bx, const WideFloat& by, const WideFloat& bz) { x += bx; y += by; z += bz; }
-            FORCE_INLINE WideFloat dot_fma(const WideFloat& bx, const WideFloat& by, const WideFloat& bz) const {
-                WideFloat res = x * bx; res = fma(y, by, res); res = fma(z, bz, res); return res;
+            NativeFloatSIMD x, y, z;
+            FORCE_INLINE void add(const NativeFloatSIMD& bx, const NativeFloatSIMD& by, const NativeFloatSIMD& bz) { x += bx; y += by; z += bz; }
+            FORCE_INLINE NativeFloatSIMD dot_fma(const NativeFloatSIMD& bx, const NativeFloatSIMD& by, const NativeFloatSIMD& bz) const {
+                NativeFloatSIMD res = x * bx; res = fma(y, by, res); res = fma(z, bz, res); return res;
             }
-            FORCE_INLINE void cross(const WideFloat& bx, const WideFloat& by, const WideFloat& bz) {
-                WideFloat rx = fma(y, bz, -(z * by)); WideFloat ry = fma(z, bx, -(x * bz)); WideFloat rz = fma(x, by, -(y * bx));
+            FORCE_INLINE void cross(const NativeFloatSIMD& bx, const NativeFloatSIMD& by, const NativeFloatSIMD& bz) {
+                NativeFloatSIMD rx = fma(y, bz, -(z * by)); NativeFloatSIMD ry = fma(z, bx, -(x * bz)); NativeFloatSIMD rz = fma(x, by, -(y * bx));
                 x = rx; y = ry; z = rz;
             }
         };
