@@ -340,33 +340,42 @@ public:
 */
 
 // Created a strictly single-threaded arena for max performance in local scopes.
-class LocalLinearArena {
+template <bool ThreadSafe>
+class LinearArena {
 private:
     uint8_t* m_memory;       // The master pointer to our massive memory block
     size_t   m_capacity;     // Total size of the arena in bytes
-    size_t   m_offset;       // The bump pointer (how much we have used) raw O(1) performance
+
+    // Dynamically switches between atomic and non-atomic at compile time!
+    using OffsetType = std::conditional_t<ThreadSafe, std::atomic<size_t>, size_t>;
+
+    // Aligned to 64 bytes to prevent false sharing across threads
+    alignas(ENGINE_CACHE_CHUNK_SIZE) OffsetType m_offset;
+
+    // alignas(ENGINE_CACHE_CHUNK_SIZE) size_t m_offset;                // ThreadSafe (false): The bump pointer (how much we have used) raw O(1) performance
+    // alignas(ENGINE_CACHE_CHUNK_SIZE) std::atomic<size_t> m_offset;   // ThreadSafe  (true): The bump pointer (how much we have used), thread-safe! 
 
 public:
     // Ask the OS for a massive chunk of memory upfront, strictly aligned to 64 bytes (AVX-512 ready)
-    LocalLinearArena(size_t sizeInBytes) : m_capacity(sizeInBytes), m_offset(0) {
+    LinearArena(size_t sizeInBytes) : m_capacity(sizeInBytes), m_offset(0) {
         // We use native aligned new to guarantee the master block starts on a cache line boundary
         m_memory = static_cast<uint8_t*>(::operator new(sizeInBytes, std::align_val_t{64}));
 
         if (!m_memory) {
-            std::println(std::cerr, "[FATAL] OS Refused to allocate {} bytes for Local Arena!", sizeInBytes);
+            std::println(std::cerr, "[FATAL] OS Refused to allocate {} bytes for Linear Arena!", sizeInBytes);
             std::abort();
         }
 
         std::println("[MEMORY] Initialized Local Linear Arena: {:.2f} MB", (float)sizeInBytes / (1024.0f * 1024.0f));
     }
 
-    ~LocalLinearArena() { 
+    ~LinearArena() { 
         ::operator delete(m_memory, m_capacity, std::align_val_t{64}); 
     }
 
     // Prevent copying (We don't want two objects thinking they own the same 1GB of RAM)
-    LocalLinearArena(const LocalLinearArena&) = delete;
-    LocalLinearArena& operator=(const LocalLinearArena&) = delete;
+    LinearArena(const LinearArena&) = delete;
+    LinearArena& operator=(const LinearArena&) = delete;
 
     // --- BARE-METAL BUMP ALLOCATION --- Alignment is now a template parameter to unlock std::assume_aligned optimizations
     template <typename T, size_t Align = alignof(T)>
@@ -374,35 +383,94 @@ public:
         static_assert((Align & (Align - 1)) == 0, "Alignment must be a power of 2");
 
         #if ENGINE_HAS_CXX26_META_REFLECTION
+            // C++26 Reflection: Introspect the type at compile-time to get its string identifier
             [[maybe_unused]] constexpr std::string_view typeName = std::meta::identifier_of(^T);
         #endif
 
-        // 1. Where are we currently in memory?
-        uintptr_t currentAddress = reinterpret_cast<uintptr_t>(m_memory + m_offset);
+        if constexpr (ThreadSafe) {
+            // ==================================================================================
+            // CONCURRENT LINEAR ARENA (THREAD-SAFE, GLOBAL)
+            // ==================================================================================
 
-        // 2. Bitwise Alignment Calculation pushes the address forward to the nearest multiple of the requested alignment.
-        size_t padding = (Align - (currentAddress & (Align - 1))) & (Align - 1);
-        size_t totalAllocationSize = padding + (count * sizeof(T));
+            // Execute the Atomic CAS Loop
+            size_t oldOffset = m_offset.load(std::memory_order_relaxed);
+            size_t padding, totalAllocationSize;
 
-        // 3. Out of Memory Guard
-        if (m_offset + totalAllocationSize > m_capacity) [[unlikely]] {
-            std::println(std::cerr, "[FATAL] LocalLinearArena Exhausted!");
-            std::println(std::cerr, "{}", std::to_string(std::stacktrace::current()));
-            std::abort();
+            // Thread-Safe Aligned Allocation Loop
+            do {
+                // 1. Where are we currently in memory?
+                uintptr_t currentAddress = reinterpret_cast<uintptr_t>(m_memory + oldOffset);
+
+                // 2. Bitwise Alignment Calculation (No slow modulo arithmetic!)
+                // Formula pushes the address forward to the nearest multiple of the requested alignment.
+                padding = (Align - (currentAddress & (Align - 1))) & (Align - 1);
+                totalAllocationSize = padding + (count * sizeof(T));
+
+                // Warn if threads are hammering this for tiny allocations
+                if (totalAllocationSize < 65536) [[unlikely]] {
+                    // In a real engine, send this to the telemetry system. 
+                    // Threads should be asking for at least 64KB chunks to prevent cache-line bouncing.
+                    std::println(std::cerr, "[BOUNCE] Thread Allocated Tiny Amount: {} bytes", totalAllocationSize);
+                }
+
+                // 3. Out of Memory Guard
+                if (oldOffset + totalAllocationSize > m_capacity) [[unlikely]] {
+                    std::println(std::cerr, "[FATAL] ConcurrentLinearArena Exhausted! Capacity: {} bytes", m_capacity);
+                    std::println(std::cerr, "{}", std::to_string(std::stacktrace::current()));
+                    std::abort();
+                }
+            // Safely claim the memory block. If another thread beats us, loop and recalculate.
+            } while(!m_offset.compare_exchange_weak(
+                oldOffset, 
+                oldOffset + totalAllocationSize, 
+                std::memory_order_acq_rel,   // On Success: Ensure memory visibility across threads
+                std::memory_order_relaxed // On Failure: CPU is just looping, no sync needed
+            ));
+
+            // Now your telemetry subsystem knows exactly what is being allocated natively
+            #if ENGINE_ENABLE_MEMORY_PROFILING && ENGINE_HAS_CXX26_META_REFLECTION
+                MemoryProfiler::TrackAllocation(typeName, totalAllocationSize);
+            #endif
+            
+            // 4. Calculate the final aligned pointer
+            uintptr_t alignedAddress = reinterpret_cast<uintptr_t>(m_memory + oldOffset) + padding;
+
+            // C++20/26: Prove to the compiler that the memory boundary is safe for AVX
+            return std::assume_aligned<Align>(reinterpret_cast<T*>(alignedAddress));
+        } 
+        // Execute the simple O(1) bump
+        else { 
+            // ==================================================================================
+            // LOCAL LINEAR ARENA (SINGLE-THREADED, SAFE TO MARK/RESET)
+            // ==================================================================================
+
+            // 1. Where are we currently in memory?
+            uintptr_t currentAddress = reinterpret_cast<uintptr_t>(m_memory + m_offset);
+
+            // 2. Bitwise Alignment Calculation pushes the address forward to the nearest multiple of the requested alignment.
+            size_t padding = (Align - (currentAddress & (Align - 1))) & (Align - 1);
+            size_t totalAllocationSize = padding + (count * sizeof(T));
+
+            // 3. Out of Memory Guard
+            if (m_offset + totalAllocationSize > m_capacity) [[unlikely]] {
+                std::println(std::cerr, "[FATAL] LocalLinearArena Exhausted!");
+                std::println(std::cerr, "{}", std::to_string(std::stacktrace::current()));
+                std::abort();
+            }
+
+            // 4. Bump the offset forward
+            m_offset += totalAllocationSize;
+
+            // 5. Calculate the final aligned pointer
+            uintptr_t alignedAddress = currentAddress + padding;
+
+            #if ENGINE_ENABLE_MEMORY_PROFILING && ENGINE_HAS_CXX26_META_REFLECTION
+                MemoryProfiler::TrackAllocation(typeName, totalAllocationSize);
+            #endif
+
+            // C++20/26: Prove to the compiler that the memory boundary is safe for AVX
+            return std::assume_aligned<Align>(reinterpret_cast<T*>(alignedAddress));
         }
-
-        // 4. Bump the offset forward
-        m_offset += totalAllocationSize;
-
-        // 5. Calculate the final aligned pointer
-        uintptr_t alignedAddress = currentAddress + padding;
-
-        #if ENGINE_ENABLE_MEMORY_PROFILING && ENGINE_HAS_CXX26_META_REFLECTION
-            MemoryProfiler::TrackAllocation(typeName, totalAllocationSize);
-        #endif
-
-        // C++20/26: Prove to the compiler that the memory boundary is safe for AVX
-        return std::assume_aligned<Align>(reinterpret_cast<T*>(alignedAddress));
     }
 
     // --- BARE-METAL ALLOCATION WITH SIMD CAPACITY PADDING ---
@@ -412,6 +480,7 @@ public:
         static_assert((Align & (Align - 1)) == 0, "Alignment must be a power of 2");
 
         #if ENGINE_HAS_CXX26_META_REFLECTION
+            // C++26 Reflection: Introspect the type at compile-time to get its string identifier
             [[maybe_unused]] constexpr std::string_view typeName = std::meta::identifier_of(^T);
         #endif
         
@@ -419,52 +488,124 @@ public:
         // If count is 1021 and simdWidth is 8, paddedCount becomes 1024.
         size_t paddedCount = (count + simdWidthElements - 1) & ~(simdWidthElements - 1);
 
-        // 2. Where are we currently in memory?
-        uintptr_t currentAddress = reinterpret_cast<uintptr_t>(m_memory + m_offset);
-        
-        // 3. Bitwise Alignment Calculation
-        size_t padding = (Align - (currentAddress & (Align - 1))) & (Align - 1);
-        size_t totalAllocationSize = padding + (paddedCount * sizeof(T)); // Use paddedCount!
+        if constexpr (ThreadSafe) {
+            // ==================================================================================
+            // CONCURRENT LINEAR ARENA (THREAD-SAFE, GLOBAL)
+            // ==================================================================================
 
-        // 4. Out of Memory Guard
-        if (m_offset + totalAllocationSize > m_capacity) {
-            std::println(std::cerr, "[FATAL] LinearArena Exhausted! Capacity: {} bytes", m_capacity);
-            std::println(std::cerr, "{}", std::to_string(std::stacktrace::current()));
-            std::abort();
+            size_t oldOffset = m_offset.load(std::memory_order_relaxed);
+            size_t padding, totalAllocationSize;
+
+            // MUST use CAS loop here as well to guarantee alignment safety
+            do {
+                // 2. Where are we currently in memory?
+                uintptr_t currentAddress = reinterpret_cast<uintptr_t>(m_memory + oldOffset);
+
+                // 3. Bitwise Alignment Calculation
+                padding = (Align - (currentAddress & (Align - 1))) & (Align - 1);
+                totalAllocationSize = padding + (paddedCount * sizeof(T)); // Use paddedCount!
+
+                // 4. Out of Memory Guard checks the reserved block
+                if (oldOffset + totalAllocationSize > m_capacity) [[unlikely]] {
+                    std::println(std::cerr, "[FATAL] LinearArena Exhausted! Capacity: {} bytes", m_capacity);
+                    std::println(std::cerr, "{}", std::to_string(std::stacktrace::current()));
+                    std::abort();
+                }
+            } while (!m_offset.compare_exchange_weak(
+                oldOffset, 
+                oldOffset + totalAllocationSize, 
+                std::memory_order_acq_rel,   // On Success: Ensure memory visibility across threads
+                std::memory_order_relaxed    // On Failure: CPU is just looping, no sync needed
+            ));
+
+            // Now your telemetry subsystem knows exactly what is being allocated natively
+            #if ENGINE_ENABLE_MEMORY_PROFILING && ENGINE_HAS_CXX26_META_REFLECTION
+                MemoryProfiler::TrackAllocation(typeName, totalAllocationSize);
+            #endif
+
+            // 5. Calculate the final aligned pointer and bump the offset
+            uintptr_t alignedAddress = reinterpret_cast<uintptr_t>(m_memory + oldOffset) + padding;
+            T* result = std::assume_aligned<Align>(reinterpret_cast<T*>(alignedAddress));
+
+            // 6. ZERO-INITIALIZE THE GHOST ELEMENTS!
+            // This is strictly required so that SIMD math on the padded tail doesn't result in NaNs or subnormals.
+            for(size_t i = count; i < paddedCount; ++i) {
+                new (&result[i]) T(); // Placement new initializes to 0 / default constructor
+            }
+
+            return result;
+        } 
+        else {
+            // ==================================================================================
+            // LOCAL LINEAR ARENA (SINGLE-THREADED, SAFE TO MARK/RESET)
+            // ==================================================================================
+
+            // 2. Where are we currently in memory?
+            uintptr_t currentAddress = reinterpret_cast<uintptr_t>(m_memory + m_offset);
+            
+            // 3. Bitwise Alignment Calculation
+            size_t padding = (Align - (currentAddress & (Align - 1))) & (Align - 1);
+            size_t totalAllocationSize = padding + (paddedCount * sizeof(T)); // Use paddedCount!
+
+            // 4. Out of Memory Guard
+            if (m_offset + totalAllocationSize > m_capacity) {
+                std::println(std::cerr, "[FATAL] LinearArena Exhausted! Capacity: {} bytes", m_capacity);
+                std::println(std::cerr, "{}", std::to_string(std::stacktrace::current()));
+                std::abort();
+            }
+
+            // 5. Calculate the final aligned pointer and bump the offset
+            uintptr_t alignedAddress = currentAddress + padding;
+            m_offset += totalAllocationSize;
+
+            #if ENGINE_ENABLE_MEMORY_PROFILING && ENGINE_HAS_CXX26_META_REFLECTION
+                MemoryProfiler::TrackAllocation(typeName, totalAllocationSize);
+            #endif
+
+            T* result = std::assume_aligned<Align>(reinterpret_cast<T*>(alignedAddress));
+
+            // 6. ZERO-INITIALIZE THE GHOST ELEMENTS!
+            // This is strictly required so that SIMD math on the padded tail doesn't result in NaNs or subnormals.
+            for(size_t i = count; i < paddedCount; ++i) {
+                new (&result[i]) T(); // Placement new initializes to 0 / default constructor
+            }
+
+            return result;
         }
-
-        // 5. Calculate the final aligned pointer and bump the offset
-        uintptr_t alignedAddress = currentAddress + padding;
-        m_offset += totalAllocationSize;
-
-        #if ENGINE_ENABLE_MEMORY_PROFILING && ENGINE_HAS_CXX26_META_REFLECTION
-            MemoryProfiler::TrackAllocation(typeName, totalAllocationSize);
-        #endif
-
-        T* result = std::assume_aligned<Align>(reinterpret_cast<T*>(alignedAddress));
-
-        // 6. ZERO-INITIALIZE THE GHOST ELEMENTS!
-        // This is strictly required so that SIMD math on the padded tail doesn't result in NaNs or subnormals.
-        for(size_t i = count; i < paddedCount; ++i) {
-            new (&result[i]) T(); // Placement new initializes to 0 / default constructor
-        }
-
-        return result;
     }
 
     // --- O(1) FREE ---
     ENGINE_FORCE_INLINE void Reset() noexcept { 
-        // We don't overwrite the memory (that wastes CPU cycles).
-        // We just move the bump pointer back to the start. The next allocation will cleanly overwrite the old data.
-        m_offset = 0; 
+        if constexpr (ThreadSafe) {
+            m_offset.store(0, std::memory_order_relaxed);
+        } else {
+            // We don't overwrite the memory (that wastes CPU cycles). We just move the bump pointer back to the start. The next allocation will cleanly overwrite the old data.
+            m_offset = 0; 
+        }
     }
 
-    ENGINE_FORCE_INLINE void SetOffset(size_t targetOffset) noexcept { m_offset = targetOffset; }
+    // Only allow SetOffset on single-threaded arenas
+    ENGINE_FORCE_INLINE void SetOffset(size_t targetOffset) noexcept requires (!ThreadSafe) { 
+        m_offset = targetOffset; 
+    }
     
     // Telemetry
-    ENGINE_FORCE_INLINE size_t GetUsedMemory() const noexcept { return m_offset; }
+    ENGINE_FORCE_INLINE size_t GetUsedMemory() const noexcept { 
+        if constexpr (ThreadSafe) {
+            return m_offset.load(std::memory_order_relaxed);
+        } else {
+            return m_offset; 
+        }
+    }
+
     ENGINE_FORCE_INLINE size_t GetCapacity() const noexcept { return m_capacity; }
 };
+
+// --- LOCAL LINEAR ARENA (SINGLE-THREADED, SAFE TO MARK/RESET) ---
+using LocalLinearArena = LinearArena<false>;
+
+// --- CONCURRENT LINEAR ARENA (THREAD-SAFE, GLOBAL) ---
+using ConcurrentLinearArena = LinearArena<true>;
 
 // ==================================================================================
 // FRAME ALLOCATOR (DOUBLE / TRIPLE BUFFERING)
@@ -618,158 +759,6 @@ void RenderSystem::Update() {
     // Frame ends. We don't delete anything!
 }
 */
-
-// ==================================================================================
-// CONCURRENT LINEAR ARENA (THREAD-SAFE, GLOBAL)
-// ==================================================================================
-
-class ConcurrentLinearArena {
-private:
-    uint8_t* m_memory;                                        // The master pointer to our massive memory block
-    size_t   m_capacity;                                      // Total size of the arena in bytes
-
-    // Aligned to 64 bytes to prevent false sharing with other class members
-    alignas(ENGINE_CACHE_CHUNK_SIZE) std::atomic<size_t> m_offset;   // The bump pointer (how much we have used), thread-safe! 
-
-public:
-    // Ask the OS for a massive chunk of memory upfront, strictly aligned to 64 bytes (AVX-512 ready)
-    ConcurrentLinearArena(size_t sizeInBytes) : m_capacity(sizeInBytes), m_offset(0) {
-        // We use native aligned new to guarantee the master block starts on a cache line boundary
-        m_memory = static_cast<uint8_t*>(::operator new(sizeInBytes, std::align_val_t{64}));
-        
-        if (!m_memory) {
-            std::println(std::cerr, "[FATAL] OS Refused to allocate {} bytes for Arena!", sizeInBytes);
-            std::abort();
-        }
-        
-        std::println("[MEMORY] Initialized Concurrent Linear Arena: {:.2f} MB", (float)sizeInBytes / (1024.0f * 1024.0f));
-    }
-
-    ~ConcurrentLinearArena() {
-        ::operator delete(m_memory, m_capacity, std::align_val_t{64});
-    }
-
-    // Prevent copying (We don't want two objects thinking they own the same 1GB of RAM)
-    ConcurrentLinearArena(const ConcurrentLinearArena&) = delete;
-    ConcurrentLinearArena& operator=(const ConcurrentLinearArena&) = delete;
-
-    // --- BARE-METAL BUMP ALLOCATION --- Alignment is now a template parameter to unlock std::assume_aligned optimizations
-    template <typename T, size_t Align = alignof(T)>
-    [[nodiscard]] ENGINE_FORCE_INLINE T* Allocate(size_t count) {
-        static_assert((Align & (Align - 1)) == 0, "Alignment must be a power of 2");
-
-        #if ENGINE_HAS_CXX26_META_REFLECTION
-            // C++26 Reflection: Introspect the type at compile-time to get its string identifier
-            [[maybe_unused]] constexpr std::string_view typeName = std::meta::identifier_of(^T);
-        #endif 
-
-        size_t oldOffset = m_offset.load(std::memory_order_relaxed);
-        size_t padding, totalAllocationSize;
-
-        // Thread-Safe Aligned Allocation Loop
-        do {
-            // 1. Where are we currently in memory?
-            uintptr_t currentAddress = reinterpret_cast<uintptr_t>(m_memory + oldOffset);
-
-            // 2. Bitwise Alignment Calculation (No slow modulo arithmetic!)
-            // Formula pushes the address forward to the nearest multiple of the requested alignment.
-            padding = (Align - (currentAddress & (Align - 1))) & (Align - 1);
-            totalAllocationSize = padding + (count * sizeof(T));
-
-            // Warn if threads are hammering this for tiny allocations
-            if (totalAllocationSize < 65536) [[unlikely]] {
-                // In a real engine, send this to the telemetry system. 
-                // Threads should be asking for at least 64KB chunks to prevent cache-line bouncing.
-                std::println(std::cerr, "[BOUNCE] Thread Allocated Tiny Amount: {} bytes", totalAllocationSize);
-            }
-
-            // 3. Out of Memory Guard
-            if (oldOffset + totalAllocationSize > m_capacity) [[unlikely]] {
-                std::println(std::cerr, "[FATAL] ConcurrentLinearArena Exhausted! Capacity: {} bytes", m_capacity);
-                std::println(std::cerr, "{}", std::to_string(std::stacktrace::current()));
-                std::abort();
-            }
-        // Safely claim the memory block. If another thread beats us, loop and recalculate.
-        } while(!m_offset.compare_exchange_weak(
-            oldOffset, 
-            oldOffset + totalAllocationSize, 
-            std::memory_order_acq_rel,   // On Success: Ensure memory visibility across threads
-            std::memory_order_relaxed // On Failure: CPU is just looping, no sync needed
-        ));
-
-        // Now your telemetry subsystem knows exactly what is being allocated natively
-        #if ENGINE_ENABLE_MEMORY_PROFILING && ENGINE_HAS_CXX26_META_REFLECTION
-            MemoryProfiler::TrackAllocation(typeName, totalAllocationSize);
-        #endif
-        
-        // 4. Calculate the final aligned pointer
-        uintptr_t alignedAddress = reinterpret_cast<uintptr_t>(m_memory + oldOffset) + padding;
-
-        // C++20/26: Prove to the compiler that the memory boundary is safe for AVX
-        return std::assume_aligned<Align>(reinterpret_cast<T*>(alignedAddress));
-    }
-
-    // --- BARE-METAL ALLOCATION WITH SIMD CAPACITY PADDING ---
-    // simdWidth: 8 for AVX2 (float), 16 for AVX-512 (float)
-    template <typename T, size_t Align = alignof(T)>
-    [[nodiscard]] ENGINE_FORCE_INLINE T* AllocatePadded(size_t count, size_t simdWidthElements = 8) {
-        static_assert((Align & (Align - 1)) == 0, "Alignment must be a power of 2");
-
-        #if ENGINE_HAS_CXX26_META_REFLECTION
-            // C++26 Reflection: Introspect the type at compile-time to get its string identifier
-            [[maybe_unused]] constexpr std::string_view typeName = std::meta::identifier_of(^T);
-        #endif
-        
-        // 1. CAPACITY PADDING: Round the requested count UP to the nearest multiple of the SIMD width (e.g., 8 for AVX2), so it does not read past the end of the allocation preventing memory corruption.
-        // If count is 1021 and simdWidth is 8, paddedCount becomes 1024.
-        size_t paddedCount = (count + simdWidthElements - 1) & ~(simdWidthElements - 1);
-        size_t oldOffset = m_offset.load(std::memory_order_relaxed);
-        size_t padding, totalAllocationSize;
-
-        // MUST use CAS loop here as well to guarantee alignment safety
-        do {
-            // 2. Where are we currently in memory?
-            uintptr_t currentAddress = reinterpret_cast<uintptr_t>(m_memory + oldOffset);
-
-            // 3. Bitwise Alignment Calculation
-            padding = (Align - (currentAddress & (Align - 1))) & (Align - 1);
-            totalAllocationSize = padding + (paddedCount * sizeof(T)); // Use paddedCount!
-
-            // 4. Out of Memory Guard checks the reserved block
-            if (oldOffset + totalAllocationSize > m_capacity) [[unlikely]] {
-                std::println(std::cerr, "[FATAL] LinearArena Exhausted! Capacity: {} bytes", m_capacity);
-                std::println(std::cerr, "{}", std::to_string(std::stacktrace::current()));
-                std::abort();
-            }
-        } while (!m_offset.compare_exchange_weak(
-            oldOffset, 
-            oldOffset + totalAllocationSize, 
-            std::memory_order_acq_rel,   // On Success: Ensure memory visibility across threads
-            std::memory_order_relaxed    // On Failure: CPU is just looping, no sync needed
-        ));
-
-        // Now your telemetry subsystem knows exactly what is being allocated natively
-        #if ENGINE_ENABLE_MEMORY_PROFILING && ENGINE_HAS_CXX26_META_REFLECTION
-            MemoryProfiler::TrackAllocation(typeName, totalAllocationSize);
-        #endif
-
-        // 5. Calculate the final aligned pointer and bump the offset
-        uintptr_t alignedAddress = reinterpret_cast<uintptr_t>(m_memory + oldOffset) + padding;
-        T* result = std::assume_aligned<Align>(reinterpret_cast<T*>(alignedAddress));
-
-        // 6. ZERO-INITIALIZE THE GHOST ELEMENTS!
-        // This is strictly required so that SIMD math on the padded tail doesn't result in NaNs or subnormals.
-        for(size_t i = count; i < paddedCount; ++i) {
-            new (&result[i]) T(); // Placement new initializes to 0 / default constructor
-        }
-
-        return result;
-    }
-
-    // Telemetry
-    ENGINE_FORCE_INLINE size_t GetUsedMemory() const noexcept { return m_offset; }
-    ENGINE_FORCE_INLINE size_t GetCapacity() const noexcept { return m_capacity; }
-};
 
 // ==================================================================================
 // LOCAL POOL ALLOCATOR (O(1) BUMP-TO-POOL HYBRID)
@@ -1169,15 +1158,17 @@ public:
 // ==================================================================================
 // ARENA MARKER (TRANSIENT UNWINDING)
 // ==================================================================================
-
+template <bool ThreadSafe>
 class ArenaMarker {
+    static_assert(!ThreadSafe, "Fatal: You cannot mark and rewind a Concurrent Arena! Only Local Arenas are safe to rewind.");
+    
 private:
     // Restrict marking entirely to LocalLinearArena. Passing the global concurrent arena will now trigger a compile-time failure.
-    LocalLinearArena& m_arena;
+    LinearArena<ThreadSafe>& m_arena;
     size_t m_savedOffset;
 
 public:
-    ArenaMarker(LocalLinearArena& arena) : m_arena(arena), m_savedOffset(arena.GetUsedMemory()) {}
+    ArenaMarker(LinearArena<ThreadSafe>& arena) : m_arena(arena), m_savedOffset(arena.GetUsedMemory()) {}
     
     // Automatically unwind the memory when this object goes out of scope
     ~ArenaMarker() {
