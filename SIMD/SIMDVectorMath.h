@@ -482,7 +482,7 @@ namespace Engine::Physics {
     // Automatically sizes and aligns to the exact dimensions of the target CPU.
     struct alignas(NATIVE_SIMD_BATCH_ALIGN) PhysicsChunkNative {
         // tracks its own active lane count.
-        uint32_t activeCount = 0;
+        // uint32_t activeCount = 0;
 
         // CROSS-PLATFORM (ARM NEON: [4 lanes], AVX2: [8 lanes], AVX-512: [16 lanes])
         NativeFloatSIMDBatch velX;     
