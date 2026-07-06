@@ -1,8 +1,8 @@
 #pragma once
 
 #include "EntityComponentSystem.h"
-#include "PhysicsSystem.h"
-#include "SIMD/SIMDVectorMath.h"
+#include "../PhysicsSystem.h"
+#include "../SIMD/SIMDVectorMath.h"
 #include "../JobSystem.h"
 
 
