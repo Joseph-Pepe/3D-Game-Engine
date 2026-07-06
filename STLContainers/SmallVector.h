@@ -1,3 +1,52 @@
+#pragma once
+
+#include <cstddef>
+#include <memory>
+#include <type_traits>
+#include <iterator>
+#include <initializer_list>
+#include <algorithm>
+#include <ranges>
+#include <cstring>
+
+// --- ENGINE ASSERTION MACROS ---
+#ifndef ENGINE_ASSERT
+    #if defined(_MSC_VER)
+        #define ENGINE_ASSERT(condition) do { if (!(condition)) __debugbreak(); } while(false)
+    #elif defined(__clang__) || defined(__GNUC__)
+        #define ENGINE_ASSERT(condition) do { if (!(condition)) __builtin_trap(); } while(false)
+    #else
+        #include <cassert>
+        #define ENGINE_ASSERT(condition) assert((condition))
+    #endif
+#endif
+
+#if defined(_MSC_VER)
+    #define ENGINE_ASSUME(condition) __assume(condition)
+#elif defined(__clang__)
+    #define ENGINE_ASSUME(condition) __builtin_assume(condition)
+#elif defined(__GNUC__)
+    #define ENGINE_ASSUME(condition) do { if (!(condition)) __builtin_unreachable(); } while(false)
+#else
+    #define ENGINE_ASSUME(condition) do {} while(false)
+#endif
+
+// Detect Trivial Relocatability 
+#if defined(__clang__) || defined(__GNUC__)
+    #define ENGINE_IS_RELOCATABLE(T) __is_trivially_relocatable(T)
+#else
+    #define ENGINE_IS_RELOCATABLE(T) std::is_trivially_copyable_v<T>
+#endif
+
+// ================================
+// SMALL VECTOR OPTIMIZATION (SVO)
+// ================================
+/*
+    - Acts like a standard std::vector, but pre-allocates a fixed-size buffer directly on the stack (i.e., removes the cost of OS heap allocations for small workloads).
+    - If the number of entries stays below the predefined inline capacity, it behaves like an ultra-fast C-array.
+    - If the number of entries exceeds the capacity, it safely spills over and dynamically allocates memory on the heap, transforming it into a standard dynamic vector.
+*/
+
 namespace Engine::STLContainer {
 
     // Defaults to std::allocator, but perfectly accepts your custom AlignedAllocator
