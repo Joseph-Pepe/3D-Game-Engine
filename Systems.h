@@ -2,9 +2,8 @@
 
 #include "EntityComponentSystem.h"
 #include "PhysicsSystem.h"
-
-#include <cstdint>
-#include <immintrin.h>
+#include "SIMD/SIMDVectorMath.h"
+#include "../JobSystem.h"
 
 
 /* [Wire ECS]: Data separated from logic in Data Oriented Design.
@@ -39,70 +38,23 @@ int main() {
 }
 */
 
-// Only cares about pure, raw arrays of data.
-class PhysicsSystem {
-public:
-    // This is called once per frame from your main engine loop
-    void Update(std::vector<PhysicsChunk8>& chunks, float deltaTime) {
-        
-        // 1. BROADCAST DELTA TIME
-        // Load the single float 'deltaTime' into all 8 lanes of a 256-bit register.
-        // It looks like: [dt, dt, dt, dt, dt, dt, dt, dt]
-        __m256 dt = _mm256_set1_ps(deltaTime); // Broadcast delta time to all 8 lanes of a 256-bit register
+// ==================================================================================
+// THE SYSTEMS LAYER
+// ==================================================================================
 
-        // 2. ITERATE OVER THE CHUNKS
-        for (auto& chunk : chunks) {
-            
-            // Optimization: If the chunk is completely empty, skip it.
-            if (chunk.activeCount == 0) continue;
-
-            // 1. Load velocities directly into registers (Zero shuffling!)
-
-
-            // --- LOAD DATA FROM RAM INTO CPU REGISTERS ---
-            // _mm256_load_ps requires the memory to be 32-byte aligned (which we did above!)
-            // We are loading the X, Y, and Z velocities for 8 entities simultaneously.
-            __m256 vX = _mm256_load_ps(chunk.velX);
-            __m256 vY = _mm256_load_ps(chunk.velY);
-            __m256 vZ = _mm256_load_ps(chunk.velZ);
-
-            __m256 pX = _mm256_load_ps(chunk.posX);
-            __m256 pY = _mm256_load_ps(chunk.posY);
-            __m256 pZ = _mm256_load_ps(chunk.posZ);
-
-            // 2. Perform math on 8 entities simultaneously.
-
-            // --- PERFORM SIMD MATH (8 Entities at exactly the same time) ---
-            // _mm256_fmadd_ps does: (A * B) + C in a single CPU instruction (Fused Multiply-Add).
-            // Here we are doing: new_pos = (velocity * dt) + old_pos
-            pX = _mm256_fmadd_ps(vX, dt, pX);
-            pY = _mm256_fmadd_ps(vY, dt, pY);
-            pZ = _mm256_fmadd_ps(vZ, dt, pZ);
-
-            // --- STORE RESULTS BACK TO RAM ---
-            _mm256_store_ps(chunk.posX, pX);
-            _mm256_store_ps(chunk.posY, pY);
-            _mm256_store_ps(chunk.posZ, pZ);
-        }
-    }
-};
-
-// The System that bridges the ECS to the Silicon
-class ParticleSystem {
+class ParticlePhysicsSystem {
 public:
     void Update(ECS& ecs, float dt) {
-        // Grab the raw contiguous array directly
+        // 1. Query the ECS for all active Particle Emitters
         auto& emitters = ecs.GetDenseArray<ParticleEmitterComponent>();
         
-        // Grab the raw contiguous array of components
-        // Iterate ONLY over the active components. If there are 50 emitters, this loop runs exactly 50 times. Zero cache misses.
+        // 2. Iterate serially over the emitters (there are usually < 100 emitters)
         for (auto& emitter : emitters) {
-            if (!emitter.isAwake || !emitter.physicsEngine) continue;
+            if (!emitter.isAwake) continue;
 
-            // The ECS triggers the massive AVX2 Job-System integration!
-            emitter.physicsEngine->buildSpatialGridParallel(emitter.activeParticles);
-            emitter.physicsEngine->solveCollisions(emitter.activeParticles);
-            emitter.physicsEngine->integrate(dt, emitter.activeParticles, emitter.gravityPull);
+            // 3. The SIMD math handles its own Job System dispatching internally!
+            // We just pass the raw data block to the EngineTick.
+            Engine::Physics::EngineTick(emitter.memoryBlock, dt);
         }
     }
 };
@@ -110,20 +62,34 @@ public:
 class AISystem {
 public:
     void Update(ECS& ecs, float dt) {
-        auto& aiComponents = ecs.GetDenseArray<AIComponent>();
-        uint32_t activeAICount = static_cast<uint32_t>(aiComponents.size());
-
-        if (activeAICount == 0) return;
+        // In DOD, we don't have one big "AIComponent". 
+        // We split it into tight, cache-aligned data streams.
+        auto& aiPositions = ecs.GetDenseArray<PositionComponent>();
+        auto& aiTargets   = ecs.GetDenseArray<AITargetComponent>();
+        auto& aiStates    = ecs.GetDenseArray<AIStateComponent>();
+        
+        uint32_t count = static_cast<uint32_t>(aiPositions.size());
+        if (count == 0) return;
 
         // 1. Ask the Job System for threads
         uint32_t threadCount = g_JobSystem.nextWorkerId.load(std::memory_order_relaxed);
-        uint32_t chunkSize = std::max(64u, activeAICount / threadCount);
+        uint32_t chunkSize = std::max(64u, count / threadCount);
 
-        // 2. Multithread the entire AI logic step! Dispatch based on active component count, not max entities
-        g_JobSystem.DispatchAndWait(activeAICount, chunkSize, [&](uint32_t start, uint32_t end) {
+        // 2. Multithread the logic, keeping the data completely flat
+        g_JobSystem.DispatchAndWait(count, chunkSize, [&](uint32_t start, uint32_t end) {
+            
+            // The compiler will vectorize this loop because there are no function calls!
             for (uint32_t i = start; i < end; ++i) {
-                // Execute standard scalar C++ AI logic across all CPU cores...
-                aiComponents[i].ProcessState(dt);
+                // If the AI is not moving, skip it (Branchless math is better, but this is a simple example)
+                if (aiStates[i].state == AI_STATE_IDLE) continue;
+
+                // Simple scalar math (or use your ISAArch abstractions)
+                float dirX = aiTargets[i].targetX - aiPositions[i].x;
+                float dirY = aiTargets[i].targetY - aiPositions[i].y;
+                float dirZ = aiTargets[i].targetZ - aiPositions[i].z;
+
+                // Normalize and move (Pseudo-code)
+                // ...
             }
         });
     }
