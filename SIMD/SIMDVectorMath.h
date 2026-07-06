@@ -477,7 +477,20 @@ namespace Engine::Physics {
     constexpr std::size_t NATIVE_BATCH_SIZE = NativeFloatSIMDBatch::size();
 
     // Use this constant to dynamically align your memory allocators and structs! Ask exactly how many bytes the current hardware needs.
-    constexpr std::size_t NATIVE_SIMD_BATCH_ALIGN = alignof(NativeFloatSIMDBatch);     
+    constexpr std::size_t NATIVE_SIMD_BATCH_ALIGN = alignof(NativeFloatSIMDBatch);  
+    
+    // Automatically sizes and aligns to the exact dimensions of the target CPU.
+    struct alignas(NATIVE_SIMD_BATCH_ALIGN) PhysicsChunkNative {
+        NativeFloatSIMDBatch velX;
+        NativeFloatSIMDBatch velY;
+        NativeFloatSIMDBatch velZ;
+        NativeFloatSIMDBatch mass;
+        NativeFloatSIMDBatch friction;
+        
+        // CRITICAL SIMD RULE: Do not use 'bool' in AoSoA chunks! Bools break SIMD memory alignment. 
+        // Store them as float masks (1.0f = true, 0.0f = false) so you can instantly multiply physics results by the mask to freeze static objects.
+        NativeFloatSIMDBatch isStaticMask; 
+    };
 
     // ================================================================================
     // VECTOR3D STRUCTS (INTRINSICS)
@@ -694,42 +707,43 @@ namespace Engine::Physics {
         uint32_t particleIndex;
     };
 
+    // ===========================================
+    // ARRAY OF STRUCTS (AOS DATA)  
+    // ===========================================
+    /*
+        - Every element in this vector represents a BATCH of particles (4 on ARM, 8 on AVX2, 16 on AVX-512).
+        - Because SIMDVector3D is aligned to NATIVE_SIMD_BATCH_ALIGN, std::vector will perfectly pack these into sequential CPU cache lines.
+        - ENTITIES_PER_BATCH = ENTITIES_PER_CHUNK = (a multiple of the SIMD width) = (8 for AVX2)
+        - activeParticleCount = (number of entities in this chunk that are currently alive) = (0 to ENTITIES_PER_CHUNK) active entities per chunk (or batch) = (0 to 8)
+        - alignas(NATIVE_SIMD_BATCH_ALIGN) ensures the memory address is perfectly aligned for SIMD load/store instructions (for tightly packed arrays). 
+
+            // A single instance of this struct represents 8 discrete physical objects!
+            struct alignas(NATIVE_SIMD_BATCH_ALIGN) PhysicsChunk8 {
+                // Number of active entities in this specific chunk (0 to 8)
+                uint32_t activeCount = 0;
+
+                // --- Vector3D Position (8 entities) ---
+                alignas(NATIVE_SIMD_BATCH_ALIGN) float posX[ENTITIES_PER_CHUNK] = {0}; // AVX2: posX[8]
+                alignas(NATIVE_SIMD_BATCH_ALIGN) float posY[ENTITIES_PER_CHUNK] = {0}; // AVX2: posY[8]
+                alignas(NATIVE_SIMD_BATCH_ALIGN) float posZ[ENTITIES_PER_CHUNK] = {0}; // AVX2: posZ[8]
+
+                // --- Vector3D Velocity (8 entities) --- 
+                alignas(NATIVE_SIMD_BATCH_ALIGN) float velX[ENTITIES_PER_CHUNK] = {0}; // AVX2: velX[8]
+                alignas(NATIVE_SIMD_BATCH_ALIGN) float velY[ENTITIES_PER_CHUNK] = {0}; // AVX2: velY[8]
+                alignas(NATIVE_SIMD_BATCH_ALIGN) float velZ[ENTITIES_PER_CHUNK] = {0}; // AVX2: velZ[8]
+
+                // --- Additional Physics Data (8 entities) ---
+                alignas(NATIVE_SIMD_BATCH_ALIGN) float     mass[ENTITIES_PER_CHUNK] = {1.0f}; // AVX2:     mass[8]
+                alignas(NATIVE_SIMD_BATCH_ALIGN) float friction[ENTITIES_PER_CHUNK] = {0.5f}; // AVX2: friction[8]
+
+                // If an object is static, it shouldn't be in the physics chunk at all!
+                // Note: Booleans are terrible for SIMD! Instead use a bitmask to pack values.
+                alignas(NATIVE_SIMD_BATCH_ALIGN) bool isStatic[ENTITIES_PER_CHUNK] = {false}; // AVX2: isStatic[8]
+            }         
+    */
+
     // --- DATA-ORIENTED PARTICLE SYSTEM (AoSoA PIPELINE, Pure Data Container (No Logic)) ---
     struct ParticleMemoryBlock {
-        // ============================
-        // ARRAY OF STRUCTS (AOS DATA)  
-        // ============================
-        /*
-            - Every element in this vector represents a BATCH of particles (4 on ARM, 8 on AVX2, 16 on AVX-512).
-            - Because SIMDVector3D is aligned to NATIVE_SIMD_BATCH_ALIGN, std::vector will perfectly pack these into sequential CPU cache lines.
-            - ENTITIES_PER_BATCH = ENTITIES_PER_CHUNK = (a multiple of the SIMD width) = (8 for AVX2)
-            - activeParticleCount = (number of entities in this chunk that are currently alive) = (0 to ENTITIES_PER_CHUNK) active entities per chunk (or batch) = (0 to 8)
-            - alignas(NATIVE_SIMD_BATCH_ALIGN) ensures the memory address is perfectly aligned for SIMD load/store instructions (for tightly packed arrays). 
-
-              // A single instance of this struct represents 8 discrete physical objects!
-              struct PhysicsChunk8 {
-                  // Number of active entities in this specific chunk (0 to 8)
-                  uint32_t activeCount = 0;
-
-                  // --- Vector3D Position (8 entities) ---
-                  alignas(NATIVE_SIMD_BATCH_ALIGN) float posX[ENTITIES_PER_CHUNK] = {0}; // AVX2: posX[8]
-                  alignas(NATIVE_SIMD_BATCH_ALIGN) float posY[ENTITIES_PER_CHUNK] = {0}; // AVX2: posY[8]
-                  alignas(NATIVE_SIMD_BATCH_ALIGN) float posZ[ENTITIES_PER_CHUNK] = {0}; // AVX2: posZ[8]
-
-                  // --- Vector3D Velocity (8 entities) --- 
-                  alignas(NATIVE_SIMD_BATCH_ALIGN) float velX[ENTITIES_PER_CHUNK] = {0}; // AVX2: velX[8]
-                  alignas(NATIVE_SIMD_BATCH_ALIGN) float velY[ENTITIES_PER_CHUNK] = {0}; // AVX2: velY[8]
-                  alignas(NATIVE_SIMD_BATCH_ALIGN) float velZ[ENTITIES_PER_CHUNK] = {0}; // AVX2: velZ[8]
-
-                  // --- Additional Physics Data (8 entities) ---
-                  alignas(NATIVE_SIMD_BATCH_ALIGN) float     mass[ENTITIES_PER_CHUNK] = {1.0f}; // AVX2:     mass[8]
-                  alignas(NATIVE_SIMD_BATCH_ALIGN) float friction[ENTITIES_PER_CHUNK] = {0.5f}; // AVX2: friction[8]
-
-                  // If an object is static, it shouldn't be in the physics chunk at all!
-                  // Note: Booleans are terrible for SIMD! Instead use a bitmask to pack values.
-                  alignas(NATIVE_SIMD_BATCH_ALIGN) bool isStatic[ENTITIES_PER_CHUNK] = {false}; // AVX2: isStatic[8]
-              }         
-        */
 
         // InlineCapacity = 64 batches (e.g., 64 * 8 = 512 particles on AVX2, 64 * 16 = 1024 on AVX-512)
         Engine::STLContainer::small_vector<SIMDVector3D, 64, AlignedAllocator<SIMDVector3D, NATIVE_SIMD_BATCH_ALIGN>> positions;
