@@ -481,11 +481,12 @@ namespace Engine::Physics {
     
     // Automatically sizes and aligns to the exact dimensions of the target CPU.
     struct alignas(NATIVE_SIMD_BATCH_ALIGN) PhysicsChunkNative {
-        NativeFloatSIMDBatch velX;
-        NativeFloatSIMDBatch velY;
-        NativeFloatSIMDBatch velZ;
-        NativeFloatSIMDBatch mass;
-        NativeFloatSIMDBatch friction;
+        // CROSS-PLATFORM (ARM NEON: [4 lanes], AVX2: [8 lanes], AVX-512: [16 lanes])
+        NativeFloatSIMDBatch velX;     
+        NativeFloatSIMDBatch velY;     
+        NativeFloatSIMDBatch velZ;    
+        NativeFloatSIMDBatch mass;     
+        NativeFloatSIMDBatch friction; 
         
         // CRITICAL SIMD RULE: Do not use 'bool' in AoSoA chunks! Bools break SIMD memory alignment. 
         // Store them as float masks (1.0f = true, 0.0f = false) so you can instantly multiply physics results by the mask to freeze static objects.
