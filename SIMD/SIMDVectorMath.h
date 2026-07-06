@@ -3,6 +3,7 @@
 #include "SIMD/SIMDCustomWrapper.h"
 #include "../JobSystem.h"
 #include "../Memory.h"
+#include "../STLContainers/SmallVector.h"
 
 #include <vector>
 #include <execution>
@@ -697,11 +698,13 @@ namespace Engine::Physics {
     struct ParticleMemoryBlock {
         // Every element in this vector represents a BATCH of particles (4 on ARM, 8 on AVX2, 16 on AVX-512).
         // Because SIMDVector3D is aligned to NATIVE_SIMD_BATCH_ALIGN, std::vector will perfectly pack these into sequential CPU cache lines.
-        std::vector<SIMDVector3D> positions;
-        std::vector<SIMDVector3D> velocities;
+        // InlineCapacity = 64 batches (e.g., 512 particles on AVX2, 1024 on AVX-512)
+        Engine::STLContainer::small_vector<SIMDVector3D, 64, AlignedAllocator<SIMDVector3D, NATIVE_SIMD_BATCH_ALIGN>> positions;
+        Engine::STLContainer::small_vector<SIMDVector3D, 64, AlignedAllocator<SIMDVector3D, NATIVE_SIMD_BATCH_ALIGN>> velocities;
         
-        std::vector<ParticleSortKey> sortKeys;
-        std::vector<ParticleSortKey> sortKeysBuffer;  // Required for Radix Sort "Ping-Ponging"
+        // Sorting keys are scalars, so we allocate a proportionally larger inline capacity
+        Engine::STLContainer::small_vector<ParticleSortKey, 512> sortKeys;
+        Engine::STLContainer::small_vector<ParticleSortKey, 512> sortKeysBuffer;  // Required for Radix Sort "Ping-Ponging"
 
         // We track the exact number of active particles, not just the batch count.
         size_t activeParticleCount = 0;
@@ -711,12 +714,13 @@ namespace Engine::Physics {
             // Divide by the hardware's native batch size, rounding up.
             size_t batchCount = (maxParticles + NATIVE_BATCH_SIZE - 1) / NATIVE_BATCH_SIZE;
 
-            positions.resize(batchCount);
-            velocities.resize(batchCount);
+            // Use the uninitialized resize backdoor to guarantee zero-overhead allocation
+            positions.resize_uninitialized(batchCount);
+            velocities.resize_uninitialized(batchCount);
             
             // Keys are scalar, so we allocate exactly maxParticles
-            sortKeys.resize(maxParticles);
-            sortKeysBuffer.resize(maxParticles);
+            sortKeys.resize_uninitialized(maxParticles);
+            sortKeysBuffer.resize_uninitialized(maxParticles);
         }
     };
 
