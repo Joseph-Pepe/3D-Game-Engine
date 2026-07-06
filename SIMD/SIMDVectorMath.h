@@ -479,10 +479,20 @@ namespace Engine::Physics {
     // Use this constant to dynamically align your memory allocators and structs! Ask exactly how many bytes the current hardware needs.
     constexpr std::size_t NATIVE_SIMD_BATCH_ALIGN = alignof(NativeFloatSIMDBatch);  
     
+    // =====================
+    // CRITICAL SIMD RULES
+    // =====================
+    /*
+        - Byte boundary matters (i.e., incorrectly padding struct can effect performance).
+        - Do not use 'bool' in AoSoA chunks! Bools break SIMD memory alignment. 
+        - AVX2: Struct size is best to be 128-bytes.
+        - AVX512: Struct size is best to be 256-bytes.
+    */
+    
     // Automatically sizes and aligns to the exact dimensions of the target CPU.
     struct alignas(NATIVE_SIMD_BATCH_ALIGN) PhysicsChunkNative {
         // tracks its own active lane count.
-        // uint32_t activeCount = 0;
+        /* uint32_t activeCount = 0; */
 
         // CROSS-PLATFORM (ARM NEON: [4 lanes], AVX2: [8 lanes], AVX-512: [16 lanes])
         NativeFloatSIMDBatch velX;     
@@ -491,7 +501,6 @@ namespace Engine::Physics {
         NativeFloatSIMDBatch mass;     
         NativeFloatSIMDBatch friction; 
         
-        // CRITICAL SIMD RULE: Do not use 'bool' in AoSoA chunks! Bools break SIMD memory alignment. 
         // Store them as float masks (1.0f = true, 0.0f = false) so you can instantly multiply physics results by the mask to freeze static objects.
         NativeFloatSIMDBatch isStaticMask; 
     };
