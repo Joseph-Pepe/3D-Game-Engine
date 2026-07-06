@@ -729,25 +729,28 @@ namespace Engine::Physics {
                                       std::span<SIMDVector3D> velocities, 
                                       size_t activeCount, 
                                       float deltaTime) {
-        // 1. Broadcast the scalar delta time into a hardware SIMD register ONCE.                                  
-        NativeFloatSIMDBatch dtBatch = deltaTime; 
 
-        // 2. Iterate over the batches (NOT individual particles)
+        // 1. Broadcast the scalar delta time into a hardware SIMD register ONCE.   .
+        NativeFloatSIMDBatch dtBatch = deltaTime; // AVX2: [dt, dt, dt, dt, dt, dt, dt, dt], load the single float 'deltaTime' into all 8 lanes of a 256-bit register
+
+        // 2. Iterate over the batches (NOT individual particles) or chunk of particles.
         size_t activeBatches = (activeCount + NATIVE_BATCH_SIZE - 1) / NATIVE_BATCH_SIZE;
 
         // We can iterate directly over the span size up to the active batch count.
         for (size_t i = 0; i < activeBatches; ++i) {
             // 3. Load velocities into registers
-            NativeFloatSIMDBatch velX = velocities[i].x;
-            NativeFloatSIMDBatch velY = velocities[i].y;
-            NativeFloatSIMDBatch velZ = velocities[i].z;
+            NativeFloatSIMDBatch velX = velocities[i].x;   // AVX-512: __m512 velX = _mm512_load_ps(velocities[i].x); = vX
+            NativeFloatSIMDBatch velY = velocities[i].y;   // AVX-512: __m512 velY = _mm512_load_ps(velocities[i].y); = vY
+            NativeFloatSIMDBatch velZ = velocities[i].z;   // AVX-512: __m512 velZ = _mm512_load_ps(velocities[i].z); = vZ
+
+            // _mm512_fmadd_ps does: (A * B) + C in a single CPU instruction (Fused Multiply-Add).
 
             // 4. Calculate movement: Velocity * DeltaTime
             velX *= dtBatch;
             velY *= dtBatch;
             velZ *= dtBatch;
 
-            // 5. Apply Fused Multiply-Add (Position = Position + (Velocity * dt)),  maps to hardware vector addition.
+            // 5. Apply Fused Multiply-Add (New_Position = Old_Position + (Velocity * dt)), maps to hardware vector addition.
             positions[i].add(velX, velY, velZ);
 
             // Notice there are NO if-statements, NO branching, and NO function overhead.
