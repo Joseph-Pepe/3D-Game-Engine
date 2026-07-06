@@ -743,7 +743,7 @@ namespace Engine::Physics {
             NativeFloatSIMDBatch velY = velocities[i].y;   // AVX-512: __m512 velY = _mm512_load_ps(velocities[i].y); = vY
             NativeFloatSIMDBatch velZ = velocities[i].z;   // AVX-512: __m512 velZ = _mm512_load_ps(velocities[i].z); = vZ
 
-            // _mm512_fmadd_ps does: (A * B) + C in a single CPU instruction (Fused Multiply-Add).
+            // _mm512_fmadd_ps does: (A * B) + C in a single CPU instruction (Fused Multiply-Add) on 16 entities at the exact same time (i.e., simultaneously).
 
             // 4. Calculate movement: Velocity * DeltaTime
             velX *= dtBatch;
