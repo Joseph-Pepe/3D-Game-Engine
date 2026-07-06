@@ -6,6 +6,7 @@
 #include <iterator>
 #include <initializer_list>
 #include <algorithm>
+#include <ranges>
 #include <cstring>
 
 // --- ENGINE ASSERTION MACRO ---
@@ -326,6 +327,99 @@ namespace Engine::STLContainer {
             // Only call the destructor if the type actually needs it!
             if constexpr (!std::is_trivially_destructible_v<T>) {
                 std::destroy_at(&m_storage.m_data[m_size]);
+            }
+        }
+
+        // =====================================================================
+        // C++26 RANGES API (append_range & try_append_range)
+        // =====================================================================
+
+        // Standard C++26 append_range
+        template <std::ranges::input_range R>
+        requires std::convertible_to<std::ranges::range_reference_t<R>, T>
+        constexpr void append_range(R&& rg) {
+            if constexpr (std::ranges::sized_range<R> || std::ranges::forward_range<R>) {
+                size_type dist = static_cast<size_type>(std::ranges::distance(rg));
+                ENGINE_ASSERT(m_size + dist <= Capacity && "append_range overflow!");
+
+                // O(1) Block Memory Transfer for trivially copyable contiguous ranges
+                if constexpr (std::ranges::contiguous_range<R> && std::is_trivially_copyable_v<T>) {
+                    if !consteval {
+                        if (dist > 0) {
+                            std::memcpy(m_storage.m_data + m_size, std::ranges::data(rg), dist * sizeof(T));
+                            m_size += dist;
+                        }
+                        return;
+                    }
+                }
+                
+                // Fallback for non-trivial or constexpr evaluation
+                for (auto&& e : rg) {
+                    std::construct_at(&m_storage.m_data[m_size++], std::forward<decltype(e)>(e));
+                }
+            } else {
+                // Input iterators cannot be measured upfront, bounds check on every iteration
+                for (auto&& e : rg) {
+                    ENGINE_ASSERT(m_size < Capacity && "append_range overflow!");
+                    std::construct_at(&m_storage.m_data[m_size++], std::forward<decltype(e)>(e));
+                }
+            }
+        }
+
+        // Standard C++26 try_append_range (Safely fills to capacity, returns iterator of uninserted elements)
+        template <std::ranges::input_range R>
+        requires std::convertible_to<std::ranges::range_reference_t<R>, T>
+        [[nodiscard]] constexpr std::ranges::borrowed_iterator_t<R> try_append_range(R&& rg) noexcept {
+            auto it = std::ranges::begin(rg);
+            auto end = std::ranges::end(rg);
+            
+            if constexpr (std::ranges::contiguous_range<R> && std::is_trivially_copyable_v<T>) {
+                if !consteval {
+                    size_type remaining_capacity = Capacity - m_size;
+                    size_type dist = static_cast<size_type>(std::ranges::distance(rg));
+                    size_type to_copy = std::min(dist, remaining_capacity);
+                    
+                    if (to_copy > 0) {
+                        std::memcpy(m_storage.m_data + m_size, std::ranges::data(rg), to_copy * sizeof(T));
+                        m_size += to_copy;
+                        std::ranges::advance(it, to_copy);
+                    }
+                    return it; // Returns iterator pointing to the first rejected element
+                }
+            }
+            
+            while (it != end && m_size < Capacity) {
+                std::construct_at(&m_storage.m_data[m_size++], *it);
+                ++it;
+            }
+            return it;
+        }
+
+        // Engine Specific: Unchecked bulk append
+        template <std::ranges::input_range R>
+        requires std::convertible_to<std::ranges::range_reference_t<R>, T>
+        constexpr void unchecked_append_range(R&& rg) noexcept {
+            if constexpr (std::ranges::sized_range<R> || std::ranges::forward_range<R>) {
+                size_type dist = static_cast<size_type>(std::ranges::distance(rg));
+                ENGINE_ASSUME(m_size + dist <= Capacity);
+
+                if constexpr (std::ranges::contiguous_range<R> && std::is_trivially_copyable_v<T>) {
+                    if !consteval {
+                        if (dist > 0) {
+                            std::memcpy(m_storage.m_data + m_size, std::ranges::data(rg), dist * sizeof(T));
+                            m_size += dist;
+                        }
+                        return;
+                    }
+                }
+                for (auto&& e : rg) {
+                    std::construct_at(&m_storage.m_data[m_size++], std::forward<decltype(e)>(e));
+                }
+            } else {
+                for (auto&& e : rg) {
+                    ENGINE_ASSUME(m_size < Capacity);
+                    std::construct_at(&m_storage.m_data[m_size++], std::forward<decltype(e)>(e));
+                }
             }
         }
 
