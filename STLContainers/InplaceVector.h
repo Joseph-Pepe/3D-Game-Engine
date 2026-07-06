@@ -73,7 +73,7 @@ namespace Engine::STLContainer {
             struct EmptyState {} m_empty; // Active member initially (empty state)
             T m_data[Capacity];
 
-            constexpr Storage() : m_buffer{} {}
+            constexpr Storage() : m_empty{} {}
             constexpr ~Storage() {} // Destruction handled manually by inplace_vector
         };
 
@@ -255,30 +255,38 @@ namespace Engine::STLContainer {
         // =====================================================================
 
         // Standard safe push
-        constexpr void push_back(const T& value) {
+        constexpr reference push_back(const T& value) {
             ENGINE_ASSERT(m_size < Capacity && "inplace_vector overflow, capacity exceeded!");
             // std::construct_at is a C++20 requirement for constexpr dynamic object creation
             std::construct_at(&m_storage.m_data[m_size], value);
-            return m_storage.m_data[m_size++];
+            reference ref = m_storage.m_data[m_size]; // Cache reference
+            ++m_size;                                 // Increment safely
+            return ref;
         }
 
-        constexpr void push_back(T&& value) {
+        constexpr reference push_back(T&& value) {
             ENGINE_ASSERT(m_size < Capacity && "inplace_vector overflow, capacity exceeded!");
             std::construct_at(&m_storage.m_data[m_size], std::move(value));
-            return m_storage.m_data[m_size++];
+            reference ref = m_storage.m_data[m_size]; // Cache reference
+            ++m_size;                                 // Increment safely
+            return ref;
         }
 
         // C++26 standard: try_push_back (Safe boundary testing without assertions)
         [[nodiscard]] constexpr pointer try_push_back(const T& value) noexcept {
             if (m_size >= Capacity) [[unlikely]] return nullptr;
             std::construct_at(&m_storage.m_data[m_size], value);
-            return &m_storage.m_data[m_size++];
+            pointer ptr = &m_storage.m_data[m_size]; // Cache pointer
+            ++m_size;                                // Increment safely
+            return ptr;
         }
 
         [[nodiscard]] constexpr pointer try_push_back(T&& value) noexcept {
             if (m_size >= Capacity) [[unlikely]] return nullptr;
             std::construct_at(&m_storage.m_data[m_size], std::move(value));
-            return &m_storage.m_data[m_size++];
+            pointer ptr = &m_storage.m_data[m_size]; // Cache pointer
+            ++m_size;                                // Increment safely
+            return ptr;
         }
 
         // =====================================================================
@@ -286,24 +294,30 @@ namespace Engine::STLContainer {
         // =====================================================================
         // When your physics loop guarantees it will only ever process N elements, bounds checking is wasted CPU cycles. These bypass the assert completely and force the compiler to drop all branching logic.
         // High-performance bypass: Guarantees compiler auto-vectorization
-        constexpr void unchecked_push_back(const T& value) {
+        constexpr reference unchecked_push_back(const T& value) {
             // The auto-vectorizer will completely strip bounds-checking branches from this loop!
             ENGINE_ASSUME(m_size < Capacity);
             std::construct_at(&m_storage.m_data[m_size], value);
-            return m_storage.m_data[m_size++];
+            reference ref = m_storage.m_data[m_size]; // Cache reference
+            ++m_size;                                 // Increment safely
+            return ref;
         }
 
-        constexpr void unchecked_push_back(T&& value) {
+        constexpr reference unchecked_push_back(T&& value) {
             ENGINE_ASSUME(m_size < Capacity);
             std::construct_at(&m_storage.m_data[m_size], std::move(value));
-            return m_storage.m_data[m_size++];
+            reference ref = m_storage.m_data[m_size]; // Cache reference
+            ++m_size;                                 // Increment safely
+            return ref;
         }
 
         template <typename... Args>
         constexpr reference emplace_back(Args&&... args) {
             ENGINE_ASSERT(m_size < Capacity && "inplace_vector overflow, capacity exceeded!");
             std::construct_at(&m_storage.m_data[m_size], std::forward<Args>(args)...);
-            return m_storage.m_data[m_size++];
+            reference ref = m_storage.m_data[m_size]; // Cache reference
+            ++m_size;                                 // Increment safely
+            return ref;
         }
 
         constexpr void pop_back() noexcept {
