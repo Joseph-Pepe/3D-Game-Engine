@@ -105,9 +105,9 @@ public:
                 // Length squared (fused multiply-add if compiler is smart)
                 float lengthSq = (dirX * dirX) + (dirY * dirY) + (dirZ * dirZ);
 
-                // Fast Inverse Square Root (auto-vectorizes to rsqrt_ps)
-                // We add a tiny epsilon to prevent division by zero without using an 'if' statement!
-                float invLength = 1.0f / std::sqrt(lengthSq + 1e-8f);
+                // Fast Inverse Square Root (auto-vectorizes to rsqrt_ps), We add a tiny epsilon to prevent division by zero without using an 'if' statement!
+                // Force the hardware to emit the fast rsqrt instruction (e.g., _mm256_rsqrt_ps)
+                float invLength = Engine::ISAArch::rsqrt(lengthSq + 1e-8f);
 
                 // Normalize and apply speed
                 float moveX = dirX * invLength * aiMovement[i].speed * dt;
