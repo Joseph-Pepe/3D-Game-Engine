@@ -10,6 +10,28 @@
 #include <bit>         // Required for std::bit_cast
 
 // ==================================================================================
+// FAST MATH UTILITIES
+// ==================================================================================
+
+// --- AVX2 FAST HORIZONTAL SUM ---
+// Folds an 8-wide __m256 register down to a single scalar float inside the silicon registers without touching memory.
+FORCE_INLINE float hsum_avx2(__m256 v) {
+    // 1. Split the 256-bit register into two 128-bit halves and add them
+    __m128 hi = _mm256_extractf128_ps(v, 1);
+    __m128 lo = _mm256_castps256_ps128(v);
+    lo = _mm_add_ps(lo, hi);
+
+    // 2. Collapse the remaining 4 floats down to 1 (Standard SSE shuffle reduction)
+    hi = _mm_movehl_ps(hi, lo);
+    lo = _mm_add_ps(lo, hi);
+    hi = _mm_shuffle_ps(lo, lo, _MM_SHUFFLE(1, 1, 1, 1));
+    lo = _mm_add_ps(lo, hi);
+
+    // 3. Extract the final single float
+    return _mm_cvtss_f32(lo);
+}
+
+// ==================================================================================
 // SSE Accelerated Vectors 
 // ==================================================================================
 /*  
