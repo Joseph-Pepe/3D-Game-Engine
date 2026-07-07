@@ -301,7 +301,7 @@ struct ArchetypeChunk {
     Engine::STLContainer::small_vector<Entity, ENTITIES_PER_CHUNK> entities;   
     
     // 1. ONE single contiguous heap allocation for the entire chunk (and is guaranteed to be aligned for AVX2/AVX-512).
-    std::vector<std::byte, /*Engine::Memory::AlignedAllocator*/ AlignedAllocator<std::byte, Engine::ISAArch::NATIVE_SIMD_BATCH_ALIGN>> rawMemory;
+    std::vector<std::byte, /*Engine::Memory::AlignedAllocator*/ AlignedAllocator<std::byte, Engine::Physics::NATIVE_SIMD_BATCH_ALIGN>> rawMemory;
     
     // Type-erased memory for the components. 
     // 2. Zero-cost views into the flat memory block for each component type
@@ -463,7 +463,7 @@ private:
     struct SparseStorage {
         // DENSE ARRAYS: Automatically aligned for SIMD! The actual packed data.
         std::tuple<std::vector<typename ComponentStorageTrait<Types>::StorageType::value_type, 
-                   /*Engine::Memory::AlignedAllocator*/AlignedAllocator<typename ComponentStorageTrait<Types>::StorageType::value_type, Engine::ISAArch::NATIVE_SIMD_BATCH_ALIGN>>...> denseArrays;
+                   /*Engine::Memory::AlignedAllocator*/AlignedAllocator<typename ComponentStorageTrait<Types>::StorageType::value_type, Engine::Physics::NATIVE_SIMD_BATCH_ALIGN>>...> denseArrays;
         
         // 2. SPARSE ARRAYS: Maps Entity ID -> logical dense index (0, 1, 2, 3...), [if an entity doesn't have the component, its value is -1].
         std::tuple<std::vector<uint32_t>...> sparseArrays;
