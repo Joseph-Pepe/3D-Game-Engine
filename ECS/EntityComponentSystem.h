@@ -170,17 +170,23 @@ using SparseComponentRegistry = std::tuple<
 // Distinct compile-time ID generators
 template <typename T>
 constexpr uint32_t GetGlobalComponentID() {
-    return static_cast<uint32_t>(ComponentIndex<T, GlobalComponentRegistry>::value);
+    constexpr std::size_t idx = ComponentIndex<T, GlobalComponentRegistry>::value;
+    
+    // If you forget to register a component, the compiler will now halt and print this exact message!
+    static_assert(idx != static_cast<std::size_t>(-1), 
+        "CRITICAL ERROR: Component type is not registered in GlobalComponentRegistry!");
+        
+    return static_cast<uint32_t>(idx); // return static_cast<uint32_t>(ComponentIndex<T, GlobalComponentRegistry>::value);
 }
 
 template <typename T>
 constexpr uint32_t GetSparseComponentID() {
-    return static_cast<uint32_t>(ComponentIndex<T, SparseComponentRegistry>::value);
-}
-
-template <typename T>
-constexpr uint32_t GetComponentID() {
-    return static_cast<uint32_t>(ComponentIndex<T, ComponentRegistry>::value);
+    constexpr std::size_t idx = ComponentIndex<T, SparseComponentRegistry>::value;
+    
+    static_assert(idx != static_cast<std::size_t>(-1), 
+        "CRITICAL ERROR: Component type is not registered in SparseComponentRegistry!");
+        
+    return static_cast<uint32_t>(idx); // return static_cast<uint32_t>(ComponentIndex<T, SparseComponentRegistry>::value);
 }
 
 // ==================================================================================
