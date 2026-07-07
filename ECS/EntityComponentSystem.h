@@ -874,6 +874,13 @@ public:
     }
 
     template <typename T>
+    auto& GetSparseDenseArray() {
+        static_assert(ComponentTrait<T>::backend == StorageBackend::SparseSet, "Only for sparse sets.");
+        constexpr uint32_t sparseID = GetSparseComponentID<T>();
+        return std::get<sparseID>(sparseManager.denseArrays);
+    }
+
+    template <typename T>
     bool HasComponent(Entity e) {
         if constexpr (ComponentTrait<T>::backend == StorageBackend::Archetype) {
             constexpr uint32_t globalID = GetGlobalComponentID<T>(); // Use Global ID
