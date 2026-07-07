@@ -630,12 +630,8 @@ private:
         if (destArchetype->chunks.empty() || destArchetype->chunks.back().activeCount == ENTITIES_PER_CHUNK) {
             ArchetypeChunk newChunk;
             
+            // This function handles resizing rawMemory AND populating componentBuffers for every component type in this archetype
             newChunk.AllocateFlatMemory(destArchetype->componentStrides);
-            
-            // Allocate contiguous byte buffers for every component type in this archetype
-            for (size_t stride : destArchetype->componentStrides) {
-                newChunk.componentBuffers.emplace_back(stride * ENTITIES_PER_CHUNK);
-            }
             destArchetype->chunks.push_back(std::move(newChunk));
         }
 
