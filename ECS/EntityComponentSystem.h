@@ -49,13 +49,13 @@
 // No macros, no inheritance, just pure Plain Old Data (POD) structs.
 
 struct TransformComponent {
-    Vector3DScalar position{0.0f, 0.0f, 0.0f};
-    Vector3DScalar rotation{0.0f, 0.0f, 0.0f};
-    Vector3DScalar scale{1.0f, 1.0f, 1.0f};
+    Vector3D position{0.0f, 0.0f, 0.0f};
+    Vector3D rotation{0.0f, 0.0f, 0.0f};
+    Vector3D scale{1.0f, 1.0f, 1.0f};
 };
 
 struct PhysicsComponent {
-    Vector3DScalar velocity{0.0f, 0.0f, 0.0f};
+    Vector3D velocity{0.0f, 0.0f, 0.0f};
     float mass = 1.0f;
     float friction = 0.5f;
     bool isStatic = false;
@@ -112,7 +112,7 @@ void DrawComponentUI(T& component, const char* componentName) {
                 else if constexpr (member_type == ^bool) {
                     ImGui::Checkbox(name.data(), &value);
                 }
-                else if constexpr (member_type == ^Vector3DScalar) {
+                else if constexpr (member_type == ^Vector3D) {
                     // Because ImGui expects a float[3], we can safely cast our POD struct
                     ImGui::DragFloat3(name.data(), &value.x, 0.1f);
                 }
@@ -148,8 +148,8 @@ struct ComponentIndex<T, std::tuple<Types...>> {
     }();
 };
 
-struct PositionComponent { float x, y, z; };
-struct AITargetComponent { float targetX, targetY, targetZ; };
+struct PositionComponent { Vector3D pos; };
+struct AITargetComponent { Vector3D target; };
 struct AIMovementComponent { float speed; };
 
 // 1. The Global Master List (Used for the 64-bit Archetype Graph Mask)! Register all components in this tuple.
