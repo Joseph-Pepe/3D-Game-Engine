@@ -9,6 +9,15 @@
 #include <algorithm>   // Required for std::min, std::copy, std::swap
 #include <bit>         // Required for std::bit_cast
 
+// --- COMPILER MACROS ---
+#ifndef FORCE_INLINE
+    #ifdef _MSC_VER
+        #define FORCE_INLINE __forceinline
+    #else
+        #define FORCE_INLINE inline __attribute__((always_inline))
+    #endif
+#endif
+
 // ==================================================================================
 // FAST MATH UTILITIES
 // ==================================================================================
