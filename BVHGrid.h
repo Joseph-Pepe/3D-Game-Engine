@@ -90,7 +90,7 @@ struct Ray {
         invDirection = SIMDVector3D(
             1.0f / (std::abs(d.x()) < epsilon ? epsilon : d.x()),
             1.0f / (std::abs(d.y()) < epsilon ? epsilon : d.y()),
-            1.0f / (std::abs(d.z()) < epsilon ? epsilon : d.z()),
+            1.0f / (std::abs(d.z()) < epsilon ? epsilon : d.z())
         );
     }
 };
