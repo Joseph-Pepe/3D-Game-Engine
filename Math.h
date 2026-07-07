@@ -640,9 +640,10 @@ struct Vector3DWorld {
 // ==================================================================================
 // AXIS-ALIGNED BOUNDING BOX (AABB)
 // ==================================================================================
+// Every mesh needs an invisible box around it. When the engine calculates collisions or checks if an object is visible, it does not check all 10,000 vertices of a 3D model. It checks the 8 corners of an AABB.
 struct alignas(32) AABBMath {
-    SIMDVector3D minBounds; 
-    SIMDVector3D maxBounds; 
+    SIMDVector3D minBounds;     // Bottom-Left-Back corner
+    SIMDVector3D maxBounds;     // Top-Right-Front corner
 
     // --- HARDWARE INTERSECTION TEST (CROSS-PLATFORM 100% SIMD) ---
     // Returns true if this box is overlapping with another box
@@ -650,8 +651,8 @@ struct alignas(32) AABBMath {
         using namespace Engine::Math::SIMD;
 
         // --- ARM NEON (Apple Silicon / Mobile) INTEL / AMD (SSE/AVX) ---
-        Float4 maxGTmin = CmpGt(maxBounds.reg, other.minBounds.reg);      // a.max > b.min AND a.min < b.max
-        Float4 minLTmax = CmpLt(minBounds.reg, other.maxBounds.reg);
+        Float4 maxGTmin = CmpGt(maxBounds.reg, other.minBounds.reg);      // a.max > b.min
+        Float4 minLTmax = CmpLt(minBounds.reg, other.maxBounds.reg);      // a.min < b.max
 
         // Combine the results. If all lanes (X,Y,Z) are true, they intersect.
         Float4 result = BitwiseAnd(maxGTmin, minLTmax);
