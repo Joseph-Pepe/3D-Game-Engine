@@ -143,6 +143,10 @@ struct ComponentIndex<T, std::tuple<Types...>> {
     }();
 };
 
+struct PositionComponent { float x, y, z; };
+struct AITargetComponent { float targetX, targetY, targetZ; };
+struct AIMovementComponent { float speed; };
+
 // 1. The Global Master List (Used for the 64-bit Archetype Graph Mask)
 using GlobalComponentRegistry = std::tuple<
     TransformComponent, 
@@ -156,7 +160,14 @@ using SparseComponentRegistry = std::tuple<
 >;
 
 // 2. Register it in the Master Tuple
-using ComponentRegistry = std::tuple<TransformComponent, PhysicsComponent, ParticleEmitterComponent>;
+using ComponentRegistry = std::tuple<
+    TransformComponent, 
+    PhysicsComponent, 
+    ParticleEmitterComponent,
+    PositionComponent,
+    AITargetComponent,
+    AIMovementComponent
+>;
 
 // Distinct compile-time ID generators
 template <typename T>
@@ -337,15 +348,24 @@ public:
         : signature(sig), componentIDs(ids), componentStrides(strides) {}
 };
 
+// ==================================================================================
+// ARCHETYPE LAYOUT GENERATOR
+// ==================================================================================
+template <typename... Types>
+constexpr auto GenerateComponentStrideTable(std::tuple<Types...>) {
+    // Creates a compile-time array where Index == ComponentID, Value == Size in Bytes
+    return std::array<size_t, sizeof...(Types)>{
+        sizeof(typename ComponentStorageTrait<Types>::StorageType::value_type)...
+    };
+}
+
+// Global static table of exact memory sizes for every Archetype component
+constexpr auto GlobalComponentStrides = GenerateComponentStrideTable(GlobalComponentRegistry{});
 
 class ArchetypeManager {
 private:
     // Owns the memory of all unique archetypes in the engine
     std::vector<std::unique_ptr<Archetype>> allArchetypes;
-    
-    // Flat arrays guarantee data is stored contiguously.
-    std::vector<ComponentMask> directoryKeys;
-    std::vector<Archetype*> directoryValues;
 
     // Archetype based on a bitmask signature used to search and append to flat vectors.
     Archetype* GetOrCreateArchetype(ComponentMask targetSignature) {
@@ -358,7 +378,17 @@ private:
         auto newArchetype = std::make_unique<Archetype>(targetSignature);
         Archetype* ptr = newArchetype.get();
         
-        // (You would initialize componentIDs and Strides here based on the mask)
+        // --- THE CRITICAL FIX: POPULATE THE METADATA ---
+        // Iterate through all 64 possible component bits (initialize componentIDs and Strides here based on the mask)
+        for (uint32_t compID = 0; compID < MAX_COMPONENTS; ++compID) {
+            // If the bit for this component is flipped to 1...
+            if ((targetSignature & (1ULL << compID)) != 0) {
+                ptr->componentIDs.push_back(compID);
+                
+                // Pull the exact byte size from our constexpr lookup table
+                ptr->componentStrides.push_back(GlobalComponentStrides[compID]); 
+            }
+        }
         
         // 3. Register in our flat directory arrays
         directoryKeys.push_back(targetSignature);
@@ -370,6 +400,10 @@ private:
     }
 
 public:
+    // Flat arrays guarantee data is stored contiguously.
+    std::vector<ComponentMask> directoryKeys;
+    std::vector<Archetype*> directoryValues;
+
     ArchetypeManager() {
         // Always create the "Empty" archetype (Entity with no components) at boot
         GetOrCreateArchetype(0);
@@ -433,10 +467,11 @@ private:
         
         // [...]: C++26 Pack Indexing allows us to auto-generate vectors for every component in the tuple.
         SparseStorage() {
-            auto init_sparse = []<std::size_t... I>(std::tuple<std::vector<uint32_t>...>& tup, std::index_sequence<I...>) {
-                (std::get<I>(tup).resize(MAX_ENTITIES, static_cast<uint32_t>(-1)), ...);
+            auto init_sparse = [&]<std::size_t... I>(std::index_sequence<I...>) {
+                // Fold expression safely resizes every vector in the tuple
+                (std::get<I>(sparseArrays).resize(MAX_ENTITIES, static_cast<uint32_t>(-1)), ...);
             };
-            init_sparse(sparseArrays, std::index_sequence_for<Types...>{});
+            init_sparse(std::index_sequence_for<Types...>{});
         }
     };
 
@@ -584,6 +619,8 @@ private:
         // 1. If we have no chunks, or the last chunk is full, allocate a new memory block
         if (destArchetype->chunks.empty() || destArchetype->chunks.back().activeCount == ENTITIES_PER_CHUNK) {
             ArchetypeChunk newChunk;
+            
+            newChunk.AllocateFlatMemory(destArchetype->componentStrides);
             
             // Allocate contiguous byte buffers for every component type in this archetype
             for (size_t stride : destArchetype->componentStrides) {
