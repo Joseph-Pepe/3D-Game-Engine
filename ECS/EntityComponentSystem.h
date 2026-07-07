@@ -250,11 +250,28 @@ struct ComponentTrait {
 // Specialize your heavy SIMD components to force them into the Archetype Graph
 template <> 
 struct ComponentTrait<TransformComponent> {
+    // Forces it into the the Archetype Graph.
     static constexpr StorageBackend backend = StorageBackend::Archetype;
 };
 
 template <> 
 struct ComponentTrait<PhysicsComponent> {
+    static constexpr StorageBackend backend = StorageBackend::Archetype;
+};
+
+// --- ADD THESE THREE SPECIALIZATIONS ---
+template <> 
+struct ComponentTrait<PositionComponent> {
+    static constexpr StorageBackend backend = StorageBackend::Archetype;
+};
+
+template <> 
+struct ComponentTrait<AITargetComponent> {
+    static constexpr StorageBackend backend = StorageBackend::Archetype;
+};
+
+template <> 
+struct ComponentTrait<AIMovementComponent> {
     static constexpr StorageBackend backend = StorageBackend::Archetype;
 };
 
