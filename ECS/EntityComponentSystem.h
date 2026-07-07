@@ -152,26 +152,19 @@ struct PositionComponent { float x, y, z; };
 struct AITargetComponent { float targetX, targetY, targetZ; };
 struct AIMovementComponent { float speed; };
 
-// 1. The Global Master List (Used for the 64-bit Archetype Graph Mask)
+// 1. The Global Master List (Used for the 64-bit Archetype Graph Mask)! Register all components in this tuple.
 using GlobalComponentRegistry = std::tuple<
-    TransformComponent, 
-    PhysicsComponent, 
-    ParticleEmitterComponent
->;
-
-// 2. The Sparse List (Used ONLY for instantiating std::vector arrays)
-using SparseComponentRegistry = std::tuple<
-    ParticleEmitterComponent 
->;
-
-// 2. Register it in the Master Tuple
-using ComponentRegistry = std::tuple<
     TransformComponent, 
     PhysicsComponent, 
     ParticleEmitterComponent,
     PositionComponent,
     AITargetComponent,
     AIMovementComponent
+>;
+
+// 2. The Sparse List (Used ONLY for instantiating std::vector arrays)
+using SparseComponentRegistry = std::tuple<
+    ParticleEmitterComponent 
 >;
 
 // Distinct compile-time ID generators
