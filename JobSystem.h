@@ -517,14 +517,13 @@ private:
     // C++20: Atomic Futex for lock-free sleeping
     alignas(CACHE_CHUNK_SIZE) std::atomic<uint32_t> wakeSignal{0};
     
-    // ISOLATED: Written frequently as threads sleep/wake.
-    // We pad based on the target hardware (by ensuring the next variable is aligned) 
-    // to guarantee it lives completely alone.
+    // Written frequently as threads sleep/wake. We pad based on the target hardware (by ensuring the next variable is aligned) to guarantee it lives completely alone.
     alignas(CACHE_CHUNK_SIZE) std::atomic<int> sleepingThreads{0};
 
     // --- GLOBAL FIBER POOL ---
     // Pre-allocated storage for the actual fibers
     std::vector<std::unique_ptr<FiberJob>> fiberStorage;
+
     // Spinlock-protected vector of ready-to-use fibers
     alignas(CACHE_CHUNK_SIZE) std::atomic_flag fiberPoolLock = ATOMIC_FLAG_INIT;
     std::vector<FiberJob*> freeFibers;
@@ -545,8 +544,7 @@ private:
             // ==========================================
             // WE ARE BACK (THE HANDOFF PHASE)
             // ==========================================
-            // The fiber's OS context switch is 100% complete. 
-            // It is now physically impossible to trigger a race condition on this fiber.
+            // The fiber's OS context switch is 100% complete. It is now physically impossible to trigger a race condition on this fiber.
             tl_currentFiber = nullptr;
 
             // 1. Copy the mailbox locally and clear it for the next execution
@@ -574,8 +572,7 @@ private:
             }
         } else { 
             // --- Stackless Coroutine Logic ---
-            // PREFETCH THE COROUTINE FRAME!
-            // Triggers the MESI transfer across the CPU cores in the background before the pipeline hits the indirect jump.
+            // PREFETCH THE COROUTINE FRAME! Triggers the MESI transfer across the CPU cores in the background before the pipeline hits the indirect jump.
             _mm_prefetch((const char*)job, _MM_HINT_T0);
 
             // It's a Stackless Coroutine! 
@@ -599,7 +596,7 @@ private:
     
 public:
     std::vector<std::unique_ptr<WorkStealingQueue<8192>>> queues;
-    // ISOLATED: Read heavily by new threads.
+    // Read heavily by new threads.
     alignas(CACHE_CHUNK_SIZE) std::atomic<uint32_t> nextWorkerId{0};
     uint32_t maxQueues;
 
@@ -619,9 +616,7 @@ public:
         // Optional: If the fiber wants the worker to immediately push a continuation
         void* nextTaskToPush = nullptr; 
 
-        // CRITICAL: The Post-Suspend Callback
-        // If the fiber yielded to wait on a Mutex or Async IO, it CANNOT add itself to 
-        // the Mutex/IO wait queue until its OS context switch is completely finished.
+        // The Post-Suspend Callback. If the fiber yielded to wait on a Mutex or Async IO, it CANNOT add itself to the Mutex/IO wait queue until its OS context switch is completely finished.
         // We pass a function pointer here that the Main Worker will execute safely.
         void (*onSuspendCallback)(FiberJob* yieldingFiber, void* payload) = nullptr;
         void* suspendPayload = nullptr;
@@ -633,7 +628,10 @@ public:
     inline static thread_local FiberJob* tl_currentFiber = nullptr;
     inline static thread_local FiberHandoff tl_handoff;
 
-    JobSystem() {
+    JobSystem() = default; // Does absolutely nothing. Safe for global static init.
+
+    // Query hardware threads, allocate queues, spawn worker threads (allows us to control the exact boot order, but retain the zero-indirection speed!)
+    Initialize() {
         uint32_t hwThreads = std::thread::hardware_concurrency();
 
         if (hwThreads == 0) hwThreads = 4; // Safe fallback if OS lies to us
@@ -843,6 +841,13 @@ public:
             });
         }
     }
+
+    // Allows us to control the exact boot order in main() instead of letting the C++ runtime autoboot the system, but retain the zero-indirection speed!
+    /*
+        g_MemoryManager.Initialize();
+        g_JobSystem.Initialize(); 
+        g_ECS.Initialize();
+    */
 
     ~JobSystem() {
         // 1. Set the flag first
