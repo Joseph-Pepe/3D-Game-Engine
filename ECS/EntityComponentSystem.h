@@ -280,7 +280,7 @@ using Entity = uint32_t;
 
 // Max unique component types in the engine
 constexpr uint32_t MAX_COMPONENTS = 64;
-constexpr Entity MAX_ENTITIES = 100000;
+constexpr Entity MAX_ENTITIES = 500'000;
 constexpr uint32_t ENTITIES_PER_CHUNK = 1024;
 
 // The central map for every alive entity
@@ -632,6 +632,8 @@ private:
             
             // This function handles resizing rawMemory AND populating componentBuffers for every component type in this archetype
             newChunk.AllocateFlatMemory(destArchetype->componentStrides);
+            newChunk.entities.resize_uninitialized(ENTITIES_PER_CHUNK);    // Ensure the reverse-lookup array is sized so we can write to it safely
+
             destArchetype->chunks.push_back(std::move(newChunk));
         }
 
