@@ -631,7 +631,7 @@ public:
     JobSystem() = default; // Does absolutely nothing. Safe for global static init.
 
     // Query hardware threads, allocate queues, spawn worker threads (allows us to control the exact boot order, but retain the zero-indirection speed!)
-    Initialize() {
+    void Initialize() {
         uint32_t hwThreads = std::thread::hardware_concurrency();
 
         if (hwThreads == 0) hwThreads = 4; // Safe fallback if OS lies to us
