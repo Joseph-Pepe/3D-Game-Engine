@@ -67,10 +67,9 @@ public:
 
             // 3. Offload the heavy inner-loop math to the hardware-accelerated EngineTick.
             // EngineTick handles its own Job System threading internally.
-            // Notice we must use the '.' or '->' operator depending on how your SIMD library 
-            // defined ParticleEmitterComponent's physicsEngine pointer.
-            if (emitter.physicsEngine) {
-                Engine::Physics::EngineTick(emitter.physicsEngine->memoryBlock, dt);
+            // Ensure the pointer is valid, then dereference it (*) to pass by reference
+            if (emitter.memoryBlock) {
+                Engine::Physics::EngineTick(*(emitter.memoryBlock), dt);
             }
         }
     }
