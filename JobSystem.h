@@ -1109,7 +1109,7 @@ public:
                 // Only steal from active threads!
                 if (localActiveQueues > 1) {
                     // --- Fast random victim selection ---
-                    uint64_t randomVal = Engine::Math::PCG32(rngState);
+                    uint32_t randomVal = Engine::Math::PCG32(rngState);
                     uint32_t startVictim = Engine::Math::MapToRange(randomVal, localActiveQueues);
 
                     // OS context switches (sleep, wake back up) are brutally expensive (up to 1,500 microseconds).
