@@ -35,7 +35,12 @@
 
 */
 
-#include <meta>  // C++26 Reflection
+#if __has_include(<meta>) && (defined(__cplusplus) && __cplusplus > 202302L || defined(_MSVC_LANG) && _MSVC_LANG > 202302L)
+    #include <meta>        // Required for C++26 reflection
+    #define ENGINE_HAS_CXX26_META_REFLECTION 1
+#else
+    #define ENGINE_HAS_CXX26_META_REFLECTION 0
+#endif
 
 
 // ==================================================================================
