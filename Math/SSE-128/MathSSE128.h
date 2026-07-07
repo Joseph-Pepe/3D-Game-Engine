@@ -219,21 +219,13 @@ public:
     }
 };
 
-// SSE Accelerated Stack Vector (Use for 99% of general game logic and bulk data processing).
+
 class Vector3DStack {
 public:
-    // This tells the compiler: "Every instance of this class must start at a 16-byte boundary in memory."
-    // Forces every instance of this class to align to 16 bytes.
-    // Memory is allocated on the stack automatically!
     alignas(16) float data[4]; 
 
     // Constructor: Default initializes to {0, 0, 0, 0}
     Vector3DStack(float x = 0.0f, float y = 0.0f, float z = 0.0f) : data{x, y, z, 0.0f} {}
-    
-    // ---------------------------------------------------------
-    // No Destructor, Copy Constructor, or Assignment Operator 
-    // are needed! The compiler handles the 16 bytes trivially.
-    // ---------------------------------------------------------
 
     // Addition: C = A + B
     FORCE_INLINE Vector3DStack operator+(const Vector3DStack& other) const {
@@ -262,7 +254,7 @@ public:
         Vector3DStack result;
         
         __m128 v1 = _mm_load_ps(this->data);
-        __m128 s = _mm_set1_ps(scalar); // Broadcasts scalar to all 4 slots        
+        __m128 s = _mm_set1_ps(scalar); 
         _mm_store_ps(result.data, _mm_mul_ps(v1, s));
 
         return result;
@@ -280,32 +272,6 @@ public:
         __m128 v1 = _mm_load_ps(this->data);
         __m128 v2 = _mm_load_ps(other.data);
 
-        // ===================================
-        // DOT PRODUCT INSTRUCTION (_mm_dp_ps)
-        // ===================================
-        /*
-            - On modern Intel/AMD architectures, _mm_dp_ps is implemented in slow microcode (~9-14 clock cycles).
-            - It tries to do too many things (multiply, horizontal add, and mask) simultaneously.
-            - Hogs CPU execution ports because the silicilon has to internally decode it into a sequence of multiplies, adds, and bitwise masks.
-        */
-
-        // // 0x71 mask: calculates dots for first 3 elements, stores in first element
-        // __m128 res = _mm_dp_ps(v1, v2, 0x71);
-
-        // float result;
-        // _mm_store_ss(&result, res); 
-        // return result;
-
-        // ===================================
-        // DOT PRODUCT (MANUAL HORIZONTAL REDUCTION)
-        // ===================================
-        /*
-            - Operates on separate execution ports and can overlap these manual instructions.
-            - [_mm_mul_ps] ~4 cycles
-            - [_mm_movehl_ps, _mm_shuffle_ps] ~1 cycle
-            - [_mm_add_ps, _mm_add_ss] ~3-4 cycles
-        */
-        // Bypassing the _mm_dp_ps hardware trap using fast manual reduction (3-4 clock cycles, 2x performance improvement in dot product speed)
         __m128 mul = _mm_mul_ps(v1, v2);
 
         // Since constructor guarantees w = 0.0f, we can safely horizontal sum all 4 lanes
@@ -335,30 +301,21 @@ public:
         return result;
     }
 
-    // --- HOMOGENEOUS COORDINATE ENFORCEMENT ---
-    /*
-        - Allow addition, cross product, and dot products to generate garbage in the W lane (let the math be dirty). 
-        - Clean it at the boundary where w actually matters when multiplying a vector by a matrix (force it to either a point [w =1], or a direction [w = 0] right before the multiplication).
-    */
-
-    // Forces W = 0.0f (Treats the vector as a Direction/Normal)
     FORCE_INLINE Vector3DStack asDirection() const {
         Vector3DStack result;
         __m128 reg = _mm_load_ps(this->data);
         
-        // Blend in a 0.0f to the W lane (mask 0x08 = 1000 binary)
         reg = _mm_blend_ps(reg, _mm_setzero_ps(), 0x08);
         
         _mm_store_ps(result.data, reg);
         return result;
     }
 
-    // Forces W = 1.0f (Treats the vector as a Position/Point in space)
     FORCE_INLINE Vector3DStack asPoint() const {
         Vector3DStack result;
         __m128 reg = _mm_load_ps(this->data);
         
-        // Blend in a 1.0f to the W lane
+        
         __m128 wOne = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f); 
         reg = _mm_blend_ps(reg, wOne, 0x08);
         
