@@ -916,8 +916,13 @@ struct Matrix4 {
 // ==================================================================================
 // VIEW FRUSTUM (CAMERA CULLING)
 // ==================================================================================
-// Extracts the 6 planes of the camera's view so you don't render objects behind the player.
+/*
+    - Extracts the 6 planes of the camera's view so you don't render objects behind the player.
+    - A plane is defined as Ax + By + Cz + D = 0. 
+    - We store (A,B,C) as the normal vector, and D as W.
+*/
 struct Frustum {
+    // 6 Planes (Left, Right, Bottom, Top, Near, Far)
     SIMDVector3D planes[6];
 
     // Extracts the 6 frustum planes from a combined View-Projection matrix
@@ -956,18 +961,47 @@ struct Frustum {
     FORCE_INLINE bool IsBoxVisible(const AABBMath& box) const {
         using namespace Engine::Math::SIMD;
         for (int i = 0; i < 6; ++i) {
+            // 1. Create a mask of where the plane's normal is greater than 0
             Float4 cmpMask = CmpGt(planes[i].reg, Zero());
+
+            // 2. Blend maxBounds and minBounds based on that mask.
+            // If normal > 0, pick maxBounds. If normal <= 0, pick minBounds.
             Float4 pVec = BlendVariable(box.minBounds.reg, box.maxBounds.reg, cmpMask);
             
+            // 3. Hardware Dot Product: (P_xyz dot Normal_xyz) + Plane_W
+            // We use the 0x7F mask to calculate the dot product of X, Y, Z and write it to all lanes.
             Float4 dotResult = Set1(Dot3(pVec, planes[i].reg)); // Only dot X,Y,Z
+
+            // Extract the plane's W component (Distance from origin)
             Float4 planeW = Set1(ExtractW(planes[i].reg));
             
+            // Final Distance = Dot(P, Normal) + W
             Float4 distance = Add(dotResult, planeW);
 
+            // 4. If distance < 0.0f, the box is outside the frustum.
             if (ExtractX(distance) < 0.0f) {
                 return false;
             }
         }
         return true;
+
+        /*  
+            - Do not extract scalars, it is slow. 
+            - It forces _mm_shuffle_ps to extract those individual floats out of the __mm128 register.
+            - 18 shuffle instructions just to check if a box is on the screen.
+        */
+        // for (int i = 0; i < 6; ++i) {
+        //     // Find the corner of the AABB that is furthest along the plane's normal
+        //     float px = (planes[i].x() > 0.0f) ? box.maxBounds.x() : box.minBounds.x();
+        //     float py = (planes[i].y() > 0.0f) ? box.maxBounds.y() : box.minBounds.y();
+        //     float pz = (planes[i].z() > 0.0f) ? box.maxBounds.z() : box.minBounds.z();
+
+        //     // Calculate distance from the plane to the positive vertex
+        //     float distance = (planes[i].x() * px) + (planes[i].y() * py) + (planes[i].z() * pz) + planes[i].w();
+
+        //     // If the furthest corner is behind the plane, the entire box is invisible!
+        //     if (distance < 0.0f) return false; 
+        // }
+        // return true;
     }
 };
