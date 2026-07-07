@@ -49,9 +49,9 @@ FORCE_INLINE float hsum_avx2(__m256 v) {
     - w = 1.0f (Point): Represents a position in space (like a player or vertex). When multiplied by a matrix, the translation is applied.
 */
 
-// [Vector3D]: Use this version if your creating a very large, persistent buffer where you don't want to blow out the stack. 
+// [SSE128_SIMDVector3D]: Use this version if your creating a very large, persistent buffer where you don't want to blow out the stack. 
 // alignas(16) guarantees that whenever this struct is created, it starts on a 16-byte boundary. No malloc required!
-class alignas(16) Vector3D {
+class alignas(16) SSE128_SIMDVector3D {
 public:
     /*
         - Using a float array of 4 to align with 128-bit SSE registers.
@@ -61,26 +61,26 @@ public:
 
         // This dynamically allocates the memory on the heap, perfectly aligned.
         // There is zero pointer-chasing. The CPU prefetcher will chew through this instantly.
-        std::vector<Vector3D> largePersistentBuffer(1'000'000); 
+        std::vector<SSE128_SIMDVector3D> largePersistentBuffer(1'000'000); 
 
         // Usage is clean and readable:
-        Vector3D a(1.0f, 0.0f, 0.0f);
-        Vector3D b(0.0f, 1.0f, 0.0f);
-        Vector3D c = a + (b * 5.0f); // Completely optimized into registers by the compiler
+        SSE128_SIMDVector3D a(1.0f, 0.0f, 0.0f);
+        SSE128_SIMDVector3D b(0.0f, 1.0f, 0.0f);
+        SSE128_SIMDVector3D c = a + (b * 5.0f); // Completely optimized into registers by the compiler
     */
     __m128 reg;
 
     // Default constructor (Zero initialization)
-    FORCE_INLINE Vector3D() : reg(_mm_setzero_ps()) {}
+    FORCE_INLINE SSE128_SIMDVector3D() : reg(_mm_setzero_ps()) {}
 
     // Constructor from floats
-    FORCE_INLINE Vector3D(float _x, float _y, float _z, float _w = 0.0f) 
+    FORCE_INLINE SSE128_SIMDVector3D(float _x, float _y, float _z, float _w = 0.0f) 
         : reg(_mm_set_ps(_w, _z, _y, _x)) { 
         // Note: _mm_set_ps takes arguments in reverse order (w, z, y, x)
     }
 
     // Constructor directly from SSE register (Crucial for fast operators)
-    FORCE_INLINE Vector3D(__m128 m) : reg(m) {}
+    FORCE_INLINE SSE128_SIMDVector3D(__m128 m) : reg(m) {}
 
     // ======================================================================
     // 1. HARDWARE GETTERS (Zero Memory Access)
@@ -134,7 +134,7 @@ public:
 
     // --- SIMD LINEAR INTERPOLATION ---
     // V = a + t * (b - a)
-    static FORCE_INLINE Vector3D Lerp(const Vector3D& a, const Vector3D& b, float t) {
+    static FORCE_INLINE SSE128_SIMDVector3D Lerp(const SSE128_SIMDVector3D& a, const SSE128_SIMDVector3D& b, float t) {
         // Broadcast the scalar 't' across all 4 lanes of a register
         __m128 tReg = _mm_set1_ps(t);
         
@@ -142,7 +142,7 @@ public:
         __m128 diff = _mm_sub_ps(b.reg, a.reg);
         
         // Fused Multiply-Add: diff * t + a
-        return Vector3D(_mm_fmadd_ps(diff, tReg, a.reg));
+        return SSE128_SIMDVector3D(_mm_fmadd_ps(diff, tReg, a.reg));
     }
 
     // ======================================================================
@@ -170,36 +170,36 @@ public:
     // The data never touches the stack; it stays perfectly inside the CPU registers.
 
     // Addition: result = this + other
-    FORCE_INLINE Vector3D operator+(const Vector3D& other) const {
-        return Vector3D(_mm_add_ps(reg, other.reg));
+    FORCE_INLINE SSE128_SIMDVector3D operator+(const SSE128_SIMDVector3D& other) const {
+        return SSE128_SIMDVector3D(_mm_add_ps(reg, other.reg));
     }
 
-    FORCE_INLINE Vector3D operator-(const Vector3D& other) const {
-        return Vector3D(_mm_sub_ps(reg, other.reg));
+    FORCE_INLINE SSE128_SIMDVector3D operator-(const SSE128_SIMDVector3D& other) const {
+        return SSE128_SIMDVector3D(_mm_sub_ps(reg, other.reg));
     }
 
     // Scales the current vector in place
-    FORCE_INLINE Vector3D operator*(float scalar) const {
-        return Vector3D(_mm_mul_ps(reg, _mm_set1_ps(scalar)));
+    FORCE_INLINE SSE128_SIMDVector3D operator*(float scalar) const {
+        return SSE128_SIMDVector3D(_mm_mul_ps(reg, _mm_set1_ps(scalar)));
     }
 
     // --- DOT & CROSS PRODUCT ---
 
     // Dot Product: returns (x1*x2 + y1*y2 + z1*z2)
-    FORCE_INLINE float dot(const Vector3D& other) const {
+    FORCE_INLINE float dot(const SSE128_SIMDVector3D& other) const {
         // 0x7F mask: 0111 (read first 3) | 1111 (write to all 4 for safety, or 0001 for just lowest)
         __m128 res = _mm_dp_ps(reg, other.reg, 0x71); 
         return _mm_cvtss_f32(res); // Faster than _mm_store_ss to a stack variable
     }
 
     // SHUFFLE: Rearranges the (x, y, z) values inside the register, so we can multiply them all at once.
-    FORCE_INLINE Vector3D cross(const Vector3D& other) const {
+    FORCE_INLINE SSE128_SIMDVector3D cross(const SSE128_SIMDVector3D& other) const {
         __m128 tmp0 = _mm_shuffle_ps(reg, reg, _MM_SHUFFLE(3, 0, 2, 1));
         __m128 tmp1 = _mm_shuffle_ps(other.reg, other.reg, _MM_SHUFFLE(3, 1, 0, 2));
         __m128 tmp2 = _mm_shuffle_ps(reg, reg, _MM_SHUFFLE(3, 1, 0, 2));
         __m128 tmp3 = _mm_shuffle_ps(other.reg, other.reg, _MM_SHUFFLE(3, 0, 2, 1));
 
-        return Vector3D(_mm_sub_ps(_mm_mul_ps(tmp0, tmp1), _mm_mul_ps(tmp2, tmp3)));
+        return SSE128_SIMDVector3D(_mm_sub_ps(_mm_mul_ps(tmp0, tmp1), _mm_mul_ps(tmp2, tmp3)));
     }
 
     // --- HOMOGENEOUS COORDINATE ENFORCEMENT ---
@@ -207,15 +207,15 @@ public:
     // Forces W = 0.0f (Treats the vector as a Direction/Normal)
     // Mask 0x08 (binary 1000) tells the hardware: 
     // "Take X, Y, Z from 'reg', take W from the zero vector."
-    FORCE_INLINE Vector3D asDirection() const {
-        return Vector3D(_mm_blend_ps(reg, _mm_setzero_ps(), 0x08));
+    FORCE_INLINE SSE128_SIMDVector3D asDirection() const {
+        return SSE128_SIMDVector3D(_mm_blend_ps(reg, _mm_setzero_ps(), 0x08));
     }
 
     // Forces W = 1.0f (Treats the vector as a Position/Point in space)
     // We blend our register with a vector containing 1.0f in the W lane.
-    FORCE_INLINE Vector3D asPoint() const {
+    FORCE_INLINE SSE128_SIMDVector3D asPoint() const {
         __m128 wOne = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f); // Setps takes (W, Z, Y, X)
-        return Vector3D(_mm_blend_ps(reg, wOne, 0x08));
+        return SSE128_SIMDVector3D(_mm_blend_ps(reg, wOne, 0x08));
     }
 };
 
@@ -435,23 +435,23 @@ struct alignas(16) Quaternion {
 
     // --- DIRECTIONAL VECTOR ACCESSORS ---
     // Returns the normalized forward vector (assuming -Z is forward)
-    FORCE_INLINE Vector3D GetForwardVector() const {
-        return RotateVector(Vector3D(0.0f, 0.0f, -1.0f, 0.0f));
+    FORCE_INLINE SSE128_SIMDVector3D GetForwardVector() const {
+        return RotateVector(SSE128_SIMDVector3D(0.0f, 0.0f, -1.0f, 0.0f));
     }
 
     // Returns the normalized right vector (+X)
-    FORCE_INLINE Vector3D GetRightVector() const {
-        return RotateVector(Vector3D(1.0f, 0.0f, 0.0f, 0.0f));
+    FORCE_INLINE SSE128_SIMDVector3D GetRightVector() const {
+        return RotateVector(SSE128_SIMDVector3D(1.0f, 0.0f, 0.0f, 0.0f));
     }
 
     // Returns the normalized up vector (+Y)
-    FORCE_INLINE Vector3D GetUpVector() const {
-        return RotateVector(Vector3D(0.0f, 1.0f, 0.0f, 0.0f));
+    FORCE_INLINE SSE128_SIMDVector3D GetUpVector() const {
+        return RotateVector(SSE128_SIMDVector3D(0.0f, 1.0f, 0.0f, 0.0f));
     }
 
     // --- ANGLE AXIS CONVERSION ---
     // This is the ONLY time we use Trigonometry. Used when converting mouse/keyboard input to a rotation.
-    static FORCE_INLINE Quaternion AngleAxis(float angleDegrees, const Vector3D& axis) {
+    static FORCE_INLINE Quaternion AngleAxis(float angleDegrees, const SSE128_SIMDVector3D& axis) {
         float halfAngleRad = (angleDegrees * (std::numbers::pi_v<float> / 180.0f)) * 0.5f;
         float s = std::sin(halfAngleRad);
         float c = std::cos(halfAngleRad);
@@ -514,29 +514,29 @@ struct alignas(16) Quaternion {
     
     // --- PURE SIMD ROTATE VECTOR ---
     // Rotates a 3D vector by this quaternion: V' = Q * V * Q^-1
-    FORCE_INLINE Vector3D RotateVector(const Vector3D& v) const {
+    FORCE_INLINE SSE128_SIMDVector3D RotateVector(const SSE128_SIMDVector3D& v) const {
         // Drastically faster than extracting x, y, and z to memory!
         // Fast path for rotating a vector by a quaternion
 
         // 1. Mask out W (Force it to 0.0) to get purely the imaginary (x,y,z) axis
-        Vector3D qVec(_mm_blend_ps(reg, _mm_setzero_ps(), 0x08));
+        SSE128_SIMDVector3D qVec(_mm_blend_ps(reg, _mm_setzero_ps(), 0x08));
         
         // 2. Broadcast the Real (w) component across all lanes
         __m128 wReg = _mm_shuffle_ps(reg, reg, _MM_SHUFFLE(3, 3, 3, 3));
         
         // 3. V' = V + 2w(Q_xyz x V) + 2(Q_xyz x (Q_xyz x V))
-        Vector3D t = qVec.cross(v) * 2.0f;
+        SSE128_SIMDVector3D t = qVec.cross(v) * 2.0f;
         
         // Multiply t by w directly in the registers, avoiding scalar extraction
-        Vector3D tw(_mm_mul_ps(t.reg, wReg)); 
+        SSE128_SIMDVector3D tw(_mm_mul_ps(t.reg, wReg)); 
 
         return v + tw + qVec.cross(t);
     }
 
     // --- DIRECTION TO QUATERNION ---
     // Converts a normalized forward vector into a rotation without using Trigonometry.
-    static FORCE_INLINE Quaternion FromDirection(const Vector3D& dir) {
-        Vector3D baseForward(0.0f, 0.0f, -1.0f, 0.0f); 
+    static FORCE_INLINE Quaternion FromDirection(const SSE128_SIMDVector3D& dir) {
+        SSE128_SIMDVector3D baseForward(0.0f, 0.0f, -1.0f, 0.0f); 
         float dot = baseForward.dot(dir);
         
         // Edge Case: The camera needs to perfectly turn around 180 degrees
@@ -545,7 +545,7 @@ struct alignas(16) Quaternion {
         }
         
         // Build the Quaternion using the cross product axis and the half-way dot product
-        Vector3D axis = baseForward.cross(dir);
+        SSE128_SIMDVector3D axis = baseForward.cross(dir);
         Quaternion q(axis.x(), axis.y(), axis.z(), 1.0f + dot);
         q.Normalize();
         
@@ -717,21 +717,21 @@ struct alignas(64) Matrix4x4_SIMD {
 
     // --- PURE SIMD VIEW MATRIX (NO LOAD-HIT-STORE) ---
     // Takes native SSE vectors and keeps all math strictly on the silicon.
-    static FORCE_INLINE Matrix4x4_SIMD LookAt_SIMD(const Vector3D& eye, const Vector3D& target, const Vector3D& upVec) {
+    static FORCE_INLINE Matrix4x4_SIMD LookAt_SIMD(const SSE128_SIMDVector3D& eye, const SSE128_SIMDVector3D& target, const SSE128_SIMDVector3D& upVec) {
         
         // 1. Forward Vector (Z)
-        Vector3D f = target - eye;
+        SSE128_SIMDVector3D f = target - eye;
         f = f.asDirection(); // Force W=0.0f
         float fLenSq = f.dot(f);
         if (fLenSq > 1e-8f) f = f * (1.0f / std::sqrt(fLenSq));
 
         // 2. Right Vector (X)
-        Vector3D r = f.cross(upVec).asDirection();
+        SSE128_SIMDVector3D r = f.cross(upVec).asDirection();
         float rLenSq = r.dot(r);
         if (rLenSq > 1e-8f) r = r * (1.0f / std::sqrt(rLenSq));
 
         // 3. Up Vector (Y)
-        Vector3D u = r.cross(f).asDirection();
+        SSE128_SIMDVector3D u = r.cross(f).asDirection();
 
         // 4. Negate the Forward vector (Required for Right-Handed Coordinate Systems like OpenGL)
         // Flip the sign bit in hardware without multiplication: XOR with -0.0f
@@ -784,11 +784,11 @@ struct alignas(64) Matrix4x4_SIMD {
         - Rendering APIs require matrices to be formatted in column-major order.
         - Instead of extracting floats sequentially to flip the rows into columns, SSE has a built in macro to transpose a 4x4 matrix across four registers in a few clock cycles.
     */
-    static FORCE_INLINE Matrix4x4_SIMD LookAtLWC_SIMD(const Vector3DWorld& eye, const Vector3DWorld& target, const Vector3D& upVec) {
+    static FORCE_INLINE Matrix4x4_SIMD LookAtLWC_SIMD(const Vector3DWorld& eye, const Vector3DWorld& target, const SSE128_SIMDVector3D& upVec) {
         
-        // 1. Calculate World Difference & Cast to 32-bit SIMD (Vector3D is your SSE wrapper class)
+        // 1. Calculate World Difference & Cast to 32-bit SIMD (SSE128_SIMDVector3D is your SSE wrapper class)
         Vector3DWorld worldDiff = target - eye;
-        Vector3D f = Vector3D(static_cast<float>(worldDiff.x), 
+        SSE128_SIMDVector3D f = SSE128_SIMDVector3D(static_cast<float>(worldDiff.x), 
                             static_cast<float>(worldDiff.y), 
                             static_cast<float>(worldDiff.z), 
                             0.0f); // Ensure W is 0.0f for directional vectors
@@ -798,12 +798,12 @@ struct alignas(64) Matrix4x4_SIMD {
         if (fLenSq > 1e-8f) f = f * (1.0f / std::sqrt(fLenSq));
 
         // 2. Right Vector (X) - SIMD Cross Product
-        Vector3D r = f.cross(upVec);
+        SSE128_SIMDVector3D r = f.cross(upVec);
         float rLenSq = r.dot(r);
         if (rLenSq > 1e-8f) r = r * (1.0f / std::sqrt(rLenSq));
 
         // 3. Up Vector (Y) - SIMD Cross Product
-        Vector3D u = r.cross(f);
+        SSE128_SIMDVector3D u = r.cross(f);
 
         // 4. Negate the Forward vector (Required for Right-Handed Coordinate Systems)
         // Flip the sign bit in hardware without multiplication: XOR with -0.0f
@@ -837,7 +837,7 @@ struct alignas(64) Matrix4x4_SIMD {
 
 // --- SIMD MATRIX OPERATORS ---
 // Multiplies a SIMD Vector against a SIMD Matrix (i.e., use the broadcast and multiply-add)
-FORCE_INLINE Vector3D operator*(const Matrix4x4_SIMD& mat, const Vector3D& v) {
+FORCE_INLINE SSE128_SIMDVector3D operator*(const Matrix4x4_SIMD& mat, const SSE128_SIMDVector3D& v) {
     // Broadcast a single vertex component into all four lanes of a register, and multiply it by the first column, and accumulate.
 
     // 1. Broadcast vertex X, Y, Z, W into four separate registers
@@ -855,7 +855,7 @@ FORCE_INLINE Vector3D operator*(const Matrix4x4_SIMD& mat, const Vector3D& v) {
     res = _mm_fmadd_ps(vz, mat.col[2], res);
     res = _mm_fmadd_ps(vw, mat.col[3], res);
 
-    return Vector3D(res);
+    return SSE128_SIMDVector3D(res);
 }
 
 // --- SIMD MATRIX MULTIPLICATION (C = A * B) ---
@@ -883,7 +883,7 @@ FORCE_INLINE Matrix4x4_SIMD operator*(const Matrix4x4_SIMD& a, const Matrix4x4_S
 
 // --- MODEL MATRIX BUILDER (TRS) ---
 // M = Translation * Rotation * Scale
-static FORCE_INLINE Matrix4x4_SIMD TRS(const Vector3D& translation, const Quaternion& rotation, const Vector3D& scale) {
+static FORCE_INLINE Matrix4x4_SIMD TRS(const SSE128_SIMDVector3D& translation, const Quaternion& rotation, const SSE128_SIMDVector3D& scale) {
     // Without this function, every 3D mesh you load will spawn directly at the origin (0, 0, 0) at a default scale of 1.0.
     Matrix4x4_SIMD mat;
 
@@ -933,8 +933,8 @@ static Matrix4x4_SIMD Orthographic(float left, float right, float bottom, float 
 // Every mesh needs an invisible box around it. When the engine calculates collisions or checks if an object is visible, it does not check all 10,000 vertices of a 3D model.
 // It checks the 8 corners of an AABB.
 struct alignas(32) AABBMath {
-    Vector3D minBounds; // Bottom-Left-Back corner
-    Vector3D maxBounds; // Top-Right-Front corner
+    SSE128_SIMDVector3D minBounds; // Bottom-Left-Back corner
+    SSE128_SIMDVector3D maxBounds; // Top-Right-Front corner
 
     // --- HARDWARE INTERSECTION TEST ---
     // Returns true if this box is overlapping with another box
@@ -958,26 +958,26 @@ struct alignas(32) AABBMath {
 struct Frustum {
     // 6 Planes (Left, Right, Bottom, Top, Near, Far)
     // A plane is defined as Ax + By + Cz + D = 0. We store (A,B,C) as the normal vector, and D as W.
-    Vector3D planes[6];
+    SSE128_SIMDVector3D planes[6];
 
     // Extracts the 6 frustum planes from a combined View-Projection matrix
     void ExtractFromVP(const Matrix4x4_SIMD& vp) {
         // Left Plane: col3 + col0
-        planes[0] = Vector3D(_mm_add_ps(vp.col[3], vp.col[0]));
+        planes[0] = SSE128_SIMDVector3D(_mm_add_ps(vp.col[3], vp.col[0]));
         // Right Plane: col3 - col0
-        planes[1] = Vector3D(_mm_sub_ps(vp.col[3], vp.col[0]));
+        planes[1] = SSE128_SIMDVector3D(_mm_sub_ps(vp.col[3], vp.col[0]));
         // Bottom Plane: col3 + col1
-        planes[2] = Vector3D(_mm_add_ps(vp.col[3], vp.col[1]));
+        planes[2] = SSE128_SIMDVector3D(_mm_add_ps(vp.col[3], vp.col[1]));
         // Top Plane: col3 - col1
-        planes[3] = Vector3D(_mm_sub_ps(vp.col[3], vp.col[1]));
+        planes[3] = SSE128_SIMDVector3D(_mm_sub_ps(vp.col[3], vp.col[1]));
         // Near Plane: col3 + col2
-        planes[4] = Vector3D(_mm_add_ps(vp.col[3], vp.col[2]));
+        planes[4] = SSE128_SIMDVector3D(_mm_add_ps(vp.col[3], vp.col[2]));
         // Far Plane: col3 - col2
-        planes[5] = Vector3D(_mm_sub_ps(vp.col[3], vp.col[2]));
+        planes[5] = SSE128_SIMDVector3D(_mm_sub_ps(vp.col[3], vp.col[2]));
 
         // Normalize all 6 planes using SIMD
         for (int i = 0; i < 6; ++i) {
-            Vector3D normal = planes[i].asDirection(); // Mask out W
+            SSE128_SIMDVector3D normal = planes[i].asDirection(); // Mask out W
             float lengthSq = normal.dot(normal);
             if (lengthSq > 1e-8f) {
                 planes[i] = planes[i] * (1.0f / std::sqrt(lengthSq));
