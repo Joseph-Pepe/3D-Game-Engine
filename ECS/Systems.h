@@ -160,7 +160,7 @@ public:
                     float dirZ = aiTargets[i].targetZ - aiPositions[i].z;
 
                     float lengthSq = (dirX * dirX) + (dirY * dirY) + (dirZ * dirZ);
-                    float invLength = Engine::ISAArch::rsqrt(lengthSq + 1e-8f);
+                    float invLength = 1.0f / std::sqrt(lengthSq + 1e-8f);
 
                     float moveX = dirX * invLength * aiMovement[i].speed * dt;
                     float moveY = dirY * invLength * aiMovement[i].speed * dt;
