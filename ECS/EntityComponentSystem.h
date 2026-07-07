@@ -148,8 +148,8 @@ struct ComponentIndex<T, std::tuple<Types...>> {
     }();
 };
 
-struct PositionComponent { Vector3D pos; };
-struct AITargetComponent { Vector3D target; };
+struct PositionComponent { float x, y, z; };                       // struct PositionComponent { Vector3D pos; };
+struct AITargetComponent { float targetX, targetY, targetZ; };     // struct AITargetComponent { Vector3D target; };
 struct AIMovementComponent { float speed; };
 
 // 1. The Global Master List (Used for the 64-bit Archetype Graph Mask)! Register all components in this tuple.
