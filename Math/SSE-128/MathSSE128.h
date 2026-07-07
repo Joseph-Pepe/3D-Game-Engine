@@ -375,22 +375,22 @@ public:
 // ==================================================================================
 // LARGE WORLD COORDINATES (LWC)
 // ==================================================================================
-struct Vector3DWorld {
+struct Vector3DWorldV1 {
     // Dedicated 64-bit scalar vector.
     double x, y, z;
 
-    constexpr Vector3DWorld(double x = 0.0, double y = 0.0, double z = 0.0) 
+    constexpr Vector3DWorldV1(double x = 0.0, double y = 0.0, double z = 0.0) 
         : x(x), y(y), z(z) {}
 
     // Standard addition for moving objects in the world
-    FORCE_INLINE constexpr Vector3DWorld operator+(const Vector3DWorld& other) const {
-        return Vector3DWorld(x + other.x, y + other.y, z + other.z);
+    FORCE_INLINE constexpr Vector3DWorldV1 operator+(const Vector3DWorldV1& other) const {
+        return Vector3DWorldV1(x + other.x, y + other.y, z + other.z);
     }
 
     // Subtraction is the most important operator in LWC.
     // It returns the difference between two massive world coordinates.
-    FORCE_INLINE constexpr Vector3DWorld operator-(const Vector3DWorld& other) const {
-        return Vector3DWorld(x - other.x, y - other.y, z - other.z);
+    FORCE_INLINE constexpr Vector3DWorldV1 operator-(const Vector3DWorldV1& other) const {
+        return Vector3DWorldV1(x - other.x, y - other.y, z - other.z);
     }
 
     // --- THE LWC BRIDGE ---
@@ -784,10 +784,10 @@ struct alignas(64) SIMD_SSE128_Matrix4x4 {
         - Rendering APIs require matrices to be formatted in column-major order.
         - Instead of extracting floats sequentially to flip the rows into columns, SSE has a built in macro to transpose a 4x4 matrix across four registers in a few clock cycles.
     */
-    static FORCE_INLINE SIMD_SSE128_Matrix4x4 LookAtLWC_SIMD(const Vector3DWorld& eye, const Vector3DWorld& target, const SSE128_SIMDVector3D& upVec) {
+    static FORCE_INLINE SIMD_SSE128_Matrix4x4 LookAtLWC_SIMD(const Vector3DWorldV1& eye, const Vector3DWorldV1& target, const SSE128_SIMDVector3D& upVec) {
         
         // 1. Calculate World Difference & Cast to 32-bit SIMD (SSE128_SIMDVector3D is your SSE wrapper class)
-        Vector3DWorld worldDiff = target - eye;
+        Vector3DWorldV1 worldDiff = target - eye;
         SSE128_SIMDVector3D f = SSE128_SIMDVector3D(static_cast<float>(worldDiff.x), 
                             static_cast<float>(worldDiff.y), 
                             static_cast<float>(worldDiff.z), 
