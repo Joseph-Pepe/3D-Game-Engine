@@ -43,57 +43,27 @@ FORCE_INLINE float hsum_avx2(__m256 v) {
 // ==================================================================================
 // SSE Accelerated Vectors 
 // ==================================================================================
-/*  
-    - The w only matters when multiplying a vector with a matrix.
-    - w = 0.0f (Direction): Represents a vector (like gravity or camera's forward axis). When multiplied by a matrix it ignores translation (i.e., you cannot move gravity).
-    - w = 1.0f (Point): Represents a position in space (like a player or vertex). When multiplied by a matrix, the translation is applied.
-*/
 
-// [SSE128_SIMDVector3D]: Use this version if your creating a very large, persistent buffer where you don't want to blow out the stack. 
-// alignas(16) guarantees that whenever this struct is created, it starts on a 16-byte boundary. No malloc required!
 class alignas(16) SSE128_SIMDVector3D {
 public:
     /*
-        - Using a float array of 4 to align with 128-bit SSE registers.
-        - x, y, z, and a padding/w element.
-        - Aligning the pointer itself is good practice.
-        - But the actual memory it points to is aligned by std::aligned_alloc.
-
         // This dynamically allocates the memory on the heap, perfectly aligned.
-        // There is zero pointer-chasing. The CPU prefetcher will chew through this instantly.
         std::vector<SSE128_SIMDVector3D> largePersistentBuffer(1'000'000); 
-
-        // Usage is clean and readable:
-        SSE128_SIMDVector3D a(1.0f, 0.0f, 0.0f);
-        SSE128_SIMDVector3D b(0.0f, 1.0f, 0.0f);
-        SSE128_SIMDVector3D c = a + (b * 5.0f); // Completely optimized into registers by the compiler
     */
     __m128 reg;
 
-    // Default constructor (Zero initialization)
     FORCE_INLINE SSE128_SIMDVector3D() : reg(_mm_setzero_ps()) {}
-
-    // Constructor from floats
+    
     FORCE_INLINE SSE128_SIMDVector3D(float _x, float _y, float _z, float _w = 0.0f) 
         : reg(_mm_set_ps(_w, _z, _y, _x)) { 
-        // Note: _mm_set_ps takes arguments in reverse order (w, z, y, x)
     }
 
-    // Constructor directly from SSE register (Crucial for fast operators)
     FORCE_INLINE SSE128_SIMDVector3D(__m128 m) : reg(m) {}
-
-    // ======================================================================
-    // 1. HARDWARE GETTERS (Zero Memory Access)
-    // ======================================================================
-    // Extracts the float directly from the XMM register. 
-    // This API change means you will call `v.x()` instead of `v.x`.
     
-    // X is in the lowest 32 bits, so we just convert scalar.
     FORCE_INLINE float x() const { 
         return _mm_cvtss_f32(reg); 
     }
     
-    // Y, Z, and W require a 1-cycle shuffle to move them to the lowest 32 bits before extraction.
     FORCE_INLINE float y() const { 
         return _mm_cvtss_f32(_mm_shuffle_ps(reg, reg, _MM_SHUFFLE(1, 1, 1, 1))); 
     }
@@ -106,69 +76,43 @@ public:
         return _mm_cvtss_f32(_mm_shuffle_ps(reg, reg, _MM_SHUFFLE(3, 3, 3, 3))); 
     }
 
-    // ======================================================================
-    // 2. HARDWARE SETTERS (SSE4.1)
-    // ======================================================================
-    // Allows mutation without spilling the register to the stack.
-    
     FORCE_INLINE void setX(float val) {
-        // _mm_move_ss replaces the lowest 32-bits (X) and keeps the high 96-bits intact.
+        
         reg = _mm_move_ss(reg, _mm_set_ss(val));
     }
 
     FORCE_INLINE void setY(float val) {
-        // _mm_insert_ps takes the source value and inserts it into a specific lane.
-        // 0x10 = Source Index 0, Destination Index 1 (Y)
+        
         reg = _mm_insert_ps(reg, _mm_set_ss(val), 0x10);
     }
 
     FORCE_INLINE void setZ(float val) {
-        // 0x20 = Source Index 0, Destination Index 2 (Z)
+        
         reg = _mm_insert_ps(reg, _mm_set_ss(val), 0x20);
     }
 
     FORCE_INLINE void setW(float val) {
-        // 0x30 = Source Index 0, Destination Index 3 (W)
         reg = _mm_insert_ps(reg, _mm_set_ss(val), 0x30);
     }
 
-    // --- SIMD LINEAR INTERPOLATION ---
-    // V = a + t * (b - a)
     static FORCE_INLINE SSE128_SIMDVector3D Lerp(const SSE128_SIMDVector3D& a, const SSE128_SIMDVector3D& b, float t) {
-        // Broadcast the scalar 't' across all 4 lanes of a register
         __m128 tReg = _mm_set1_ps(t);
-        
-        // Calculate the difference: (b - a)
         __m128 diff = _mm_sub_ps(b.reg, a.reg);
         
-        // Fused Multiply-Add: diff * t + a
         return SSE128_SIMDVector3D(_mm_fmadd_ps(diff, tReg, a.reg));
     }
-
-    // ======================================================================
-    // 3. C++20 ZERO-COST MEMORY BRIDGE
-    // ======================================================================
-    // If you need to interface with OpenGL/Vulkan APIs or loop through the 
-    // vector like an array, std::bit_cast is perfectly standard compliant.
-    // It guarantees the exact same zero-overhead assembly as the old union hack.
     
     FORCE_INLINE std::array<float, 4> asArray() const {
         return std::bit_cast<std::array<float, 4>>(reg);
     }
 
-    // --- AXIS INDEXING ---
-    // Safely extracts X (0), Y (1), Z (2), or W (3) dynamically without breaking strict aliasing.
+    
     FORCE_INLINE float operator[](int axis) const {
-        // We use std::bit_cast (C++20) to treat the register as a safe array 
-        // entirely on the stack, allowing dynamic indexing without UB.
         auto arr = std::bit_cast<std::array<float, 4>>(reg);
         return arr[axis];
     }
 
-    // --- MATHEMATICAL OPERATORS ---
-    // By returning by value, the compiler uses Return Value Optimization (RVO).
-    // The data never touches the stack; it stays perfectly inside the CPU registers.
-
+    
     // Addition: result = this + other
     FORCE_INLINE SSE128_SIMDVector3D operator+(const SSE128_SIMDVector3D& other) const {
         return SSE128_SIMDVector3D(_mm_add_ps(reg, other.reg));
@@ -178,21 +122,16 @@ public:
         return SSE128_SIMDVector3D(_mm_sub_ps(reg, other.reg));
     }
 
-    // Scales the current vector in place
+    
     FORCE_INLINE SSE128_SIMDVector3D operator*(float scalar) const {
         return SSE128_SIMDVector3D(_mm_mul_ps(reg, _mm_set1_ps(scalar)));
     }
 
-    // --- DOT & CROSS PRODUCT ---
-
-    // Dot Product: returns (x1*x2 + y1*y2 + z1*z2)
     FORCE_INLINE float dot(const SSE128_SIMDVector3D& other) const {
-        // 0x7F mask: 0111 (read first 3) | 1111 (write to all 4 for safety, or 0001 for just lowest)
         __m128 res = _mm_dp_ps(reg, other.reg, 0x71); 
-        return _mm_cvtss_f32(res); // Faster than _mm_store_ss to a stack variable
+        return _mm_cvtss_f32(res); 
     }
 
-    // SHUFFLE: Rearranges the (x, y, z) values inside the register, so we can multiply them all at once.
     FORCE_INLINE SSE128_SIMDVector3D cross(const SSE128_SIMDVector3D& other) const {
         __m128 tmp0 = _mm_shuffle_ps(reg, reg, _MM_SHUFFLE(3, 0, 2, 1));
         __m128 tmp1 = _mm_shuffle_ps(other.reg, other.reg, _MM_SHUFFLE(3, 1, 0, 2));
@@ -202,23 +141,22 @@ public:
         return SSE128_SIMDVector3D(_mm_sub_ps(_mm_mul_ps(tmp0, tmp1), _mm_mul_ps(tmp2, tmp3)));
     }
 
-    // --- HOMOGENEOUS COORDINATE ENFORCEMENT ---
-
-    // Forces W = 0.0f (Treats the vector as a Direction/Normal)
-    // Mask 0x08 (binary 1000) tells the hardware: 
-    // "Take X, Y, Z from 'reg', take W from the zero vector."
     FORCE_INLINE SSE128_SIMDVector3D asDirection() const {
         return SSE128_SIMDVector3D(_mm_blend_ps(reg, _mm_setzero_ps(), 0x08));
     }
 
-    // Forces W = 1.0f (Treats the vector as a Position/Point in space)
-    // We blend our register with a vector containing 1.0f in the W lane.
     FORCE_INLINE SSE128_SIMDVector3D asPoint() const {
-        __m128 wOne = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f); // Setps takes (W, Z, Y, X)
+        __m128 wOne = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f);
         return SSE128_SIMDVector3D(_mm_blend_ps(reg, wOne, 0x08));
     }
 };
 
+/*
+    // Usage is clean and readable:
+    SSE128_SIMDVector3D a(1.0f, 0.0f, 0.0f);
+    SSE128_SIMDVector3D b(0.0f, 1.0f, 0.0f);
+    SSE128_SIMDVector3D c = a + (b * 5.0f); // Completely optimized into registers by the compiler
+*/
 
 class Vector3DStack {
 public:
