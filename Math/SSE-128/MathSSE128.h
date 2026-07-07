@@ -674,13 +674,13 @@ struct alignas(16) Quaternion {
     - It should be an array of four 128-bit SIMD registers. 
     - This is how AA engines keep camera math on the silicon.
 */
-struct alignas(64) Matrix4x4_SIMD {
+struct alignas(64) SIMD_SSE128_Matrix4x4 {
     // 4 columns, each taking up exactly one 128-bit register
     __m128 col[4];
 
     // Creates an Identity Matrix entirely inside the registers
-    static FORCE_INLINE Matrix4x4_SIMD Identity() {
-        Matrix4x4_SIMD mat;
+    static FORCE_INLINE SIMD_SSE128_Matrix4x4 Identity() {
+        SIMD_SSE128_Matrix4x4 mat;
         mat.col[0] = _mm_set_ps(0.0f, 0.0f, 0.0f, 1.0f); // { 1, 0, 0, 0 }
         mat.col[1] = _mm_set_ps(0.0f, 0.0f, 1.0f, 0.0f); // { 0, 1, 0, 0 }
         mat.col[2] = _mm_set_ps(0.0f, 1.0f, 0.0f, 0.0f); // { 0, 0, 1, 0 }
@@ -690,10 +690,10 @@ struct alignas(64) Matrix4x4_SIMD {
 
     // --- HIGH-PERFORMANCE SIMD MATRIX INVERSE ---
     // Required for Mouse Picking, Screen-to-World Raycasting, and Normal Matrix generation.
-    FORCE_INLINE Matrix4x4_SIMD Inverse() const {
+    FORCE_INLINE SIMD_SSE128_Matrix4x4 Inverse() const {
         // e.g., lets us know what the user clicked by converting a 2D mouse coordinate (x,y) back into a 3D line (a ray) and shoot it into the world.
         // e.g., Screen Space -> World space
-        Matrix4x4_SIMD res;
+        SIMD_SSE128_Matrix4x4 res;
         __m128 Fac0, Fac1, Fac2, Fac3, Fac4, Fac5;
         __m128 Vec0, Vec1, Vec2, Vec3;
         __m128 Inv0, Inv1, Inv2, Inv3;
@@ -717,7 +717,7 @@ struct alignas(64) Matrix4x4_SIMD {
 
     // --- PURE SIMD VIEW MATRIX (NO LOAD-HIT-STORE) ---
     // Takes native SSE vectors and keeps all math strictly on the silicon.
-    static FORCE_INLINE Matrix4x4_SIMD LookAt_SIMD(const SSE128_SIMDVector3D& eye, const SSE128_SIMDVector3D& target, const SSE128_SIMDVector3D& upVec) {
+    static FORCE_INLINE SIMD_SSE128_Matrix4x4 LookAt_SIMD(const SSE128_SIMDVector3D& eye, const SSE128_SIMDVector3D& target, const SSE128_SIMDVector3D& upVec) {
         
         // 1. Forward Vector (Z)
         SSE128_SIMDVector3D f = target - eye;
@@ -758,7 +758,7 @@ struct alignas(64) Matrix4x4_SIMD {
         _MM_TRANSPOSE4_PS(row0, row1, row2, row3);
 
         // 8. Store the columns, overwriting the transposed 4th column with our calculated translation.
-        Matrix4x4_SIMD mat;
+        SIMD_SSE128_Matrix4x4 mat;
         mat.col[0] = row0;
         mat.col[1] = row1;
         mat.col[2] = row2;
@@ -784,7 +784,7 @@ struct alignas(64) Matrix4x4_SIMD {
         - Rendering APIs require matrices to be formatted in column-major order.
         - Instead of extracting floats sequentially to flip the rows into columns, SSE has a built in macro to transpose a 4x4 matrix across four registers in a few clock cycles.
     */
-    static FORCE_INLINE Matrix4x4_SIMD LookAtLWC_SIMD(const Vector3DWorld& eye, const Vector3DWorld& target, const SSE128_SIMDVector3D& upVec) {
+    static FORCE_INLINE SIMD_SSE128_Matrix4x4 LookAtLWC_SIMD(const Vector3DWorld& eye, const Vector3DWorld& target, const SSE128_SIMDVector3D& upVec) {
         
         // 1. Calculate World Difference & Cast to 32-bit SIMD (SSE128_SIMDVector3D is your SSE wrapper class)
         Vector3DWorld worldDiff = target - eye;
@@ -822,7 +822,7 @@ struct alignas(64) Matrix4x4_SIMD {
         _MM_TRANSPOSE4_PS(row0, row1, row2, row3);
 
         // 7. Store the transposed registers directly into the matrix columns.
-        Matrix4x4_SIMD mat;
+        SIMD_SSE128_Matrix4x4 mat;
         mat.col[0] = row0;
         mat.col[1] = row1;
         mat.col[2] = row2;
@@ -837,7 +837,7 @@ struct alignas(64) Matrix4x4_SIMD {
 
 // --- SIMD MATRIX OPERATORS ---
 // Multiplies a SIMD Vector against a SIMD Matrix (i.e., use the broadcast and multiply-add)
-FORCE_INLINE SSE128_SIMDVector3D operator*(const Matrix4x4_SIMD& mat, const SSE128_SIMDVector3D& v) {
+FORCE_INLINE SSE128_SIMDVector3D operator*(const SIMD_SSE128_Matrix4x4& mat, const SSE128_SIMDVector3D& v) {
     // Broadcast a single vertex component into all four lanes of a register, and multiply it by the first column, and accumulate.
 
     // 1. Broadcast vertex X, Y, Z, W into four separate registers
@@ -859,9 +859,9 @@ FORCE_INLINE SSE128_SIMDVector3D operator*(const Matrix4x4_SIMD& mat, const SSE1
 }
 
 // --- SIMD MATRIX MULTIPLICATION (C = A * B) ---
-FORCE_INLINE Matrix4x4_SIMD operator*(const Matrix4x4_SIMD& a, const Matrix4x4_SIMD& b) {
+FORCE_INLINE SIMD_SSE128_Matrix4x4 operator*(const SIMD_SSE128_Matrix4x4& a, const SIMD_SSE128_Matrix4x4& b) {
     // Multiplies two 64-byte matrices.
-    Matrix4x4_SIMD res;
+    SIMD_SSE128_Matrix4x4 res;
     
     // For each column in B, broadcast its X, Y, Z, W components and multiply them 
     // against the corresponding columns of A.
@@ -883,9 +883,9 @@ FORCE_INLINE Matrix4x4_SIMD operator*(const Matrix4x4_SIMD& a, const Matrix4x4_S
 
 // --- MODEL MATRIX BUILDER (TRS) ---
 // M = Translation * Rotation * Scale
-static FORCE_INLINE Matrix4x4_SIMD TRS(const SSE128_SIMDVector3D& translation, const Quaternion& rotation, const SSE128_SIMDVector3D& scale) {
+static FORCE_INLINE SIMD_SSE128_Matrix4x4 TRS(const SSE128_SIMDVector3D& translation, const Quaternion& rotation, const SSE128_SIMDVector3D& scale) {
     // Without this function, every 3D mesh you load will spawn directly at the origin (0, 0, 0) at a default scale of 1.0.
-    Matrix4x4_SIMD mat;
+    SIMD_SSE128_Matrix4x4 mat;
 
     // 1. Convert Quaternion to a 3x3 Rotation Matrix
     float x2 = rotation.x() + rotation.x(), y2 = rotation.y() + rotation.y(), z2 = rotation.z() + rotation.z();
@@ -911,9 +911,9 @@ static FORCE_INLINE Matrix4x4_SIMD TRS(const SSE128_SIMDVector3D& translation, c
 }
 
 // Creates an Orthographic Projection Matrix (For UI, 2D elements, and Directional Shadows)
-static Matrix4x4_SIMD Orthographic(float left, float right, float bottom, float top, float nearZ, float farZ) {
+static SIMD_SSE128_Matrix4x4 Orthographic(float left, float right, float bottom, float top, float nearZ, float farZ) {
     // Used for rendering a 2D minimap, crosshairs, and calculate cascaded shadow maps (render scene from perspective of the sun). 
-    Matrix4x4_SIMD mat;
+    SIMD_SSE128_Matrix4x4 mat;
     
     float invRL = 1.0f / (right - left);
     float invTB = 1.0f / (top - bottom);
@@ -961,7 +961,7 @@ struct Frustum {
     SSE128_SIMDVector3D planes[6];
 
     // Extracts the 6 frustum planes from a combined View-Projection matrix
-    void ExtractFromVP(const Matrix4x4_SIMD& vp) {
+    void ExtractFromVP(const SIMD_SSE128_Matrix4x4& vp) {
         // Left Plane: col3 + col0
         planes[0] = SSE128_SIMDVector3D(_mm_add_ps(vp.col[3], vp.col[0]));
         // Right Plane: col3 - col0
