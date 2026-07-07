@@ -22,7 +22,7 @@
     1. Player fires a bullet.
     2. Take player's LWC 64-bit Vector3DWorld position and bullet position.
     3. Subtract the city block's LWC 64-bit position from the player's position.
-    4. Cast the resulting difference to 32-bit Vector3D.
+    4. Cast the resulting difference to 32-bit SIMDVector3D.
     5. Run the bvh.Raycast(localRay) using pure SIMD.
 */
 
@@ -80,17 +80,17 @@ struct alignas(32) TLASNode {
 };
 
 struct Ray {
-    Vector3D origin;
-    Vector3D direction;
-    Vector3D invDirection; 
+    SIMDVector3D origin;
+    SIMDVector3D direction;
+    SIMDVector3D invDirection; 
     
-    Ray(const Vector3D& o, const Vector3D& d) : origin(o), direction(d) {
+    Ray(const SIMDVector3D& o, const SIMDVector3D& d) : origin(o), direction(d) {
         // Prevents division by zero.
         const float epsilon = 1e-8f;
-        invDirection = Vector3D(
+        invDirection = SIMDVector3D(
             1.0f / (std::abs(d.x()) < epsilon ? epsilon : d.x()),
             1.0f / (std::abs(d.y()) < epsilon ? epsilon : d.y()),
-            1.0f / (std::abs(d.z()) < epsilon ? epsilon : d.z())
+            1.0f / (std::abs(d.z()) < epsilon ? epsilon : d.z()),
         );
     }
 };
@@ -102,7 +102,7 @@ struct Ray4 {
     __m128 invDirX, invDirY, invDirZ;
     __m128 dirX, dirY, dirZ;
 
-    Ray4(const Vector3D& o, const Vector3D& d) {
+    Ray4(const SIMDVector3D& o, const SIMDVector3D& d) {
         // Broadcast a single float to all 4 lanes
         origX = _mm_set1_ps(o.x());
         origY = _mm_set1_ps(o.y());
@@ -114,7 +114,7 @@ struct Ray4 {
 
         // Pre-calculate inverse direction
         const float epsilon = 1e-8f;
-        Vector3D invD(
+        SIMDVector3D invD(
             1.0f / (std::abs(d.x()) < epsilon ? epsilon : d.x()),
             1.0f / (std::abs(d.y()) < epsilon ? epsilon : d.y()),
             1.0f / (std::abs(d.z()) < epsilon ? epsilon : d.z())
@@ -149,30 +149,30 @@ struct RayHit {
 
 // A standard 3D Bounding Box for the builder
 struct AABB {
-    Vector3D bmin = Vector3D( 1e30f,  1e30f,  1e30f);
-    Vector3D bmax = Vector3D(-1e30f, -1e30f, -1e30f);
+    SIMDVector3D bmin = SIMDVector3D( 1e30f,  1e30f,  1e30f);
+    SIMDVector3D bmax = SIMDVector3D(-1e30f, -1e30f, -1e30f);
 
-    void Grow(const Vector3D& p) {
+    void Grow(const SIMDVector3D& p) {
         // Direct SIMD min/max evaluation (1 clock cycle)
-        bmin = Vector3D(_mm_min_ps(bmin.reg, p.reg));
-        bmax = Vector3D(_mm_max_ps(bmax.reg, p.reg));
+        bmin = SIMDVector3D(_mm_min_ps(bmin.reg, p.reg));
+        bmax = SIMDVector3D(_mm_max_ps(bmax.reg, p.reg));
     }
 
     void Grow(const AABB& b) {
-        bmin = Vector3D(_mm_min_ps(bmin.reg, b.bmin.reg));
-        bmax = Vector3D(_mm_max_ps(bmax.reg, b.bmax.reg));
+        bmin = SIMDVector3D(_mm_min_ps(bmin.reg, b.bmin.reg));
+        bmax = SIMDVector3D(_mm_max_ps(bmax.reg, b.bmax.reg));
     }
 
     float Area() const {
-        Vector3D e = bmax - bmin; // Extents
+        SIMDVector3D e = bmax - bmin; // Extents
         return e.x() * e.y() + e.y() * e.z() + e.z() * e.x();
     }
 };
 
 // Represents your raw level geometry
 struct Triangle {
-    Vector3D v0, v1, v2;
-    Vector3D centroid; // Pre-calculated (v0+v1+v2)/3 for fast binning
+    SIMDVector3D v0, v1, v2;
+    SIMDVector3D centroid; // Pre-calculated (v0+v1+v2)/3 for fast binning
     AABB bounds;       // Pre-calculated AABB of this specific triangle
 };
 
@@ -357,15 +357,15 @@ struct HitResult {
     bool hit;    // Did we hit?
 };
 
-FORCE_INLINE HitResult IntersectTriangle_MT(const Vector3D& rayOrigin, const Vector3D& rayDir, const Vector3D& v0, const Vector3D& v1, const Vector3D& v2, bool cullBackfaces = true) {
+FORCE_INLINE HitResult IntersectTriangle_MT(const SIMDVector3D& rayOrigin, const SIMDVector3D& rayDir, const SIMDVector3D& v0, const SIMDVector3D& v1, const SIMDVector3D& v2, bool cullBackfaces = true) {
     HitResult result = { 0.0f, 0.0f, 0.0f, false };
 
     // Find vectors for two edges sharing v0
-    Vector3D e1 = v1 - v0;
-    Vector3D e2 = v2 - v0;
+    SIMDVector3D e1 = v1 - v0;
+    SIMDVector3D e2 = v2 - v0;
 
     // Begin calculating determinant - also used to calculate U parameter
-    Vector3D pvec = rayDir.cross(e2);
+    SIMDVector3D pvec = rayDir.cross(e2);
     
     // If determinant is near zero, ray lies in plane of triangle
     float det = pvec.dot(e1);
@@ -378,14 +378,14 @@ FORCE_INLINE HitResult IntersectTriangle_MT(const Vector3D& rayOrigin, const Vec
         if (det < EPSILON) return result;
         
         // Calculate distance from v0 to ray origin
-        Vector3D tvec = rayOrigin - v0;
+        SIMDVector3D tvec = rayOrigin - v0;
         
         // Calculate U parameter and test bounds (Notice we compare against 'det', not 1.0f!)
         result.u = tvec.dot(pvec);
         if (result.u < 0.0f || result.u > det) return result;
         
         // Prepare to test V parameter
-        Vector3D qvec = tvec.cross(e1);
+        SIMDVector3D qvec = tvec.cross(e1);
         
         // Calculate V parameter and test bounds
         result.v = qvec.dot(rayDir);
@@ -400,11 +400,11 @@ FORCE_INLINE HitResult IntersectTriangle_MT(const Vector3D& rayOrigin, const Vec
         
         float invDet_early = 1.0f / det; // Have to divide early for two-sided math
         
-        Vector3D tvec = rayOrigin - v0;
+        SIMDVector3D tvec = rayOrigin - v0;
         result.u = tvec.dot(pvec) * invDet_early;
         if (result.u < 0.0f || result.u > 1.0f) return result;
         
-        Vector3D qvec = tvec.cross(e1);
+        SIMDVector3D qvec = tvec.cross(e1);
         result.v = qvec.dot(rayDir) * invDet_early;
         if (result.v < 0.0f || result.u + result.v > 1.0f) return result;
         
@@ -803,9 +803,9 @@ public:
                                 // Cross products evaluate to 0, Determinant evaluates to 0. 
                                 // The SIMD Backface Culling instantly drops this lane safely!
                                 Triangle degenerate;
-                                degenerate.v0 = Vector3D(0, 0, 0);
-                                degenerate.v1 = Vector3D(0, 0, 0);
-                                degenerate.v2 = Vector3D(0, 0, 0);
+                                degenerate.v0 = SIMDVector3D(0, 0, 0);
+                                degenerate.v1 = SIMDVector3D(0, 0, 0);
+                                degenerate.v2 = SIMDVector3D(0, 0, 0);
                                 tri4Block.SetTriangle(lane, degenerate, (uint32_t)-1);
                             }
                         }
@@ -967,16 +967,16 @@ struct alignas(64) Matrix4x4 {
         m[0] = m[5] = m[10] = m[15] = 1.0f;
     }
 
-    Vector3D MultiplyPoint(const Vector3D& v) const {
-        return Vector3D(
+    SIMDVector3D MultiplyPoint(const SIMDVector3D& v) const {
+        return SIMDVector3D(
             v.x() * m[0] + v.y() * m[4] + v.z() * m[8]  + m[12],
             v.x() * m[1] + v.y() * m[5] + v.z() * m[9]  + m[13],
             v.x() * m[2] + v.y() * m[6] + v.z() * m[10] + m[14]
         );
     }
 
-    Vector3D MultiplyDirection(const Vector3D& v) const {
-        return Vector3D(
+    SIMDVector3D MultiplyDirection(const SIMDVector3D& v) const {
+        return SIMDVector3D(
             v.x() * m[0] + v.y() * m[4] + v.z() * m[8],
             v.x() * m[1] + v.y() * m[5] + v.z() * m[9],
             v.x() * m[2] + v.y() * m[6] + v.z() * m[10]
@@ -1017,15 +1017,15 @@ FORCE_INLINE AABB CalculateWorldBounds(const AABB& localBounds, const Matrix4x4&
     AABB worldBounds;
     
     // Extract the 8 corners of the local AABB
-    Vector3D corners[8] = {
-        Vector3D(localBounds.bmin.x(), localBounds.bmin.y(), localBounds.bmin.z()),
-        Vector3D(localBounds.bmax.x(), localBounds.bmin.y(), localBounds.bmin.z()),
-        Vector3D(localBounds.bmin.x(), localBounds.bmax.y(), localBounds.bmin.z()),
-        Vector3D(localBounds.bmax.x(), localBounds.bmax.y(), localBounds.bmin.z()),
-        Vector3D(localBounds.bmin.x(), localBounds.bmin.y(), localBounds.bmax.z()),
-        Vector3D(localBounds.bmax.x(), localBounds.bmin.y(), localBounds.bmax.z()),
-        Vector3D(localBounds.bmin.x(), localBounds.bmax.y(), localBounds.bmax.z()),
-        Vector3D(localBounds.bmax.x(), localBounds.bmax.y(), localBounds.bmax.z())
+    SIMDVector3D corners[8] = {
+        SIMDVector3D(localBounds.bmin.x(), localBounds.bmin.y(), localBounds.bmin.z()),
+        SIMDVector3D(localBounds.bmax.x(), localBounds.bmin.y(), localBounds.bmin.z()),
+        SIMDVector3D(localBounds.bmin.x(), localBounds.bmax.y(), localBounds.bmin.z()),
+        SIMDVector3D(localBounds.bmax.x(), localBounds.bmax.y(), localBounds.bmin.z()),
+        SIMDVector3D(localBounds.bmin.x(), localBounds.bmin.y(), localBounds.bmax.z()),
+        SIMDVector3D(localBounds.bmax.x(), localBounds.bmin.y(), localBounds.bmax.z()),
+        SIMDVector3D(localBounds.bmin.x(), localBounds.bmax.y(), localBounds.bmax.z()),
+        SIMDVector3D(localBounds.bmax.x(), localBounds.bmax.y(), localBounds.bmax.z())
     };
 
     // Transform each corner into world space and grow the new box
@@ -1369,10 +1369,10 @@ public:
 
         // Record the "perfect" surface area of the newly optimized tree
         if (!m_tlasNodes.empty()) {
-            // Reconstruct the Vector3D from the new 32-byte optimized scalar floats
+            // Reconstruct the SIMDVector3D from the new 32-byte optimized scalar floats
             AABB rootBounds = { 
-                Vector3D(m_tlasNodes[0].minX, m_tlasNodes[0].minY, m_tlasNodes[0].minZ), 
-                Vector3D(m_tlasNodes[0].maxX, m_tlasNodes[0].maxY, m_tlasNodes[0].maxZ) 
+                SIMDVector3D(m_tlasNodes[0].minX, m_tlasNodes[0].minY, m_tlasNodes[0].minZ), 
+                SIMDVector3D(m_tlasNodes[0].maxX, m_tlasNodes[0].maxY, m_tlasNodes[0].maxZ) 
             };
             m_optimalRootArea = rootBounds.Area();
         }
@@ -1439,8 +1439,8 @@ public:
             const TLASNode& node = m_tlasNodes[nodeIdx];
 
             AABB nodeBounds;
-            nodeBounds.bmin = Vector3D(node.minX, node.minY, node.minZ);
-            nodeBounds.bmax = Vector3D(node.maxX, node.maxY, node.maxZ);
+            nodeBounds.bmin = SIMDVector3D(node.minX, node.minY, node.minZ);
+            nodeBounds.bmax = SIMDVector3D(node.maxX, node.maxY, node.maxZ);
 
             // Standard AABB test. Notice we pass maxDistance, which NEVER shrinks in a Multi-Cast!
             float unusedHitDistance = 0.0f;
@@ -1451,8 +1451,8 @@ public:
                     const BVHInstance& instance = m_instances[instIdx];
 
                     // --- THE MATRIX JUMP (INVERSE TRANSFORM) ---
-                    Vector3D localOrig = instance.inverseTransform.MultiplyPoint(worldRay.origin);
-                    Vector3D localDir = instance.inverseTransform.MultiplyDirection(worldRay.direction);
+                    SIMDVector3D localOrig = instance.inverseTransform.MultiplyPoint(worldRay.origin);
+                    SIMDVector3D localDir = instance.inverseTransform.MultiplyDirection(worldRay.direction);
 
                     // Construct the heavy SIMD Ray4 for the BLAS
                     Ray4 localRay(localOrig, localDir);
@@ -1500,8 +1500,8 @@ public:
 
             // Standard scalar AABB intersection
             AABB nodeBounds;
-            nodeBounds.bmin = Vector3D(node.minX, node.minY, node.minZ);
-            nodeBounds.bmax = Vector3D(node.maxX, node.maxY, node.maxZ);
+            nodeBounds.bmin = SIMDVector3D(node.minX, node.minY, node.minZ);
+            nodeBounds.bmax = SIMDVector3D(node.maxX, node.maxY, node.maxZ);
 
             // Standard AABB test against the instance's world bounds
             if (IntersectAABB(nodeBounds, worldRay, outHit.t)) {
@@ -1513,8 +1513,8 @@ public:
                     // --- THE MATRIX JUMP (INVERSE TRANSFORM) ---
                     // We hit the car's bounding box in the world! 
                     // Now, teleport the ray into the car's local 0,0,0 space.
-                    Vector3D localOrig = instance.inverseTransform.MultiplyPoint(worldRay.origin);
-                    Vector3D localDir = instance.inverseTransform.MultiplyDirection(worldRay.direction);
+                    SIMDVector3D localOrig = instance.inverseTransform.MultiplyPoint(worldRay.origin);
+                    SIMDVector3D localDir = instance.inverseTransform.MultiplyDirection(worldRay.direction);
 
                     // If a car is scaled up to be 3x larger than normal, this inverse matrix will shrink localDir to be 3x smaller than a unit vector (no need to normalize it).
 
@@ -1546,7 +1546,7 @@ public:
 
     // --- PHASE 2: DEFERRED ATTRIBUTE EVALUATION ---
     // Call this only IF Raycast() returned true, and only for the final pixel/bullet calculation.
-    Vector3D GetWorldNormal(const RayHit& hit, const std::vector<Triangle>& rawLevelGeometry) const {
+    SIMDVector3D GetWorldNormal(const RayHit& hit, const std::vector<Triangle>& rawLevelGeometry) const {
         const BVHInstance& inst = m_instances[hit.instanceIndex];
         
         // 1. Fetch the exact triangle from RAM (Only happens ONCE per ray!)
@@ -1554,9 +1554,9 @@ public:
 
         // 2. Calculate the local flat normal via cross product 
         // (Or interpolate vertex normals using hit.u and hit.v for smooth shading)
-        Vector3D e1 = tri.v1 - tri.v0;
-        Vector3D e2 = tri.v2 - tri.v0;
-        Vector3D localNormal = e1.cross(e2);
+        SIMDVector3D e1 = tri.v1 - tri.v0;
+        SIMDVector3D e2 = tri.v2 - tri.v0;
+        SIMDVector3D localNormal = e1.cross(e2);
 
         // Inline Normalization
         float lenSq1 = localNormal.dot(localNormal);
@@ -1569,7 +1569,7 @@ public:
         // If the car was scaled (e.g., squashed on the Z axis), the normal will warp.
         // Multiply the normal by the Transpose of the Inverse Matrix to prevent scaling distortion.
         Matrix4x4 transposeInverse = inst.inverseTransform.Transpose(); // Guarentees that lighting and physics reflections will always behave the same, even if the designer squashes, stretches, or warps the 3D models in the editor.
-        Vector3D worldNormal = transposeInverse.MultiplyDirection(localNormal);
+        SIMDVector3D worldNormal = transposeInverse.MultiplyDirection(localNormal);
 
         // Inline Normalization
         float lenSq2 = worldNormal.dot(worldNormal);
