@@ -918,7 +918,7 @@ FORCE_INLINE constexpr Vector3D operator*(const Matrix4& m, const Vector3D& v) {
     float z = (m.m[2] * v.x) + (m.m[6] * v.y) + (m.m[10] * v.z) + (m.m[14] * v.w);
     float w = (m.m[3] * v.x) + (m.m[7] * v.y) + (m.m[11] * v.z) + (m.m[15] * v.w);
 
-    return Vector3D(x, y, z, w);
+    return Vector3D(x, y, z);
 }
 
 // ==================================================================================
