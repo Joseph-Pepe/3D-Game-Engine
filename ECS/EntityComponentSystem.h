@@ -15,8 +15,12 @@
 #include <stdexcept>
 
 // Engine Dependencies
-#include "Math.h"
-#include "imgui.h"
+#include "../Math.h"
+#include "../imgui.h"
+#include "../STLContainers/SmallVector.h"
+#include "../Memory.h"               // Required for AlignedAllocator
+#include "../SIMD/SIMDVectorMath.h"  // Required for NATIVE_SIMD_BATCH_ALIGN, PhysicsChunkNative
+
 
 // ==================================================================================
 // 1. C++ 26 COMPILE-TIME STATIC REFLECTION
@@ -197,7 +201,7 @@ struct ComponentStorageTrait {
 template <>
 struct ComponentStorageTrait<PhysicsComponent> {
     // Override storage to use your AoSoA chunks
-    using StorageType = std::vector<PhysicsChunk8>;
+    using StorageType = std::vector<Engine::Physics::PhysicsChunkNative>;
     static constexpr bool is_aosoa = true;
 };
 
@@ -261,7 +265,7 @@ using Entity = uint32_t;
 // Max unique component types in the engine
 constexpr uint32_t MAX_COMPONENTS = 64;
 constexpr Entity MAX_ENTITIES = 100000;
-
+constexpr uint32_t ENTITIES_PER_CHUNK = 1024;
 
 // The central map for every alive entity
 struct EntityRecord {
@@ -274,21 +278,18 @@ struct EntityRecord {
 std::vector<EntityRecord> entityDirectory(MAX_ENTITIES);
 
 // --- FLAT MEMORY CHUNK ---
-// A single block of memory holding 256 entities of the EXACT same signature
 struct ArchetypeChunk {
     uint32_t activeCount = 0;
 
-    // REVERSE LOOKUP: Maps Lane Index -> Entity ID
-    Entity entities[ENTITIES_PER_CHUNK];
+    // REVERSE LOOKUP: (Maps Lane Index -> Entity ID), [small_vector ensures this stays inline until it overflows]
+    Engine::STLContainer::small_vector<Entity, ENTITIES_PER_CHUNK> entities;   
     
-    // 1. ONE single contiguous heap allocation for the entire chunk
-    std::vector<std::byte> rawMemory;
+    // 1. ONE single contiguous heap allocation for the entire chunk (and is guaranteed to be aligned for AVX2/AVX-512).
+    std::vector<std::byte, Engine::Memory::AlignedAllocator<std::byte, Engine::ISAArch::NATIVE_SIMD_BATCH_ALIGN>> rawMemory;
     
     // Type-erased memory for the components. 
-    // e.g., If this archetype has Transform and Physics, this array contains: [Transform x 256] followed by [PhysicsChunk8 x 32]
-
     // 2. Zero-cost views into the flat memory block for each component type
-    std::vector<std::span<std::byte>> componentBuffers;
+    Engine::STLContainer::small_vector<std::span<std::byte>, MAX_COMPONENTS> componentBuffers;
 
     void AllocateFlatMemory(const std::vector<size_t>& strides) {
         size_t totalBytes = 0;
@@ -300,7 +301,7 @@ struct ArchetypeChunk {
         size_t offset = 0;
         for (size_t stride : strides) {
             size_t size = stride * ENTITIES_PER_CHUNK;
-            componentBuffers.emplace_back(rawMemory.data() + offset, size);
+            componentBuffers.push_back(std::span<std::byte>(rawMemory.data() + offset, size));
             offset += size;
         }
     }
@@ -419,16 +420,18 @@ private:
     ArchetypeManager archetypeManager;
 
     // --- LIGHT STORAGE (Sparse Sets) --- We only create sparse sets for components marked as StorageBackend::SparseSet
-    // C++26: Pack Indexing allows us to auto-generate vectors for every component in the tuple
     template <typename... Types>
     struct SparseStorage {
-        // DENSE ARRAYS: Now dynamically resolves to std::vector<T> OR std::vector<Chunk8>, the actual packed component data (No gaps!) 
-        std::tuple<typename ComponentStorageTrait<Types>::StorageType...> denseArrays;
+        // DENSE ARRAYS: Automatically aligned for SIMD! The actual packed data.
+        std::tuple<std::vector<typename ComponentStorageTrait<Types>::StorageType::value_type, 
+                   Engine::Memory::AlignedAllocator<typename ComponentStorageTrait<Types>::StorageType::value_type, Engine::ISAArch::NATIVE_SIMD_BATCH_ALIGN>>...> denseArrays;
         
-        // 2. SPARSE ARRAYS: Maps Entity ID -> logical dense index (0, 1, 2, 3...)
-        // If an entity doesn't have the component, its value is -1.
+        // 2. SPARSE ARRAYS: Maps Entity ID -> logical dense index (0, 1, 2, 3...), [if an entity doesn't have the component, its value is -1].
         std::tuple<std::vector<uint32_t>...> sparseArrays;
+
+        uint32_t denseEntityCount = 0;
         
+        // [...]: C++26 Pack Indexing allows us to auto-generate vectors for every component in the tuple.
         SparseStorage() {
             auto init_sparse = []<std::size_t... I>(std::tuple<std::vector<uint32_t>...>& tup, std::index_sequence<I...>) {
                 (std::get<I>(tup).resize(MAX_ENTITIES, static_cast<uint32_t>(-1)), ...);
@@ -448,14 +451,22 @@ private:
     // Ensures when UI or gameplay systems modify a proxy struct, it scatters the data safely back into the correct SIMD lanes without corrupting neighboring entities.
     template <typename T>
     void WriteToArchetypeChunk(Archetype* arch, uint32_t chunkIndex, uint32_t laneIndex, uint32_t globalID, const T& component) {
-        
-        // 1. Locate the component's byte buffer
-        auto it = std::ranges::find(arch->componentIDs, globalID);
-        if (it == arch->componentIDs.end()) {
-            throw std::runtime_error("Critical ECS Failure: Component ID not found in Archetype signature.");
+        // 1. Locate the component's byte buffer in this archetype using C++20/26 ranges
+        // auto it = std::ranges::find(arch->componentIDs, globalID);
+        // if (it == arch->componentIDs.end()) {
+        //     throw std::runtime_error("Critical ECS Failure: Component ID not found in Archetype signature.");
+        // }
+        // size_t bufferIndex = std::distance(arch->componentIDs.begin(), it);
+
+        // 1. Locate the component's byte buffer with DIRECT INDEX LOOP which compiles down to faster assembly for smaller arrays (e.g., ComponentIDs). 
+        size_t bufferIndex = 0;
+        for (; bufferIndex < arch->componentIDs.size(); ++bufferIndex) {
+            if (arch->componentIDs[bufferIndex] == globalID) break;
         }
-        
-        size_t bufferIndex = std::distance(arch->componentIDs.begin(), it);
+        if (bufferIndex == arch->componentIDs.size()) {
+            throw std::runtime_error("Critical ECS Failure: Component ID not found.");
+        }
+
         auto& byteBuffer = arch->chunks[chunkIndex].componentBuffers[bufferIndex];
 
         // 2. COMPILE-TIME BRANCH: Scatter (AoSoA) vs Direct Write (AoS)
@@ -463,20 +474,25 @@ private:
             
             // --- AoSoA WRITE PATH ---
             using ChunkType = typename ComponentStorageTrait<T>::StorageType::value_type; 
+
+            // DYNAMIC SCALING
+            constexpr uint32_t BATCH_SIZE = Engine::Physics::NATIVE_BATCH_SIZE;
             
-            uint32_t subChunkIndex = laneIndex / 8;
-            uint32_t innerLane = laneIndex % 8;
+            uint32_t subChunkIndex = laneIndex / BATCH_SIZE;
+            uint32_t innerLane = laneIndex % BATCH_SIZE;
             
-            auto* chunk8 = reinterpret_cast<ChunkType*>(byteBuffer.data() + (subChunkIndex * sizeof(ChunkType)));
+            auto* chunkNative = reinterpret_cast<ChunkType*>(byteBuffer.data() + (subChunkIndex * sizeof(ChunkType)));
             
             // Scatter the proxy data back into the SIMD lanes
             if constexpr (std::is_same_v<T, PhysicsComponent>) {
-                chunk8->velX[innerLane] = component.velocity.x;
-                chunk8->velY[innerLane] = component.velocity.y;
-                chunk8->velZ[innerLane] = component.velocity.z;
-                chunk8->mass[innerLane] = component.mass;
-                chunk8->friction[innerLane] = component.friction;
-                chunk8->isStatic[innerLane] = component.isStatic;
+                chunkNative->velX[innerLane] = component.velocity.x;
+                chunkNative->velY[innerLane] = component.velocity.y;
+                chunkNative->velZ[innerLane] = component.velocity.z;
+                chunkNative->mass[innerLane] = component.mass;
+                chunkNative->friction[innerLane] = component.friction;
+
+                // Cast the proxy boolean into a SIMD-friendly float mask
+                chunkNative->isStaticMask[innerLane] = component.isStatic ? 1.0f : 0.0f;
             } else {
                 throw std::runtime_error("AoSoA proxy injection missing for this type.");
             }
@@ -498,37 +514,50 @@ private:
 
     template <typename T>
     auto ReadFromArchetypeChunk(Archetype* arch, uint32_t chunkIndex, uint32_t laneIndex, uint32_t globalID) -> std::conditional_t<ComponentStorageTrait<T>::is_aosoa, T, T&> {
-        
         // 1. Locate the component's byte buffer in this archetype using C++20/26 ranges
-        auto it = std::ranges::find(arch->componentIDs, globalID);
-        if (it == arch->componentIDs.end()) {
-            throw std::runtime_error("Critical ECS Failure: Component ID not found in Archetype signature.");
+        // auto it = std::ranges::find(arch->componentIDs, globalID);
+        // if (it == arch->componentIDs.end()) {
+        //     throw std::runtime_error("Critical ECS Failure: Component ID not found in Archetype signature.");
+        // }
+        // size_t bufferIndex = std::distance(arch->componentIDs.begin(), it);
+
+        // 1. Locate the component's byte buffer with DIRECT INDEX LOOP which compiles down to faster assembly for smaller arrays (e.g., ComponentIDs). 
+        size_t bufferIndex = 0;
+        for (; bufferIndex < arch->componentIDs.size(); ++bufferIndex) {
+            if (arch->componentIDs[bufferIndex] == globalID) break;
         }
-        
-        size_t bufferIndex = std::distance(arch->componentIDs.begin(), it);
+        if (bufferIndex == arch->componentIDs.size()) {
+            throw std::runtime_error("Critical ECS Failure: Component ID not found.");
+        }
+
+
         auto& byteBuffer = arch->chunks[chunkIndex].componentBuffers[bufferIndex];
 
         // 2. COMPILE-TIME BRANCH: AoSoA vs AoS
         if constexpr (ComponentStorageTrait<T>::is_aosoa) {
             
-            // --- AoSoA READ PATH (e.g., PhysicsComponent from PhysicsChunk8) ---
+            // --- AoSoA READ PATH (e.g., PhysicsComponent from Engine::Physics::PhysicsChunkNative) ---
             using ChunkType = typename ComponentStorageTrait<T>::StorageType::value_type; 
+
+            constexpr uint32_t BATCH_SIZE = Engine::Physics::NATIVE_BATCH_SIZE;
             
-            uint32_t subChunkIndex = laneIndex / 8;
-            uint32_t innerLane = laneIndex % 8;
+            uint32_t subChunkIndex = laneIndex / BATCH_SIZE;
+            uint32_t innerLane = laneIndex % BATCH_SIZE;
             
             // Cast the byte array to our aligned SIMD chunk type
-            auto* chunk8 = reinterpret_cast<ChunkType*>(byteBuffer.data() + (subChunkIndex * sizeof(ChunkType)));
+            auto* chunkNative = reinterpret_cast<ChunkType*>(byteBuffer.data() + (subChunkIndex * sizeof(ChunkType)));
             
             // Reconstruct and return the proxy POD struct (Copy)
             if constexpr (std::is_same_v<T, PhysicsComponent>) {
                 T proxy;
-                proxy.velocity.x = chunk8->velX[innerLane];
-                proxy.velocity.y = chunk8->velY[innerLane];
-                proxy.velocity.z = chunk8->velZ[innerLane];
-                proxy.mass = chunk8->mass[innerLane];
-                proxy.friction = chunk8->friction[innerLane];
-                proxy.isStatic = chunk8->isStatic[innerLane];
+                proxy.velocity.x = chunkNative->velX[innerLane];
+                proxy.velocity.y = chunkNative->velY[innerLane];
+                proxy.velocity.z = chunkNative->velZ[innerLane];
+                proxy.mass = chunkNative->mass[innerLane];
+                proxy.friction = chunkNative->friction[innerLane];
+                
+                // Cast the SIMD float mask back to a standard C++ boolean for the UI/Proxy
+                proxy.isStatic = (chunkNative->isStaticMask[innerLane] > 0.5f);
                 return proxy;
             } else {
                 // If you add more AoSoA types later, you handle their reconstruction here
@@ -657,8 +686,11 @@ public:
             uint32_t denseIndex = std::get<sparseID>(sparseManager.sparseArrays)[e];
 
             if constexpr (ComponentStorageTrait<T>::is_aosoa) {
-                uint32_t chunkIndex = denseIndex / 8;
-                uint32_t laneIndex = denseIndex % 8;
+                // DYNAMIC SCALING
+                constexpr uint32_t BATCH_SIZE = Engine::Physics::NATIVE_BATCH_SIZE;
+
+                uint32_t chunkIndex = denseIndex / BATCH_SIZE;
+                uint32_t laneIndex = denseIndex % BATCH_SIZE;
                 auto& chunk = std::get<sparseID>(sparseManager.denseArrays)[chunkIndex];
                 
                 // Scatter the data into the SIMD lanes
@@ -667,7 +699,9 @@ public:
                 chunk.velZ[laneIndex] = component.velocity.z;
                 chunk.mass[laneIndex] = component.mass;
                 chunk.friction[laneIndex] = component.friction;
-                chunk.isStatic[laneIndex] = component.isStatic;
+
+                // Cast the boolean to the SIMD float mask
+                chunk.isStaticMask[laneIndex] = component.isStatic ? 1.0f : 0.0f;
             } else {
                 std::get<sparseID>(sparseManager.denseArrays)[denseIndex] = component;
             }
@@ -723,15 +757,25 @@ public:
             // 2. Otherwise, pack it tightly at the end of the dense array
             else {
                 if constexpr (ComponentStorageTrait<T>::is_aosoa) {
-                    // Chunk Packing Logic. Ensure a chunk has free lanes before inserting.
-                    if (denseArray.empty() || denseArray.back().activeCount == 8) {
-                        denseArray.push_back(typename ComponentStorageTrait<T>::StorageType::value_type{});
+                    constexpr uint32_t BATCH_SIZE = Engine::Physics::NATIVE_BATCH_SIZE;
+
+                    // 1. Use the centralized counter to determine where we are
+                    uint32_t currentCount = sparseManager.denseEntityCount;
+                    
+                    // 2. If the current count perfectly divides into the batch size, it means all existing chunks are 100% full, and we need a new one.
+                    if (currentCount % BATCH_SIZE == 0) {
+                         denseArray.push_back(typename ComponentStorageTrait<T>::StorageType::value_type{});
                     }
-                    
-                    uint32_t chunkIndex = denseArray.size() - 1;
-                    uint32_t laneIndex = denseArray.back().activeCount++;
-                    
-                    sparseArray[e] = (chunkIndex * 8) + laneIndex;
+
+                    // 3. Calculate exact placement based on the master count
+                    uint32_t chunkIndex = currentCount / BATCH_SIZE;
+                    uint32_t laneIndex = currentCount % BATCH_SIZE;
+
+                    // sparseArray[e] = (chunkIndex * BATCH_SIZE) + laneIndex;
+
+                    // 4. Record the lookup, increment the master tracker, and write the data
+                    sparseArray[e] = currentCount;
+                    sparseManager.denseEntityCount++; // Increment safely!
                     SetComponent(e, component); // Write data into the newly reserved lane
                 } else {
                     // Standard AoS Packing
@@ -764,9 +808,14 @@ public:
             uint32_t denseIndex = std::get<sparseID>(sparseManager.sparseArrays)[e];
 
             if constexpr (ComponentStorageTrait<T>::is_aosoa) {
+
+                // AoSoA Path: Calculate Chunk and Lane dynamically
+                constexpr uint32_t BATCH_SIZE = Engine::Physics::NATIVE_BATCH_SIZE;
+
                 // AoSoA Path: Calculate Chunk and Lane
-                uint32_t chunkIndex = denseIndex / 8;
-                uint32_t laneIndex = denseIndex % 8;
+                uint32_t chunkIndex = denseIndex / BATCH_SIZE;
+                uint32_t laneIndex = denseIndex % BATCH_SIZE;
+
                 auto& chunk = std::get<sparseID>(sparseManager.denseArrays)[chunkIndex];
                 
                 // For UI/Single Entity logic, we reconstruct the POD struct on the fly: Gather the data from the SIMD lanes into a temporary struct
@@ -776,7 +825,9 @@ public:
                 proxy.velocity.z = chunk.velZ[laneIndex];
                 proxy.mass = chunk.mass[laneIndex];
                 proxy.friction = chunk.friction[laneIndex];
-                proxy.isStatic = chunk.isStatic[laneIndex];
+
+                // Cast the float mask back to boolean
+                proxy.isStatic = (chunk.isStaticMask[laneIndex] > 0.5f);
                 return proxy; 
             } else {
                 // AoS Path: Standard direct reference return to the tightly packed data
