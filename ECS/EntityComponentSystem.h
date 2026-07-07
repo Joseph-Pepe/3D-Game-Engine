@@ -466,7 +466,12 @@ private:
                    /*Engine::Memory::AlignedAllocator*/AlignedAllocator<typename ComponentStorageTrait<Types>::StorageType::value_type, Engine::Physics::NATIVE_SIMD_BATCH_ALIGN>>...> denseArrays;
         
         // 2. SPARSE ARRAYS: Maps Entity ID -> logical dense index (0, 1, 2, 3...), [if an entity doesn't have the component, its value is -1].
-        std::tuple<std::vector<uint32_t>...> sparseArrays;
+        // Alias maps every 'Type' in the pack to a uint32_t vector
+        template <typename> 
+        using SparseVec = std::vector<uint32_t>;
+
+        // 2. SPARSE ARRAYS: Now the compiler knows to expand this once for every type in 'Types'
+        std::tuple<SparseVec<Types>...> sparseArrays;
 
         uint32_t denseEntityCount = 0;
         
