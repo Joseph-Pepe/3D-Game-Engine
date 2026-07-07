@@ -129,13 +129,14 @@ namespace Engine::Math::SIMD {
 
         FORCE_INLINE Float4 Zero() { return _mm_setzero_ps(); }
         FORCE_INLINE Float4 Set(float x, float y, float z, float w) { return _mm_set_ps(w, z, y, x); }
-        FORCE_INLINE Float4 Set1(float v) { return _mm_set1_ps(v); }
+        FORCE_INLINE Float4 Set1(float v) { return _mm_set1_ps(v); } // Broadcasts scalar to all 4 slots        
         
         FORCE_INLINE Float4 Add(Float4 a, Float4 b) { return _mm_add_ps(a, b); }
         FORCE_INLINE Float4 Sub(Float4 a, Float4 b) { return _mm_sub_ps(a, b); }
         FORCE_INLINE Float4 Mul(Float4 a, Float4 b) { return _mm_mul_ps(a, b); }
         FORCE_INLINE Float4 FMAdd(Float4 a, Float4 b, Float4 c) { return _mm_fmadd_ps(a, b, c); } // (a * b) + c
 
+    
         FORCE_INLINE Float4 BlendMaskW(Float4 a, Float4 b) { return _mm_blend_ps(a, b, 0x08); }
 
         FORCE_INLINE float ExtractX(Float4 v) { return _mm_cvtss_f32(v); }
@@ -143,8 +144,59 @@ namespace Engine::Math::SIMD {
         FORCE_INLINE float ExtractZ(Float4 v) { return _mm_cvtss_f32(_mm_shuffle_ps(v, v, _MM_SHUFFLE(2, 2, 2, 2))); }
         FORCE_INLINE float ExtractW(Float4 v) { return _mm_cvtss_f32(_mm_shuffle_ps(v, v, _MM_SHUFFLE(3, 3, 3, 3))); }
 
-        FORCE_INLINE float Dot4(Float4 a, Float4 b) { return _mm_cvtss_f32(_mm_dp_ps(a, b, 0xFF)); }
-        FORCE_INLINE float Dot3(Float4 a, Float4 b) { return _mm_cvtss_f32(_mm_dp_ps(a, b, 0x7F)); }
+        // ======================================
+        // DOT PRODUCT INSTRUCTION (_mm_dp_ps)
+        // ======================================
+        /*
+            - On modern Intel/AMD architectures, _mm_dp_ps is implemented in slow microcode (~9-14 clock cycles).
+            - It tries to do too many things (multiply, horizontal add, and mask) simultaneously.
+            - Hogs CPU execution ports because the silicilon has to internally decode it into a sequence of multiplies, adds, and bitwise masks.
+            - 0x7F mask: calculates dots for first 3 elements.
+        */
+
+        FORCE_INLINE float Dot4_mm_dp_ps(Float4 a, Float4 b) { return _mm_cvtss_f32(_mm_dp_ps(a, b, 0xFF)); }
+        FORCE_INLINE float Dot3_mm_dp_ps(Float4 a, Float4 b) { return _mm_cvtss_f32(_mm_dp_ps(a, b, 0x7F)); }
+
+        // ===========================================
+        // DOT PRODUCT (MANUAL HORIZONTAL REDUCTION)
+        // ===========================================
+        /*
+            - Operates on separate execution ports and can overlap these manual instructions.
+            - Separate the mathematical operations and run them back to back manually to have the CPU interleave the operation pipelines to result in a much higher throughput.
+            - FMA/shuffle reduction will yield significant performance boost in heavy vector math operations (i.e., dot product).
+            - Bypass the _mm_dp_ps hardware trap using fast manual reduction.
+            
+              [_mm_mul_ps] ~4 cycles
+              [_mm_movehl_ps, _mm_shuffle_ps] ~1 cycle
+              [_mm_add_ps, _mm_add_ss] ~3-4 cycles
+        */
+
+        FORCE_INLINE float Dot3(Float4 a, Float4 b) { 
+            // 1. Multiply the vectors 
+            __m128 mul = _mm_mul_ps(a, b);
+            
+            // 2. We only want X, Y, and Z. Force W to 0.0f before the horizontal add!
+            mul = _mm_blend_ps(mul, _mm_setzero_ps(), 0x08);
+
+            // 3. Fast Horizontal Sum (since w = 0.0f, we can safely horizontal sum all 4 lanes)
+            __m128 shuf = _mm_movehl_ps(mul, mul); 
+            mul = _mm_add_ps(mul, shuf);           
+            shuf = _mm_shuffle_ps(mul, mul, _MM_SHUFFLE(1, 1, 1, 1)); 
+            mul = _mm_add_ss(mul, shuf);           
+            return _mm_cvtss_f32(mul);
+        }
+
+        FORCE_INLINE float Dot4(Float4 a, Float4 b) { 
+            // 1. Multiply the vectors 
+            __m128 mul = _mm_mul_ps(a, b);
+
+            // 2. Fast Horizontal Sum
+            __m128 shuf = _mm_movehl_ps(mul, mul); 
+            mul = _mm_add_ps(mul, shuf);           
+            shuf = _mm_shuffle_ps(mul, mul, _MM_SHUFFLE(1, 1, 1, 1)); 
+            mul = _mm_add_ss(mul, shuf);           
+            return _mm_cvtss_f32(mul);
+        }
 
         FORCE_INLINE Float4 Cross(Float4 a, Float4 b) {
             __m128 tmp0 = _mm_shuffle_ps(a, a, _MM_SHUFFLE(3, 0, 2, 1));
@@ -210,16 +262,17 @@ namespace Engine::Math::SIMD {
 // ==================================================================================
 /*
     - Used for one-off calculations like the camera and compile time calculations.
-    - SIMD Vectors must perform math operations on all its available lanes (4, 8, 16) simultaneously in hardware registers.
     - Pure Scalar Vectors execute math operations in one lane.
+    - "float x, y, z, w" and "float data[4]" are treated the same by the compiler in memory except for syntax (data[0] vs x).
 */
 class Vector3D {
 public:
-    // 16-bytes 
-    float x, y, z, w;
+    // Point     [w = 1]: (apply  translation)
+    // Direction [w = 0]: (ignore translation)
+    float x, y, z, w; // 16-bytes in memory
 
-    constexpr Vector3D(float x = 0.0f, float y = 0.0f, float z = 0.0f) 
-        : x(x), y(y), z(z), w(0.0f) {}
+    constexpr Vector3D(float x = 0.0f, float y = 0.0f, float z = 0.0f, float w = 0.0f) 
+        : x(x), y(y), z(z), w(w) {}
 
     // Addition: C = A + B
     FORCE_INLINE constexpr Vector3D operator+(const Vector3D& other) const {
@@ -288,11 +341,18 @@ public:
 // ==================================================================================
 // 128-BIT ACCELERATED VECTORS (CROSS-PLATFORM)
 // ==================================================================================
+/* 
+    - SIMD Accelerated Vector that needs to be used for bulk data processing.
+    - SIMD Vectors must perform math operations on all its available lanes (4, 8, 16) simultaneously in hardware registers.
+    - alignas(16) forces every instance of this class to align to 16 bytes (This tells the compiler: "Every instance of this class must start at a 16-byte boundary in memory").
+*/
 class alignas(16) SIMDVector3D {
 public:
-    Engine::Math::SIMD::Float4 reg;
+    Engine::Math::SIMD::Float4 reg; // 4 (32-bit) floats = 128-bits 
 
     FORCE_INLINE SIMDVector3D() : reg(Engine::Math::SIMD::Zero()) {}
+
+    // Constructor: Default initializes to {0, 0, 0, 0}
     FORCE_INLINE SIMDVector3D(float _x, float _y, float _z, float _w = 0.0f) 
         : reg(Engine::Math::SIMD::Set(_x, _y, _z, _w)) {}
     FORCE_INLINE SIMDVector3D(Engine::Math::SIMD::Float4 m) : reg(m) {}
@@ -327,7 +387,18 @@ public:
     FORCE_INLINE float dot(const SIMDVector3D& other) const { return Engine::Math::SIMD::Dot3(reg, other.reg); }
     FORCE_INLINE SIMDVector3D cross(const SIMDVector3D& other) const { return SIMDVector3D(Engine::Math::SIMD::Cross(reg, other.reg)); }
 
+    // --- HOMOGENEOUS COORDINATE ENFORCEMENT ---
+    /*
+        - Allow addition, cross product, and dot products to generate garbage in the W lane (let the math be dirty). 
+        - The w component does not really matter for most vector operations.
+        - Clean it at the boundary where w actually matters (i.e., when multiplying a vector [SIMDVector3D] by a matrix (Matrix4x4_SIMD)).
+        - Force it to either a Point [w = 1, which applies translation], or a Direction [w = 0, which ignores translation] right before the multiplication.
+    */
+
+    // Blend in a 0.0f to the W lane (mask 0x08 = 1000 binary)! Forces W = 0.0f (Treats the vector as a Direction/Normal)
     FORCE_INLINE SIMDVector3D asDirection() const { return SIMDVector3D(Engine::Math::SIMD::BlendMaskW(reg, Engine::Math::SIMD::Zero())); }
+    
+    // Blend in a 1.0f to the W lane (mask 0x08 = 1000 binary)! Forces W = 1.0f (Treats the vector as a Position/Point in space)
     FORCE_INLINE SIMDVector3D asPoint() const { return SIMDVector3D(Engine::Math::SIMD::BlendMaskW(reg, Engine::Math::SIMD::Set(0.0f, 0.0f, 0.0f, 1.0f))); }
 
     // --- MAGNITUDE & NORMALIZATION ---
@@ -918,7 +989,7 @@ FORCE_INLINE constexpr Vector3D operator*(const Matrix4& m, const Vector3D& v) {
     float z = (m.m[2] * v.x) + (m.m[6] * v.y) + (m.m[10] * v.z) + (m.m[14] * v.w);
     float w = (m.m[3] * v.x) + (m.m[7] * v.y) + (m.m[11] * v.z) + (m.m[15] * v.w);
 
-    return Vector3D(x, y, z);
+    return Vector3D(x, y, z, w);
 }
 
 // ==================================================================================
