@@ -39,6 +39,7 @@ extern "C" void* SwapContext(void** current_rsp, void* target_rsp);
 // ==================================================================================
 // CROSS-PLATFORM CACHE LINE ALIGNMENT
 // ==================================================================================
+
 // Prevents compilation errors on strict compilers while maintaining false-sharing protection.
 #if defined(__cpp_lib_hardware_interference_size)
     constexpr std::size_t CACHE_CHUNK_SIZE = std::hardware_destructive_interference_size;
@@ -666,7 +667,7 @@ public:
                 
                 // --- Initialize our lightweight 4-byte state ---
                 // We use a simple hash of the worker index to ensure different starting seeds
-                uint32_t rngState = (tl_workerIndex + 1) * 2654435761u;
+                uint64_t rngState = (tl_workerIndex + 1) * 2654435761u;
 
                 // 1. CACHE THIS LOCALLY! 
                 // Thread counts don't dynamically change during gameplay.
@@ -712,8 +713,8 @@ public:
                             // Sweep all queues in parallel
                             if (localActiveQueues > 1) {
                                 // --- Fast random victim selection ---
-                                uint32_t randomVal = XorShift32(rngState);
-                                uint32_t startVictim = MapToRange(randomVal, localActiveQueues);
+                                uint32_t randomVal = Engine::Math::PCG32(rngState);
+                                uint32_t startVictim = Engine::Math::MapToRange(randomVal, localActiveQueues);
 
                                 // OS context switches (sleep, wake back up) are brutally expensive (up to 1,500 microseconds).
                                 // thread must be 100% certain the engine is devoid of work before it goes to sleep (i.e., loop guarantees that no jobs are left hiding).
@@ -740,7 +741,7 @@ public:
                             uint64_t jobStartCycles = __rdtsc(); // __rdtsc() counts literal CPU clock pulses  exactly when the AVX instructions fire.
                             
                             // Let the system figure out if it's a Fiber or Coroutine!
-                            ExecuteTask(job);
+                            this->ExecuteTask(job);
 
                             // job.resume(); // Execute the heavy AVX2 math
 
@@ -784,8 +785,8 @@ public:
                                     // Instead of one core doing 100% of the work in 20 millisconds, we have 4 cores doing 25% of the work in 5 milliseconds.
                                     // Hunt for real victims!
                                     // --- Zero-division, cache-friendly victim hunting! ---
-                                    uint32_t randomVal = XorShift32(rngState);
-                                    uint32_t victimIndex = MapToRange(randomVal, localActiveQueues);
+                                    uint32_t randomVal = Engine::Math::PCG32(rngState);
+                                    uint32_t victimIndex = Engine::Math::MapToRange(randomVal, localActiveQueues);
 
                                     if (victimIndex != tl_workerIndex) {
                                         // PROPERLY CAPTURE THE JOB!
@@ -819,7 +820,7 @@ public:
                                 // If the spin loop successfully grabbed a job, execute it immediately.
                                 uint64_t jobStartCycles = __rdtsc();
                                 // job.resume();
-                                ExecuteTask(job);
+                                this->ExecuteTask(job);
                                 activeCycles += (__rdtsc() - jobStartCycles);
                                 jobsThisFrame++;
                             }
@@ -1108,8 +1109,8 @@ public:
                 // Only steal from active threads!
                 if (localActiveQueues > 1) {
                     // --- Fast random victim selection ---
-                    uint32_t randomVal = XorShift32(rngState);
-                    uint32_t startVictim = MapToRange(randomVal, localActiveQueues);
+                    uint32_t randomVal = Engine::Math::PCG32(rngState);
+                    uint32_t startVictim = Engine::Math::MapToRange(randomVal, localActiveQueues);
 
                     // OS context switches (sleep, wake back up) are brutally expensive (up to 1,500 microseconds).
                     // Sweep sequentially through every single queue before deciding the system is truly empty.
@@ -1139,7 +1140,7 @@ public:
                 uint64_t jobStartCycles = __rdtsc();
                 // job.resume(); 
 
-                ExecuteTask(job);
+                this->ExecuteTask(job);
 
                 // 2. END TIMER & ACCUMULATE
                 localActiveCycles += (__rdtsc() - jobStartCycles);
