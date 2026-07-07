@@ -675,7 +675,15 @@ struct alignas(32) AABBMath {
         // To transform extents, we must multiply by the ABSOLUTE values of the rotation matrix
         // (Strip the sign bit from columns 0, 1, and 2)
         using namespace Engine::Math::SIMD;
-        Float4 absMask = vreinterpretq_f32_u32(Set1_u32(0x7FFFFFFF)); // Bitwise mask to clear the sign bit
+
+        // Cross-platform ABS mask: Clear the sign bit (the 32nd bit) of each float.
+        #ifdef MATH_ISA_ARM
+            // Float4 absMask = vreinterpretq_f32_u32(Set1_u32(0x7FFFFFFF)); 
+            Float4 absMask = vreinterpretq_f32_u32(vdupq_n_u32(0x7FFFFFFF)); // Bitwise mask to clear the sign bit
+        #else
+            Float4 absMask = _mm_castsi128_ps(_mm_set1_epi32(0x7FFFFFFF));  // Bitwise mask to clear the sign bit
+        #endif
+        
 
         Float4 absCol0 = BitwiseAnd(m.col[0], absMask);
         Float4 absCol1 = BitwiseAnd(m.col[1], absMask);
@@ -848,37 +856,6 @@ struct Matrix4 {
         Matrix4 treeModelMatrix = BuildTranslationMatrix(relativeLocalPos);
     */
 
-    // --- 4x4 SCALAR MATRIX MULTIPLICATION (COLUMN-MAJOR) ---
-    // Multiplies two 4x4 matrices (C = A * B)
-    FORCE_INLINE constexpr Matrix4 operator*(const Matrix4& a, const Matrix4& b) {
-        Matrix4 res{}; // Initializes to zero
-
-        // Standard 4x4 matrix multiplication unrolled for column-major memory layout.
-        // Standard row-by-column multiplication adapted for 1D column-major arrays
-        // m[col * 4 + row]
-        for (int col = 0; col < 4; ++col) {
-            for (int row = 0; row < 4; ++row) {
-                res.m[col * 4 + row] = 
-                    a.m[0 * 4 + row] * b.m[col * 4 + 0] +
-                    a.m[1 * 4 + row] * b.m[col * 4 + 1] +
-                    a.m[2 * 4 + row] * b.m[col * 4 + 2] +
-                    a.m[3 * 4 + row] * b.m[col * 4 + 3];
-            }
-        }
-        return res;
-    }
-
-    // --- SCALAR MATRIX x VECTOR MULTIPLICATION ---
-    // Multiplies a 4x4 Matrix by a 3D Vector (V' = M * V)
-    FORCE_INLINE constexpr Vector3D operator*(const Matrix4& m, const Vector3D& v) {
-        float x = (m.m[0] * v.x) + (m.m[4] * v.y) + (m.m[8] * v.z)  + (m.m[12] * v.w);
-        float y = (m.m[1] * v.x) + (m.m[5] * v.y) + (m.m[9] * v.z)  + (m.m[13] * v.w);
-        float z = (m.m[2] * v.x) + (m.m[6] * v.y) + (m.m[10] * v.z) + (m.m[14] * v.w);
-        float w = (m.m[3] * v.x) + (m.m[7] * v.y) + (m.m[11] * v.z) + (m.m[15] * v.w);
-
-        return Vector3D(x, y, z, w);
-    }
-
     // --- SCALAR MATRIX INVERSE ---
     // Essential for generating Raycasts from the Camera, and generating Normal Matrices for shaders.
     Matrix4 Inverse() const {
@@ -913,6 +890,37 @@ struct Matrix4 {
         return inv;
     }
 };
+
+// --- 4x4 SCALAR MATRIX MULTIPLICATION (COLUMN-MAJOR) ---
+// Multiplies two 4x4 matrices (C = A * B)
+FORCE_INLINE constexpr Matrix4 operator*(const Matrix4& a, const Matrix4& b) {
+    Matrix4 res{}; // Initializes to zero
+
+    // Standard 4x4 matrix multiplication unrolled for column-major memory layout.
+    // Standard row-by-column multiplication adapted for 1D column-major arrays
+    // m[col * 4 + row]
+    for (int col = 0; col < 4; ++col) {
+        for (int row = 0; row < 4; ++row) {
+            res.m[col * 4 + row] = 
+                a.m[0 * 4 + row] * b.m[col * 4 + 0] +
+                a.m[1 * 4 + row] * b.m[col * 4 + 1] +
+                a.m[2 * 4 + row] * b.m[col * 4 + 2] +
+                a.m[3 * 4 + row] * b.m[col * 4 + 3];
+        }
+    }
+    return res;
+}
+
+// --- SCALAR MATRIX x VECTOR MULTIPLICATION ---
+// Multiplies a 4x4 Matrix by a 3D Vector (V' = M * V)
+FORCE_INLINE constexpr Vector3D operator*(const Matrix4& m, const Vector3D& v) {
+    float x = (m.m[0] * v.x) + (m.m[4] * v.y) + (m.m[8] * v.z)  + (m.m[12] * v.w);
+    float y = (m.m[1] * v.x) + (m.m[5] * v.y) + (m.m[9] * v.z)  + (m.m[13] * v.w);
+    float z = (m.m[2] * v.x) + (m.m[6] * v.y) + (m.m[10] * v.z) + (m.m[14] * v.w);
+    float w = (m.m[3] * v.x) + (m.m[7] * v.y) + (m.m[11] * v.z) + (m.m[15] * v.w);
+
+    return Vector3D(x, y, z, w);
+}
 
 // ==================================================================================
 // VIEW FRUSTUM (CAMERA CULLING)
