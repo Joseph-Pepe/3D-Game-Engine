@@ -1083,7 +1083,7 @@ public:
         }
         
         // --- Initialize lightweight PRNG state ---
-        uint32_t rngState = (tl_workerIndex + 1) * 2654435761u;
+        uint64_t rngState = (tl_workerIndex + 1) * 2654435761u;
 
         // Cache it once per dispatch!
         uint32_t localActiveQueues = nextWorkerId.load(std::memory_order_relaxed);
