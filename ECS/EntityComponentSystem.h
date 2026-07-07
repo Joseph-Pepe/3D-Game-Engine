@@ -68,7 +68,7 @@ struct ParticleEmitterComponent {
     bool isAwake = true;
 
     // Pointer to the heavy silicon-level math manager
-    ParticlePhysicsSOA* physicsEngine = nullptr; 
+    Engine::Physics::ParticleMemoryBlock* memoryBlock = nullptr;
 };
 
 // ==================================================================================
