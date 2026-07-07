@@ -57,6 +57,12 @@ namespace Engine::Math::SIMD {
 
         // Blend: Replace W in 'a' with W from 'b'
         FORCE_INLINE Float4 BlendMaskW(Float4 a, Float4 b) { return vsetq_lane_f32(vgetq_lane_f32(b, 3), a, 3); }
+
+        // vsetq_lane_f32 inserts a scalar directly into the specified lane (0, 1, 2, or 3)
+        FORCE_INLINE Float4 InsertX(Float4 v, float val) { return vsetq_lane_f32(val, v, 0); }
+        FORCE_INLINE Float4 InsertY(Float4 v, float val) { return vsetq_lane_f32(val, v, 1); }
+        FORCE_INLINE Float4 InsertZ(Float4 v, float val) { return vsetq_lane_f32(val, v, 2); }
+        FORCE_INLINE Float4 InsertW(Float4 v, float val) { return vsetq_lane_f32(val, v, 3); }
         
         FORCE_INLINE float ExtractX(Float4 v) { return vgetq_lane_f32(v, 0); }
         FORCE_INLINE float ExtractY(Float4 v) { return vgetq_lane_f32(v, 1); }
@@ -128,21 +134,42 @@ namespace Engine::Math::SIMD {
         using Float4 = __m128;
 
         FORCE_INLINE Float4 Zero() { return _mm_setzero_ps(); }
-        FORCE_INLINE Float4 Set(float x, float y, float z, float w) { return _mm_set_ps(w, z, y, x); }
+        FORCE_INLINE Float4 Set(float x, float y, float z, float w) { return _mm_set_ps(w, z, y, x); } // Note: _mm_set_ps takes arguments in reverse order (w, z, y, x)
         FORCE_INLINE Float4 Set1(float v) { return _mm_set1_ps(v); } // Broadcasts scalar to all 4 slots        
         
+        // ==============================
+        // --- MATHEMATICAL OPERATORS ---
+        // ==============================
+        // By returning by value, the compiler uses Return Value Optimization (RVO).
+        // The data never touches the stack; it stays perfectly inside the CPU registers.
         FORCE_INLINE Float4 Add(Float4 a, Float4 b) { return _mm_add_ps(a, b); }
         FORCE_INLINE Float4 Sub(Float4 a, Float4 b) { return _mm_sub_ps(a, b); }
         FORCE_INLINE Float4 Mul(Float4 a, Float4 b) { return _mm_mul_ps(a, b); }
         FORCE_INLINE Float4 FMAdd(Float4 a, Float4 b, Float4 c) { return _mm_fmadd_ps(a, b, c); } // (a * b) + c
 
     
+        // Mask 0x08 (binary 1000) tells the hardware: "Take X, Y, Z from 'reg', take W from the zero vector."
         FORCE_INLINE Float4 BlendMaskW(Float4 a, Float4 b) { return _mm_blend_ps(a, b, 0x08); }
 
-        FORCE_INLINE float ExtractX(Float4 v) { return _mm_cvtss_f32(v); }
-        FORCE_INLINE float ExtractY(Float4 v) { return _mm_cvtss_f32(_mm_shuffle_ps(v, v, _MM_SHUFFLE(1, 1, 1, 1))); }
-        FORCE_INLINE float ExtractZ(Float4 v) { return _mm_cvtss_f32(_mm_shuffle_ps(v, v, _MM_SHUFFLE(2, 2, 2, 2))); }
-        FORCE_INLINE float ExtractW(Float4 v) { return _mm_cvtss_f32(_mm_shuffle_ps(v, v, _MM_SHUFFLE(3, 3, 3, 3))); }
+        // ======================================================================
+        // HARDWARE SETTERS (SSE4.1)
+        // ======================================================================
+        // Allows individual lane mutations without spilling the register to the stack.
+        // _mm_insert_ps takes the source value and inserts it into a specific lane by using a bitmask (0x10, 0x20, 0x30) to target Y, Z, and W.
+        FORCE_INLINE Float4 InsertX(Float4 v, float val) { return _mm_move_ss(v, _mm_set_ss(val)); }          // _mm_move_ss replaces the lowest 32-bits (X) safely and keeps the high 96-bits intact.
+        FORCE_INLINE Float4 InsertY(Float4 v, float val) { return _mm_insert_ps(v, _mm_set_ss(val), 0x10); }  // 0x10 = Source Index 0, Destination Index 1 (Y)
+        FORCE_INLINE Float4 InsertZ(Float4 v, float val) { return _mm_insert_ps(v, _mm_set_ss(val), 0x20); }  // 0x20 = Source Index 0, Destination Index 2 (Z)
+        FORCE_INLINE Float4 InsertW(Float4 v, float val) { return _mm_insert_ps(v, _mm_set_ss(val), 0x30); }  // 0x30 = Source Index 0, Destination Index 3 (W)
+
+        // ======================================================================
+        // HARDWARE GETTERS (ZERO MEMORY ACCESS)
+        // ======================================================================
+        // Extracts the float directly from the XMM register. 
+        // _mm_cvtss_f32: faster than _mm_store_ss to a stack variable
+        FORCE_INLINE float ExtractX(Float4 v) { return _mm_cvtss_f32(v); } // X is in the lowest 32 bits, so we just convert scalar.                                               
+        FORCE_INLINE float ExtractY(Float4 v) { return _mm_cvtss_f32(_mm_shuffle_ps(v, v, _MM_SHUFFLE(1, 1, 1, 1))); }  // Y requires a 1-cycle shuffle to move to lowest 32 bits before extraction.
+        FORCE_INLINE float ExtractZ(Float4 v) { return _mm_cvtss_f32(_mm_shuffle_ps(v, v, _MM_SHUFFLE(2, 2, 2, 2))); }  // Z requires a 2-cycle shuffle to move to lowest 32 bits before extraction.
+        FORCE_INLINE float ExtractW(Float4 v) { return _mm_cvtss_f32(_mm_shuffle_ps(v, v, _MM_SHUFFLE(3, 3, 3, 3))); }  // W requires a 3-cycle shuffle to move to lowest 32 bits before extraction.
 
         // ======================================
         // DOT PRODUCT INSTRUCTION (_mm_dp_ps)
@@ -151,11 +178,11 @@ namespace Engine::Math::SIMD {
             - On modern Intel/AMD architectures, _mm_dp_ps is implemented in slow microcode (~9-14 clock cycles).
             - It tries to do too many things (multiply, horizontal add, and mask) simultaneously.
             - Hogs CPU execution ports because the silicilon has to internally decode it into a sequence of multiplies, adds, and bitwise masks.
-            - 0x7F mask: calculates dots for first 3 elements.
+            - 0x7F mask: 0111 calculates dots for first 3 elements | 1111 (write to all 4 for safety, or 0001 for just lowest).
         */
 
         FORCE_INLINE float Dot4_mm_dp_ps(Float4 a, Float4 b) { return _mm_cvtss_f32(_mm_dp_ps(a, b, 0xFF)); }
-        FORCE_INLINE float Dot3_mm_dp_ps(Float4 a, Float4 b) { return _mm_cvtss_f32(_mm_dp_ps(a, b, 0x7F)); }
+        FORCE_INLINE float Dot3_mm_dp_ps(Float4 a, Float4 b) { return _mm_cvtss_f32(_mm_dp_ps(a, b, 0x7F)); } 
 
         // ===========================================
         // DOT PRODUCT (MANUAL HORIZONTAL REDUCTION)
@@ -198,6 +225,7 @@ namespace Engine::Math::SIMD {
             return _mm_cvtss_f32(mul);
         }
 
+        // SHUFFLE: Rearranges the (x, y, z) values inside the register, so we can multiply them all at once.
         FORCE_INLINE Float4 Cross(Float4 a, Float4 b) {
             __m128 tmp0 = _mm_shuffle_ps(a, a, _MM_SHUFFLE(3, 0, 2, 1));
             __m128 tmp1 = _mm_shuffle_ps(b, b, _MM_SHUFFLE(3, 1, 0, 2));
@@ -264,6 +292,9 @@ namespace Engine::Math::SIMD {
     - Used for one-off calculations like the camera and compile time calculations.
     - Pure Scalar Vectors execute math operations in one lane.
     - "float x, y, z, w" and "float data[4]" are treated the same by the compiler in memory except for syntax (data[0] vs x).
+    - The w only matters when multiplying a vector with a matrix.
+    - w = 0.0f (Direction): Represents a vector (like gravity or camera's forward axis). When multiplied by a matrix it ignores translation (i.e., you cannot move gravity).
+    - w = 1.0f (Point): Represents a position in space (like a player or vertex). When multiplied by a matrix, the translation is applied.
 */
 class Vector3D {
 public:
@@ -271,6 +302,7 @@ public:
     // Direction [w = 0]: (ignore translation)
     float x, y, z, w; // 16-bytes in memory
 
+    // Constructor: Default initializes to {0.0f, 0.0f, 0.0f, 0.0f}
     constexpr Vector3D(float x = 0.0f, float y = 0.0f, float z = 0.0f, float w = 0.0f) 
         : x(x), y(y), z(z), w(w) {}
 
@@ -345,45 +377,70 @@ public:
     - SIMD Accelerated Vector that needs to be used for bulk data processing.
     - SIMD Vectors must perform math operations on all its available lanes (4, 8, 16) simultaneously in hardware registers.
     - alignas(16) forces every instance of this class to align to 16 bytes (This tells the compiler: "Every instance of this class must start at a 16-byte boundary in memory").
+    - Guarantees that whenever this struct is created, it starts on a 16-byte boundary.
 */
 class alignas(16) SIMDVector3D {
 public:
-    Engine::Math::SIMD::Float4 reg; // 4 (32-bit) floats = 128-bits 
+    Engine::Math::SIMD::Float4 reg; // 4 (32-bit) floats = 128-bits
 
+    // Default constructor (Zero initialization)
     FORCE_INLINE SIMDVector3D() : reg(Engine::Math::SIMD::Zero()) {}
 
-    // Constructor: Default initializes to {0, 0, 0, 0}
+    // Constructor from floats
     FORCE_INLINE SIMDVector3D(float _x, float _y, float _z, float _w = 0.0f) 
         : reg(Engine::Math::SIMD::Set(_x, _y, _z, _w)) {}
+
+    // Constructor directly from native register (Crucial for fast operators)
     FORCE_INLINE SIMDVector3D(Engine::Math::SIMD::Float4 m) : reg(m) {}
 
-    // --- HARDWARE GETTERS ---
-    FORCE_INLINE float x() const { return Engine::Math::SIMD::ExtractX(reg); }
-    FORCE_INLINE float y() const { return Engine::Math::SIMD::ExtractY(reg); }
-    FORCE_INLINE float z() const { return Engine::Math::SIMD::ExtractZ(reg); }
-    FORCE_INLINE float w() const { return Engine::Math::SIMD::ExtractW(reg); }
+    // --- HARDWARE SETTERS ---
+    // Allows individual lane mutations without spilling the register to the stack (Avoids Load-Hit-Store penalty).
+    FORCE_INLINE void setX(float val) { reg = Engine::Math::SIMD::InsertX(reg, val); }
+    FORCE_INLINE void setY(float val) { reg = Engine::Math::SIMD::InsertY(reg, val); }
+    FORCE_INLINE void setZ(float val) { reg = Engine::Math::SIMD::InsertZ(reg, val); }
+    FORCE_INLINE void setW(float val) { reg = Engine::Math::SIMD::InsertW(reg, val); }
 
-    // --- C++20 BRIDGE ---
+    // --- HARDWARE GETTERS ---
+    FORCE_INLINE float x() const { return Engine::Math::SIMD::ExtractX(reg); } 
+    FORCE_INLINE float y() const { return Engine::Math::SIMD::ExtractY(reg); } // Y requires a 1-cycle shuffle to move to lowest 32 bits before extraction.
+    FORCE_INLINE float z() const { return Engine::Math::SIMD::ExtractZ(reg); } // Z requires a 2-cycle shuffle to move to lowest 32 bits before extraction.
+    FORCE_INLINE float w() const { return Engine::Math::SIMD::ExtractW(reg); } // W requires a 3-cycle shuffle to move to lowest 32 bits before extraction.
+
+    // ======================================================================
+    // C++20 BRIDGE (ZERO-COST MEMORY)
+    // ======================================================================
+    // It guarantees zero-overhead assembly.
     FORCE_INLINE std::array<float, 4> asArray() const {
+        // If you need to interface with OpenGL/Vulkan APIs or loop through the vector like an array, std::bit_cast is perfectly standard compliant.
         return std::bit_cast<std::array<float, 4>>(reg);
     }
 
+    // --- AXIS INDEXING ---
+    // Safely extracts X (0), Y (1), Z (2), or W (3) dynamically without breaking strict aliasing.
     FORCE_INLINE float operator[](int axis) const {
+        // We use std::bit_cast (C++20) to treat the register as a safe array entirely on the stack, allowing dynamic indexing without UB.
         auto arr = std::bit_cast<std::array<float, 4>>(reg);
         return arr[axis];
     }
 
-    // --- MATH ---
+    // --- SIMD LINEAR INTERPOLATION (V = a + t * (b - a)) ---
     static FORCE_INLINE SIMDVector3D Lerp(const SIMDVector3D& a, const SIMDVector3D& b, float t) {
+        // 1. Broadcast the scalar 't' across all 4 lanes of a register
         Engine::Math::SIMD::Float4 tReg = Engine::Math::SIMD::Set1(t);
+        // 2. Calculate the difference: (b - a)
         Engine::Math::SIMD::Float4 diff = Engine::Math::SIMD::Sub(b.reg, a.reg);
+        // 3. Fused Multiply-Add: diff * t + a
         return SIMDVector3D(Engine::Math::SIMD::FMAdd(diff, tReg, a.reg));
     }
 
-    FORCE_INLINE SIMDVector3D operator+(const SIMDVector3D& other) const { return SIMDVector3D(Engine::Math::SIMD::Add(reg, other.reg)); }
-    FORCE_INLINE SIMDVector3D operator-(const SIMDVector3D& other) const { return SIMDVector3D(Engine::Math::SIMD::Sub(reg, other.reg)); }
-    FORCE_INLINE SIMDVector3D operator*(float scalar) const { return SIMDVector3D(Engine::Math::SIMD::Mul(reg, Engine::Math::SIMD::Set1(scalar))); }
+    // --- MATHEMATICAL OPERATORS ---
+    FORCE_INLINE SIMDVector3D operator+(const SIMDVector3D& other) const { return SIMDVector3D(Engine::Math::SIMD::Add(reg, other.reg)); } // Addition: result = this + other
+    FORCE_INLINE SIMDVector3D operator-(const SIMDVector3D& other) const { return SIMDVector3D(Engine::Math::SIMD::Sub(reg, other.reg)); } // Subtraction: result = this - other
+    FORCE_INLINE SIMDVector3D operator*(float scalar) const { return SIMDVector3D(Engine::Math::SIMD::Mul(reg, Engine::Math::SIMD::Set1(scalar))); } // Scales the current vector in place
     
+    // --- DOT & CROSS PRODUCT ---
+
+    // Dot Product: returns (x1*x2 + y1*y2 + z1*z2)
     FORCE_INLINE float dot(const SIMDVector3D& other) const { return Engine::Math::SIMD::Dot3(reg, other.reg); }
     FORCE_INLINE SIMDVector3D cross(const SIMDVector3D& other) const { return SIMDVector3D(Engine::Math::SIMD::Cross(reg, other.reg)); }
 
@@ -393,13 +450,14 @@ public:
         - The w component does not really matter for most vector operations.
         - Clean it at the boundary where w actually matters (i.e., when multiplying a vector [SIMDVector3D] by a matrix (Matrix4x4_SIMD)).
         - Force it to either a Point [w = 1, which applies translation], or a Direction [w = 0, which ignores translation] right before the multiplication.
+        - We blend our register with a vector containing 1.0f in the W lane [_mm_set_ps takes (W, Z, Y, X)].
     */
 
     // Blend in a 0.0f to the W lane (mask 0x08 = 1000 binary)! Forces W = 0.0f (Treats the vector as a Direction/Normal)
     FORCE_INLINE SIMDVector3D asDirection() const { return SIMDVector3D(Engine::Math::SIMD::BlendMaskW(reg, Engine::Math::SIMD::Zero())); }
     
     // Blend in a 1.0f to the W lane (mask 0x08 = 1000 binary)! Forces W = 1.0f (Treats the vector as a Position/Point in space)
-    FORCE_INLINE SIMDVector3D asPoint() const { return SIMDVector3D(Engine::Math::SIMD::BlendMaskW(reg, Engine::Math::SIMD::Set(0.0f, 0.0f, 0.0f, 1.0f))); }
+    FORCE_INLINE SIMDVector3D asPoint() const { return SIMDVector3D(Engine::Math::SIMD::BlendMaskW(reg, Engine::Math::SIMD::Set(0.0f, 0.0f, 0.0f, 1.0f))); } 
 
     // --- MAGNITUDE & NORMALIZATION ---
     FORCE_INLINE float lengthSquared() const {
@@ -435,6 +493,13 @@ struct alignas(16) SIMDQuaternion {
     FORCE_INLINE SIMDQuaternion() : reg(Engine::Math::SIMD::Set(0.0f, 0.0f, 0.0f, 1.0f)) {}
     FORCE_INLINE SIMDQuaternion(Engine::Math::SIMD::Float4 m) : reg(m) {}
     FORCE_INLINE SIMDQuaternion(float _x, float _y, float _z, float _w) : reg(Engine::Math::SIMD::Set(_x, _y, _z, _w)) {}
+
+    // --- HARDWARE SETTERS ---
+    // Allows individual lane mutations without spilling the register to the stack (Avoids Load-Hit-Store penalty).
+    FORCE_INLINE void setX(float val) { reg = Engine::Math::SIMD::InsertX(reg, val); }
+    FORCE_INLINE void setY(float val) { reg = Engine::Math::SIMD::InsertY(reg, val); }
+    FORCE_INLINE void setZ(float val) { reg = Engine::Math::SIMD::InsertZ(reg, val); }
+    FORCE_INLINE void setW(float val) { reg = Engine::Math::SIMD::InsertW(reg, val); }
 
     FORCE_INLINE float x() const { return Engine::Math::SIMD::ExtractX(reg); }
     FORCE_INLINE float y() const { return Engine::Math::SIMD::ExtractY(reg); }
