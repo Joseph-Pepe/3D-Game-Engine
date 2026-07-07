@@ -82,8 +82,8 @@ public:
         auto query = ecs.Query<TransformComponent, PhysicsComponent>();
         if (query.count == 0) return;
 
-        Engine::ISAArch::NativeFloatSIMDBatch dtBatch(dt);
-        Engine::ISAArch::NativeFloatSIMDBatch oneBatch(1.0f);
+        Engine::Physics::NativeFloatSIMDBatch dtBatch(dt);
+        Engine::Physics::NativeFloatSIMDBatch oneBatch(1.0f);
 
         for (size_t chunkIdx = 0; chunkIdx < query.chunks.size(); ++chunkIdx) {
             uint32_t activeCount = query.chunkActiveCounts[chunkIdx];
@@ -97,14 +97,14 @@ public:
                 
                 for (uint32_t b = start; b < end; ++b) {
                     // 1. Calculate movement vector: velocity * dt
-                    Engine::ISAArch::NativeFloatSIMDBatch moveX = physics[b].velX * dtBatch;
-                    Engine::ISAArch::NativeFloatSIMDBatch moveY = physics[b].velY * dtBatch;
-                    Engine::ISAArch::NativeFloatSIMDBatch moveZ = physics[b].velZ * dtBatch;
+                    Engine::Physics::NativeFloatSIMDBatch moveX = physics[b].velX * dtBatch;
+                    Engine::Physics::NativeFloatSIMDBatch moveY = physics[b].velY * dtBatch;
+                    Engine::Physics::NativeFloatSIMDBatch moveZ = physics[b].velZ * dtBatch;
 
                     // 2. Branchless Masking
                     // If isStatic is 1.0f, activeMask becomes 0.0f [Inverse].
                     // If isStatic is 0.0f, activeMask becomes 1.0f [Inverse].
-                    Engine::ISAArch::NativeFloatSIMDBatch activeMask = oneBatch - physics[b].isStaticMask;
+                    Engine::Physics::NativeFloatSIMDBatch activeMask = oneBatch - physics[b].isStaticMask;
 
                     // Multiply the movement by the mask. Static objects now have a movement of exactly 0.0f.
                     moveX *= activeMask;
