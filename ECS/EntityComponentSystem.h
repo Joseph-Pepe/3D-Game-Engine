@@ -849,6 +849,57 @@ public:
         }
     }
 
+    // ==================================================================================
+    // ECS QUERY ENGINE (The Data Filter)
+    // ==================================================================================
+    // Hunts through the ArchetypeManager and extracts spans of memory that matches the requested signature.
+    // Example: auto query = ecs.Query<TransformComponent, PhysicsComponent>();
+
+    template <typename... QueryTypes>
+    struct QueryResult {
+        size_t count = 0;
+        
+        // Parallel arrays of pointers pointing to the exact start of the memory chunks
+        std::vector<std::tuple<typename ComponentStorageTrait<QueryTypes>::StorageType::value_type*...>> chunks;
+        
+        // How many valid entities exist inside each returned chunk
+        std::vector<uint32_t> chunkActiveCounts;
+    };
+
+    template <typename... QueryTypes>
+    QueryResult<QueryTypes...> Query() {
+        QueryResult<QueryTypes...> result;
+
+        // 1. Generate the bitmask signature for the components the system is asking for
+        constexpr ComponentMask queryMask = (0ULL | ... | (1ULL << GetGlobalComponentID<QueryTypes>()));
+
+        // 2. Scan the Archetype Manager to find every Archetype that matches the mask
+        for (size_t i = 0; i < archetypeManager.directoryKeys.size(); ++i) {
+            ComponentMask archMask = archetypeManager.directoryKeys[i];
+            
+            // Bitwise AND check: Does this archetype contain ALL the components we asked for?
+            if ((archMask & queryMask) == queryMask) {
+                Archetype* arch = archetypeManager.directoryValues[i];
+
+                // 3. We found a matching Archetype! Now extract its actual memory chunks.
+                for (auto& chunk : arch->chunks) {
+                    if (chunk.activeCount == 0) continue; // Skip empty chunks
+                    
+                    result.count += chunk.activeCount;
+                    result.chunkActiveCounts.push_back(chunk.activeCount);
+
+                    // 4. Extract the exact memory pointer for each requested component
+                    auto chunkPointers = std::make_tuple(
+                        GetRawPointerFromChunk<QueryTypes>(arch, &chunk)...
+                    );
+                    
+                    result.chunks.push_back(chunkPointers);
+                }
+            }
+        }
+        return result;
+    }
+
     // --- WRITE-BACK PROXY STRATEGY FOR UI: RENDER THE ENTIRE UI FOR AN ENTITY ---
     void DrawInspector(Entity e) {
         if (HasComponent<TransformComponent>(e)) {
@@ -870,5 +921,20 @@ public:
             auto& emitter = GetComponent<ParticleEmitterComponent>(e);
             DrawComponentUI(emitter, "Particle Emitter");
         }
+    }
+private:
+    // extracts a correctly casted pointer from a specific chunk.
+    template <typename T>
+    auto* GetRawPointerFromChunk(Archetype* arch, ArchetypeChunk* chunk) {
+        constexpr uint32_t globalID = GetGlobalComponentID<T>();
+
+        // Find the byte buffer
+        size_t bufferIndex = 0;
+        for (; bufferIndex < arch->componentIDs.size(); ++bufferIndex) {
+            if (arch->componentIDs[bufferIndex] == globalID) break;
+        }
+
+        using ReturnType = typename ComponentStorageTrait<T>::StorageType::value_type;
+        return reinterpret_cast<ReturnType*>(chunk->componentBuffers[bufferIndex].data());
     }
 };
