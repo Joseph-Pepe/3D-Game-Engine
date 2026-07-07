@@ -633,7 +633,7 @@ struct Vector3DWorld {
     // Safely casts a 64-bit world difference down to your ultra-fast 32-bit SIMD vector.
     // By returning a Vector3D (your SIMD wrapper), the downstream math instantly utilizes AVX/NEON.
     FORCE_INLINE Vector3D toFloatVector() const {
-        return Vector3D(static_cast<float>(x), static_cast<float>(y), static_cast<float>(z), 0.0f);
+        return Vector3D(static_cast<float>(x), static_cast<float>(y), static_cast<float>(z));
     }
 };
 
