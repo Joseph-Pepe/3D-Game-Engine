@@ -183,6 +183,7 @@ template <typename T>
 constexpr uint32_t GetSparseComponentID() {
     constexpr std::size_t idx = ComponentIndex<T, SparseComponentRegistry>::value;
     
+    // static_assert transforms cryptic UB (Undefined Behavior) errors into human-readable compiler errors.
     static_assert(idx != static_cast<std::size_t>(-1), 
         "CRITICAL ERROR: Component type is not registered in SparseComponentRegistry!");
         
