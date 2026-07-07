@@ -5,6 +5,14 @@
 #include "../SIMD/SIMDVectorMath.h"
 #include "../JobSystem.h"
 
+#if defined(_MSC_VER)
+    #define RESTRICT __restrict
+#elif defined(__clang__) || defined(__GNUC__)
+    #define RESTRICT __restrict__
+#else
+    #define RESTRICT // Fallback to nothing if unsupported
+#endif
+
 
 /* [Wire ECS]: Data separated from logic in Data Oriented Design.
 
@@ -50,8 +58,8 @@ class ParticlePhysicsSystem {
 public:
     void Update(ECS& ecs, float dt) {
         // 1. Ask the ECS for the contiguous array of emitter components
-        // (Assuming GetDenseArray returns your custom small_vector or inplace_vector)
-        auto& emitters = ecs.GetDenseArray<ParticleEmitterComponent>();
+        // Correctly fetch the packed dense array from the sparse set manager
+        auto& emitters = ecs.GetSparseDenseArray<ParticleEmitterComponent>();
         
         // 2. Iterate serially over the emitters (Outer loop is scalar)
         for (auto& emitter : emitters) {
@@ -59,7 +67,64 @@ public:
 
             // 3. Offload the heavy inner-loop math to the hardware-accelerated EngineTick.
             // EngineTick handles its own Job System threading internally.
-            Engine::Physics::EngineTick(emitter.memoryBlock, dt);
+            // Notice we must use the '.' or '->' operator depending on how your SIMD library 
+            // defined ParticleEmitterComponent's physicsEngine pointer.
+            if (emitter.physicsEngine) {
+                Engine::Physics::EngineTick(emitter.physicsEngine->memoryBlock, dt);
+            }
+        }
+    }
+};
+
+class PhysicsSystem {
+public:
+    void Update(ECS& ecs, float dt) {
+        auto query = ecs.Query<TransformComponent, PhysicsComponent>();
+        if (query.count == 0) return;
+
+        Engine::ISAArch::NativeFloatSIMDBatch dtBatch(dt);
+        Engine::ISAArch::NativeFloatSIMDBatch oneBatch(1.0f);
+
+        for (size_t chunkIdx = 0; chunkIdx < query.chunks.size(); ++chunkIdx) {
+            uint32_t activeCount = query.chunkActiveCounts[chunkIdx];
+            
+            auto* RESTRICT transforms = std::get<0>(query.chunks[chunkIdx]);
+            auto* RESTRICT physics    = std::get<1>(query.chunks[chunkIdx]);
+
+            uint32_t batchCount = (activeCount + Engine::Physics::NATIVE_BATCH_SIZE - 1) / Engine::Physics::NATIVE_BATCH_SIZE;
+
+            g_JobSystem.DispatchAndWait(batchCount, 16, [&](uint32_t start, uint32_t end) {
+                
+                for (uint32_t b = start; b < end; ++b) {
+                    // 1. Calculate movement vector: velocity * dt
+                    Engine::ISAArch::NativeFloatSIMDBatch moveX = physics[b].velX * dtBatch;
+                    Engine::ISAArch::NativeFloatSIMDBatch moveY = physics[b].velY * dtBatch;
+                    Engine::ISAArch::NativeFloatSIMDBatch moveZ = physics[b].velZ * dtBatch;
+
+                    // 2. Branchless Masking
+                    // If isStatic is 1.0f, activeMask becomes 0.0f [Inverse].
+                    // If isStatic is 0.0f, activeMask becomes 1.0f [Inverse].
+                    Engine::ISAArch::NativeFloatSIMDBatch activeMask = oneBatch - physics[b].isStaticMask;
+
+                    // Multiply the movement by the mask. Static objects now have a movement of exactly 0.0f.
+                    moveX *= activeMask;
+                    moveY *= activeMask;
+                    moveZ *= activeMask;
+
+                    // 3. Fast Scatter (Still necessary until TransformComponent becomes AoSoA)
+                    for (uint32_t lane = 0; lane < Engine::Physics::NATIVE_BATCH_SIZE; ++lane) {
+                        uint32_t absoluteIdx = (b * Engine::Physics::NATIVE_BATCH_SIZE) + lane;
+                        
+                        // We still need the bounds check to prevent memory corruption at the end of the chunk
+                        if (absoluteIdx < activeCount) {
+                            // No branch needed (if (physics[b].isStaticMask[lane] < 0.5f))! Static objects just add 0.0f.
+                            transforms[absoluteIdx].position.x += moveX[lane];
+                            transforms[absoluteIdx].position.y += moveY[lane];
+                            transforms[absoluteIdx].position.z += moveZ[lane];
+                        }
+                    }
+                }
+            });
         }
     }
 };
@@ -68,57 +133,44 @@ class AISystem {
 public:
     void Update(ECS& ecs, float dt) {
         // 1. Query the ECS using Archetypes/Signatures.
-        // We do NOT ask for all AI. We ask ONLY for AI that have a Target and are Moving.
-        // This guarantees 100% data density. Every element returned MUST be processed.
-        
-        // Pseudo-code for ECS Query (Replace with your actual ECS API)
         auto query = ecs.Query<PositionComponent, AITargetComponent, AIMovementComponent>();
-        
-        uint32_t count = static_cast<uint32_t>(query.count);
-        if (count == 0) return;
+        if (query.count == 0) return;
 
-        // 2. Extract the raw, contiguous pointers
-        auto* RESTRICT aiPositions = query.Get<PositionComponent>();
-        auto* RESTRICT aiTargets   = query.Get<AITargetComponent>();
-        auto* RESTRICT aiMovement  = query.Get<AIMovementComponent>();
-
-        uint32_t threadCount = g_JobSystem.nextWorkerId.load(std::memory_order_relaxed);
-        uint32_t chunkSize = std::max(64u, count / threadCount);
-
-        // 3. Multithread the logic
-        g_JobSystem.DispatchAndWait(count, chunkSize, [&](uint32_t start, uint32_t end) {
+        // 2. Iterate through the hardware-aligned chunks
+        for (size_t chunkIdx = 0; chunkIdx < query.chunks.size(); ++chunkIdx) {
             
-            // 4. THE HOT PATH
-            // Because there are absolutely ZERO 'if' statements or function calls inside this loop,
-            // and we extracted __restrict pointers, the compiler will automatically vectorize this
-            // math into AVX/NEON registers.
+            uint32_t activeCount = query.chunkActiveCounts[chunkIdx];
             
-            // ENGINE_UNROLL_4 tells MSVC/Clang to pipeline 4 iterations simultaneously
-            ENGINE_UNROLL_4
-            for (uint32_t i = start; i < end; ++i) {
+            // Extract the raw pointers for this specific chunk using std::get
+            auto* RESTRICT aiPositions = std::get<0>(query.chunks[chunkIdx]);
+            auto* RESTRICT aiTargets   = std::get<1>(query.chunks[chunkIdx]);
+            auto* RESTRICT aiMovement  = std::get<2>(query.chunks[chunkIdx]);
+
+            uint32_t threadCount = g_JobSystem.nextWorkerId.load(std::memory_order_relaxed);
+            uint32_t chunkSize = std::max(64u, activeCount / threadCount);
+
+            // 3. Dispatch the Job System for this specific chunk
+            g_JobSystem.DispatchAndWait(activeCount, chunkSize, [&](uint32_t start, uint32_t end) {
                 
-                // Vector subtraction (Target - Current)
-                float dirX = aiTargets[i].targetX - aiPositions[i].x;
-                float dirY = aiTargets[i].targetY - aiPositions[i].y;
-                float dirZ = aiTargets[i].targetZ - aiPositions[i].z;
+                ENGINE_UNROLL_4
+                for (uint32_t i = start; i < end; ++i) {
+                    
+                    float dirX = aiTargets[i].targetX - aiPositions[i].x;
+                    float dirY = aiTargets[i].targetY - aiPositions[i].y;
+                    float dirZ = aiTargets[i].targetZ - aiPositions[i].z;
 
-                // Length squared (fused multiply-add if compiler is smart)
-                float lengthSq = (dirX * dirX) + (dirY * dirY) + (dirZ * dirZ);
+                    float lengthSq = (dirX * dirX) + (dirY * dirY) + (dirZ * dirZ);
+                    float invLength = Engine::ISAArch::rsqrt(lengthSq + 1e-8f);
 
-                // Fast Inverse Square Root (auto-vectorizes to rsqrt_ps), We add a tiny epsilon to prevent division by zero without using an 'if' statement!
-                // Force the hardware to emit the fast rsqrt instruction (e.g., _mm256_rsqrt_ps)
-                float invLength = Engine::ISAArch::rsqrt(lengthSq + 1e-8f);
+                    float moveX = dirX * invLength * aiMovement[i].speed * dt;
+                    float moveY = dirY * invLength * aiMovement[i].speed * dt;
+                    float moveZ = dirZ * invLength * aiMovement[i].speed * dt;
 
-                // Normalize and apply speed
-                float moveX = dirX * invLength * aiMovement[i].speed * dt;
-                float moveY = dirY * invLength * aiMovement[i].speed * dt;
-                float moveZ = dirZ * invLength * aiMovement[i].speed * dt;
-
-                // Write back to memory
-                aiPositions[i].x += moveX;
-                aiPositions[i].y += moveY;
-                aiPositions[i].z += moveZ;
-            }
-        });
+                    aiPositions[i].x += moveX;
+                    aiPositions[i].y += moveY;
+                    aiPositions[i].z += moveZ;
+                }
+            });
+        }
     }
 };
