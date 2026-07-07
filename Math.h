@@ -678,8 +678,7 @@ struct alignas(32) AABBMath {
 
         // Cross-platform ABS mask: Clear the sign bit (the 32nd bit) of each float.
         #ifdef MATH_ISA_ARM
-            // Float4 absMask = vreinterpretq_f32_u32(Set1_u32(0x7FFFFFFF)); 
-            Float4 absMask = vreinterpretq_f32_u32(vdupq_n_u32(0x7FFFFFFF)); // Bitwise mask to clear the sign bit
+            Float4 absMask = vreinterpretq_f32_u32(vdupq_n_u32(0x7FFFFFFF)); // Bitwise mask to clear the sign bit (vreinterpretq_f32_u32(Set1_u32(0x7FFFFFFF)))
         #else
             Float4 absMask = _mm_castsi128_ps(_mm_set1_epi32(0x7FFFFFFF));  // Bitwise mask to clear the sign bit
         #endif
