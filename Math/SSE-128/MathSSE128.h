@@ -318,7 +318,7 @@ struct Vector3DWorldV1 {
 struct alignas(16) Quaternion {
     __m128 reg;
 
-    FORCE_INLINE Quaternion() : reg(_mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f)) {} // Identity {0,0,0,1}
+    FORCE_INLINE Quaternion() : reg(_mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f)) {} 
     FORCE_INLINE Quaternion(__m128 m) : reg(m) {}
     FORCE_INLINE Quaternion(float _x, float _y, float _z, float _w) : reg(_mm_set_ps(_w, _z, _y, _x)) {}
 
@@ -328,60 +328,52 @@ struct alignas(16) Quaternion {
     FORCE_INLINE float z() const { return _mm_cvtss_f32(_mm_shuffle_ps(reg, reg, _MM_SHUFFLE(2, 2, 2, 2))); }
     FORCE_INLINE float w() const { return _mm_cvtss_f32(_mm_shuffle_ps(reg, reg, _MM_SHUFFLE(3, 3, 3, 3))); }
 
-    // --- DIRECTIONAL VECTOR ACCESSORS ---
-    // Returns the normalized forward vector (assuming -Z is forward)
     FORCE_INLINE SSE128_SIMDVector3D GetForwardVector() const {
         return RotateVector(SSE128_SIMDVector3D(0.0f, 0.0f, -1.0f, 0.0f));
     }
 
-    // Returns the normalized right vector (+X)
     FORCE_INLINE SSE128_SIMDVector3D GetRightVector() const {
         return RotateVector(SSE128_SIMDVector3D(1.0f, 0.0f, 0.0f, 0.0f));
     }
 
-    // Returns the normalized up vector (+Y)
     FORCE_INLINE SSE128_SIMDVector3D GetUpVector() const {
         return RotateVector(SSE128_SIMDVector3D(0.0f, 1.0f, 0.0f, 0.0f));
     }
 
-    // --- ANGLE AXIS CONVERSION ---
-    // This is the ONLY time we use Trigonometry. Used when converting mouse/keyboard input to a rotation.
     static FORCE_INLINE Quaternion AngleAxis(float angleDegrees, const SSE128_SIMDVector3D& axis) {
         float halfAngleRad = (angleDegrees * (std::numbers::pi_v<float> / 180.0f)) * 0.5f;
         float s = std::sin(halfAngleRad);
         float c = std::cos(halfAngleRad);
         
-        // Multiply the normalized axis by sin(half_angle)
+        
         __m128 sinVec = _mm_set1_ps(s);
         __m128 axisScaled = _mm_mul_ps(axis.reg, sinVec);
         
-        // Blend the Cosine value into the W lane (mask 0x08 = 1000 binary)
+        
         __m128 wCos = _mm_set_ps(c, 0.0f, 0.0f, 0.0f);
         return Quaternion(_mm_blend_ps(axisScaled, wCos, 0x08));
     }
 
-    // --- THE HAMILTON PRODUCT (SIMD QUATERNION MULTIPLICATION) ---
-    // Combines two rotations into one. Executes in ~6 clock cycles on AVX2.
     FORCE_INLINE Quaternion operator*(const Quaternion& rhs) const {
-        // Q1 = this (a, b, c, d) | Q2 = rhs (x, y, z, w)
+        
         __m128 q1 = reg;
         __m128 q2 = rhs.reg;
 
-        // Shuffle Q1
+        
         __m128 w1 = _mm_shuffle_ps(q1, q1, _MM_SHUFFLE(3, 3, 3, 3));
         __m128 x1 = _mm_shuffle_ps(q1, q1, _MM_SHUFFLE(0, 0, 0, 0));
         __m128 y1 = _mm_shuffle_ps(q1, q1, _MM_SHUFFLE(1, 1, 1, 1));
         __m128 z1 = _mm_shuffle_ps(q1, q1, _MM_SHUFFLE(2, 2, 2, 2));
 
-        // Shuffle Q2 for the specific Hamilton cross-terms
+        
         __m128 tmp0 = _mm_shuffle_ps(q2, q2, _MM_SHUFFLE(3, 2, 1, 0)); // w, z, y, x
         __m128 tmp1 = _mm_shuffle_ps(q2, q2, _MM_SHUFFLE(2, 3, 0, 1)); // z, w, x, y
         __m128 tmp2 = _mm_shuffle_ps(q2, q2, _MM_SHUFFLE(1, 0, 3, 2)); // y, x, w, z
 
-        // FMA (Fused Multiply-Add/Sub) sequence to resolve the complex numbers
+        
         __m128 res = _mm_mul_ps(w1, q2);
         
-        // We use bitwise XOR to flip the signs for the subtraction terms in the Hamilton formula
+        
         __m128 signX = _mm_castsi128_ps(_mm_set_epi32(0x80000000, 0x80000000, 0, 0x80000000));
         __m128 signY = _mm_castsi128_ps(_mm_set_epi32(0x80000000, 0, 0x80000000, 0x80000000));
         __m128 signZ = _mm_castsi128_ps(_mm_set_epi32(0x80000000, 0x80000000, 0x80000000, 0));
@@ -393,53 +385,38 @@ struct alignas(16) Quaternion {
         return Quaternion(res);
     }
 
-    // --- HARDWARE NORMALIZATION ---
+    
     FORCE_INLINE void Normalize() {
         __m128 dot = _mm_dp_ps(reg, reg, 0xFF);
-        __m128 invLen = _mm_rsqrt_ps(dot); // Hardware inverse square root
+        __m128 invLen = _mm_rsqrt_ps(dot); 
         reg = _mm_mul_ps(reg, invLen);
     }
 
-    // --- CONJUGATE (INVERSE ROTATION) ---
-    // Negates X, Y, and Z. Required to generate View Matrices!
+    
     FORCE_INLINE Quaternion Conjugate() const {
         __m128 signMask = _mm_castsi128_ps(_mm_set_epi32(0, 0x80000000, 0x80000000, 0x80000000));
         return Quaternion(_mm_xor_ps(reg, signMask));
     }
     
-    // --- PURE SIMD ROTATE VECTOR ---
-    // Rotates a 3D vector by this quaternion: V' = Q * V * Q^-1
+    
     FORCE_INLINE SSE128_SIMDVector3D RotateVector(const SSE128_SIMDVector3D& v) const {
-        // Drastically faster than extracting x, y, and z to memory!
-        // Fast path for rotating a vector by a quaternion
-
-        // 1. Mask out W (Force it to 0.0) to get purely the imaginary (x,y,z) axis
         SSE128_SIMDVector3D qVec(_mm_blend_ps(reg, _mm_setzero_ps(), 0x08));
-        
-        // 2. Broadcast the Real (w) component across all lanes
         __m128 wReg = _mm_shuffle_ps(reg, reg, _MM_SHUFFLE(3, 3, 3, 3));
-        
-        // 3. V' = V + 2w(Q_xyz x V) + 2(Q_xyz x (Q_xyz x V))
         SSE128_SIMDVector3D t = qVec.cross(v) * 2.0f;
-        
-        // Multiply t by w directly in the registers, avoiding scalar extraction
         SSE128_SIMDVector3D tw(_mm_mul_ps(t.reg, wReg)); 
-
         return v + tw + qVec.cross(t);
     }
 
-    // --- DIRECTION TO QUATERNION ---
+    
     // Converts a normalized forward vector into a rotation without using Trigonometry.
     static FORCE_INLINE Quaternion FromDirection(const SSE128_SIMDVector3D& dir) {
         SSE128_SIMDVector3D baseForward(0.0f, 0.0f, -1.0f, 0.0f); 
         float dot = baseForward.dot(dir);
         
-        // Edge Case: The camera needs to perfectly turn around 180 degrees
         if (dot < -0.9999f) {
-            return Quaternion(0.0f, 1.0f, 0.0f, 0.0f); // 180-degree Yaw
+            return Quaternion(0.0f, 1.0f, 0.0f, 0.0f); 
         }
         
-        // Build the Quaternion using the cross product axis and the half-way dot product
         SSE128_SIMDVector3D axis = baseForward.cross(dir);
         Quaternion q(axis.x(), axis.y(), axis.z(), 1.0f + dot);
         q.Normalize();
@@ -447,69 +424,13 @@ struct alignas(16) Quaternion {
         return q;
     }
 
-    // --- DOT PRODUCT ---
     FORCE_INLINE float dot(const Quaternion& other) const {
         return _mm_cvtss_f32(_mm_dp_ps(reg, other.reg, 0xFF));
     }
 
-    // --- QUATERNION DOT PRODUCT ---
-    // FORCE_INLINE float dot_simd(const Quaternion& rhs) const {
-    //     // Dot product across all 4 lanes
-    //     __m128 res = _mm_dp_ps(reg, rhs.reg, 0xFF);
-    //     return _mm_cvtss_f32(res);
-    // }
-
-    // --- SPHERICAL LINEAR INTERPOLATION (SLERP) ---
-    // static FORCE_INLINE Quaternion Slerp(const Quaternion& a, const Quaternion& b, float t) {
-    //     float cosTheta = a.dot_simd(b);
-    //     __m128 bReg = b.reg;
-
-    //     // 1. Shortest Path Routing
-    //     // If the dot product is negative, the quaternions point away from each other.
-    //     // We negate one of them to ensure the camera takes the shortest visual path.
-    //     if (cosTheta < 0.0f) {
-    //         cosTheta = -cosTheta;
-    //         // Instantly flip the sign bit of all 4 floats using XOR
-    //         __m128 signMask = _mm_castsi128_ps(_mm_set1_epi32(0x80000000));
-    //         bReg = _mm_xor_ps(bReg, signMask); 
-    //     }
-
-    //     // 2. Fallback to NLerp (Normalized Lerp) for microscopic adjustments
-    //     // If the rotations are almost identical, calculating Trigonometry is a waste of CPU cycles.
-    //     if (cosTheta > 0.9995f) {
-    //         __m128 tReg = _mm_set1_ps(t);
-    //         __m128 diff = _mm_sub_ps(bReg, a.reg);
-            
-    //         Quaternion res(_mm_fmadd_ps(diff, tReg, a.reg));
-    //         res.Normalize();
-    //         return res;
-    //     }
-
-    //     // 3. Standard Slerp Trigonometry
-    //     float theta = std::acos(cosTheta);
-    //     float invSinTheta = 1.0f / std::sin(theta);
-        
-    //     // Calculate interpolation scales
-    //     float scaleA = std::sin((1.0f - t) * theta) * invSinTheta;
-    //     float scaleB = std::sin(t * theta) * invSinTheta;
-
-    //     // Apply scales and add: (a * scaleA) + (b * scaleB)
-    //     __m128 res = _mm_add_ps(
-    //         _mm_mul_ps(a.reg, _mm_set1_ps(scaleA)),
-    //         _mm_mul_ps(bReg,  _mm_set1_ps(scaleB))
-    //     );
-
-    //     return Quaternion(res);
-    // }
-
-    // --- NORMALIZED LERP (N-Lerp) ---
-    // Insanely fast. Used when the angle between quaternions is extremely small.
-    // Lerp draws a straight, linear chord (a line) across a rotation sphere's interior (through the 4D sphere), causing the camera's rotational speed to accelerate and decelerate slightly between waypoints.
     static FORCE_INLINE Quaternion Lerp(const Quaternion& q1, const Quaternion& q2, float t) {
         __m128 tReg = _mm_set1_ps(t);
         __m128 oneMinusT = _mm_sub_ps(_mm_set1_ps(1.0f), tReg);
-
-        // res = (q1 * (1 - t)) + (q2 * t)
         __m128 res = _mm_add_ps(_mm_mul_ps(q1.reg, oneMinusT), _mm_mul_ps(q2.reg, tReg));
         
         Quaternion result(res);
@@ -518,24 +439,17 @@ struct alignas(16) Quaternion {
     }
 
     // --- SPHERICAL LINEAR INTERPOLATION (SLERP) ---
-    // Constant velocity rotation along the shortest path of the sphere.
-    // Slerp traces the curve along the surface of a sphere, guarenteeing a perfectly constant velocity for CinematicTrackController.
     static FORCE_INLINE Quaternion Slerp(const Quaternion& q1, const Quaternion& q2, float t) {
         float cosOmega = q1.dot(q2);
         __m128 q2Reg = q2.reg;
 
-        // 1. SHORTEST PATH ENFORCEMENT
-        // If the dot product is negative, the quaternions point to opposite hemispheres.
-        // We flip Q2 to force the camera to take the shortest physical rotation path.
+        
         if (cosOmega < 0.0f) {
             cosOmega = -cosOmega;
-            // Flip the sign bit of all 4 floats instantly using XOR
             q2Reg = _mm_xor_ps(q2Reg, _mm_set1_ps(-0.0f));
         }
 
-        // 2. GIMBAL / PRECISION FALLBACK
-        // If the quaternions are nearly identical (angle is basically 0), 
-        // division by sin(Omega) will cause a NaN explosion. Fallback to N-Lerp.
+        
         if (cosOmega > 0.9999f) {
             __m128 tReg = _mm_set1_ps(t);
             __m128 oneMinusT = _mm_sub_ps(_mm_set1_ps(1.0f), tReg);
@@ -544,17 +458,13 @@ struct alignas(16) Quaternion {
             result.Normalize();
             return result;
         }
-
-        // 3. THE SPHERICAL MATH
-        // Extract the angle (Omega) and calculate the transcendental weights
+        
         float omega = std::acos(cosOmega);
         float invSinOmega = 1.0f / std::sin(omega);
 
         float weight0 = std::sin((1.0f - t) * omega) * invSinOmega;
         float weight1 = std::sin(t * omega) * invSinOmega;
 
-        // 4. SIMD RE-ASSEMBLY
-        // res = (q1 * w0) + (q2 * w1)
         __m128 res = _mm_add_ps(_mm_mul_ps(q1.reg, _mm_set1_ps(weight0)), _mm_mul_ps(q2Reg, _mm_set1_ps(weight1)));
 
         return Quaternion(res);
