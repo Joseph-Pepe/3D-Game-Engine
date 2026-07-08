@@ -158,6 +158,7 @@ public:
     SSE128_SIMDVector3D c = a + (b * 5.0f); // Completely optimized into registers by the compiler
 */
 
+// Storing data in an array of floats inside a struct that is meant to be used for SIMD is an anti-pattern (i.e., Load-Hit-Store penalty).
 class Vector3DStack {
 public:
     alignas(16) float data[4]; 
@@ -165,7 +166,7 @@ public:
     // Constructor: Default initializes to {0, 0, 0, 0}
     Vector3DStack(float x = 0.0f, float y = 0.0f, float z = 0.0f) : data{x, y, z, 0.0f} {}
 
-    // Addition: C = A + B
+    // Addition: C = A + B (Load-Hit-Store penalty)
     FORCE_INLINE Vector3DStack operator+(const Vector3DStack& other) const {
         Vector3DStack result;
         
@@ -176,7 +177,7 @@ public:
         return result;
     }
 
-    // Subtraction: C = A - B
+    // Subtraction: C = A - B (Load-Hit-Store penalty)
     FORCE_INLINE Vector3DStack operator-(const Vector3DStack& other) const {
         Vector3DStack result;
         
@@ -187,7 +188,7 @@ public:
         return result;
     }
 
-    // Scalar Multiplication: B = A * scalar
+    // Scalar Multiplication: B = A * scalar (Load-Hit-Store penalty)
     FORCE_INLINE Vector3DStack operator*(float scalar) const {
         Vector3DStack result;
         
@@ -205,7 +206,7 @@ public:
         _mm_store_ps(this->data, _mm_mul_ps(v1, s)); // Store directly back into itself
     }
 
-    // Dot Product
+    // Dot Product (Load-Hit-Store penalty)
     FORCE_INLINE float dot(const Vector3DStack& other) const {
         __m128 v1 = _mm_load_ps(this->data);
         __m128 v2 = _mm_load_ps(other.data);
@@ -221,7 +222,7 @@ public:
         return _mm_cvtss_f32(mul);
     }
 
-    // Cross Product
+    // Cross Product (Load-Hit-Store penalty)
     FORCE_INLINE Vector3DStack cross(const Vector3DStack& other) const {
         Vector3DStack result;
         
@@ -239,6 +240,7 @@ public:
         return result;
     }
 
+    // (Load-Hit-Store penalty)
     FORCE_INLINE Vector3DStack asDirection() const {
         Vector3DStack result;
         __m128 reg = _mm_load_ps(this->data);
@@ -249,6 +251,7 @@ public:
         return result;
     }
 
+    // (Load-Hit-Store penalty)
     FORCE_INLINE Vector3DStack asPoint() const {
         Vector3DStack result;
         __m128 reg = _mm_load_ps(this->data);
@@ -294,23 +297,6 @@ struct Vector3DWorldV1 {
         return Vector3DStack(static_cast<float>(x), static_cast<float>(y), static_cast<float>(z));
     }
 };
-
-// ==================================================================================
-// EULER ANGLES (GIMBAL LOCK) & QUATERNIONS
-// ==================================================================================
-/*
-    - Euler Angles: Yaw, Pitch, Roll (requires pitch to be clamped to prevent screen flipping).
-    - Prevents smooth interpolation and complicates multi-axis rotations (gimbal lock).
-
-      // Constrain pitch to prevent screen-flipping (Gimbal Lock Prevention)
-      if (Pitch > 89.0f) Pitch = 89.0f;
-      if (Pitch < -89.0f) Pitch = -89.0f;
-
-    - Quaternions: Represents a rotation in 3D space using a 4D complex number (q = w + xi + yi + zi).
-    - Eradicates gimbal lock entirely because it represents spherical rotation s directly (no snapping or axis flips). 
-    - Allows us to combine rotations using pure SIMD Fused Multiply-Add (FMA) arithmetic.
-    - Maps perfectly to a 128-bit register (Hamiltonian Product) using a handful of insruction cycles. 
-*/
 
 // ==================================================================================
 // SIMD QUATERNION (128-bit)
@@ -474,168 +460,16 @@ struct alignas(16) Quaternion {
 // ==================================================================================
 // SIMD 4x4 MATRIX (COLUMN-MAJOR)
 // ==================================================================================
-/*
-    - A 4x4 matrix should not be a raw array of 16 floats.
-    - It should be an array of four 128-bit SIMD registers. 
-    - This is how AA engines keep camera math on the silicon.
-*/
+
 struct alignas(64) SIMD_SSE128_Matrix4x4 {
-    // 4 columns, each taking up exactly one 128-bit register
     __m128 col[4];
 
-    // Creates an Identity Matrix entirely inside the registers
     static FORCE_INLINE SIMD_SSE128_Matrix4x4 Identity() {
         SIMD_SSE128_Matrix4x4 mat;
-        mat.col[0] = _mm_set_ps(0.0f, 0.0f, 0.0f, 1.0f); // { 1, 0, 0, 0 }
-        mat.col[1] = _mm_set_ps(0.0f, 0.0f, 1.0f, 0.0f); // { 0, 1, 0, 0 }
-        mat.col[2] = _mm_set_ps(0.0f, 1.0f, 0.0f, 0.0f); // { 0, 0, 1, 0 }
-        mat.col[3] = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f); // { 0, 0, 0, 1 }
-        return mat;
-    }
-
-    // --- HIGH-PERFORMANCE SIMD MATRIX INVERSE ---
-    // Required for Mouse Picking, Screen-to-World Raycasting, and Normal Matrix generation.
-    FORCE_INLINE SIMD_SSE128_Matrix4x4 Inverse() const {
-        // e.g., lets us know what the user clicked by converting a 2D mouse coordinate (x,y) back into a 3D line (a ray) and shoot it into the world.
-        // e.g., Screen Space -> World space
-        SIMD_SSE128_Matrix4x4 res;
-        __m128 Fac0, Fac1, Fac2, Fac3, Fac4, Fac5;
-        __m128 Vec0, Vec1, Vec2, Vec3;
-        __m128 Inv0, Inv1, Inv2, Inv3;
-
-        // Extract columns
-        Vec0 = col[0]; Vec1 = col[1]; Vec2 = col[2]; Vec3 = col[3];
-
-        // 2x2 Sub-determinants (Intel's Cramer's Rule implementation)
-        Fac0 = _mm_castsi128_ps(_mm_shuffle_epi32(_mm_castps_si128(Vec3), _MM_SHUFFLE(3, 3, 3, 3)));
-        Fac1 = _mm_castsi128_ps(_mm_shuffle_epi32(_mm_castps_si128(Vec2), _MM_SHUFFLE(3, 3, 3, 3)));
-        Fac2 = _mm_castsi128_ps(_mm_shuffle_epi32(_mm_castps_si128(Vec1), _MM_SHUFFLE(3, 3, 3, 3)));
-        Fac3 = _mm_castsi128_ps(_mm_shuffle_epi32(_mm_castps_si128(Vec0), _MM_SHUFFLE(3, 3, 3, 3)));
-        
-        // ... (This algorithm spans roughly 30 lines of explicit intrinsic shuffles. 
-        // In AAA engines, this is usually pulled directly from the DirectXMath or GLM SIMD headers 
-        // to guarantee floating-point stability). 
-        // For brevity, the logic calculates the 4 inverted columns and divides by the determinant.
-        
-        return res; // Returns the fully inverted matrix
-    }
-
-    // --- PURE SIMD VIEW MATRIX (NO LOAD-HIT-STORE) ---
-    // Takes native SSE vectors and keeps all math strictly on the silicon.
-    static FORCE_INLINE SIMD_SSE128_Matrix4x4 LookAt_SIMD(const SSE128_SIMDVector3D& eye, const SSE128_SIMDVector3D& target, const SSE128_SIMDVector3D& upVec) {
-        
-        // 1. Forward Vector (Z)
-        SSE128_SIMDVector3D f = target - eye;
-        f = f.asDirection(); // Force W=0.0f
-        float fLenSq = f.dot(f);
-        if (fLenSq > 1e-8f) f = f * (1.0f / std::sqrt(fLenSq));
-
-        // 2. Right Vector (X)
-        SSE128_SIMDVector3D r = f.cross(upVec).asDirection();
-        float rLenSq = r.dot(r);
-        if (rLenSq > 1e-8f) r = r * (1.0f / std::sqrt(rLenSq));
-
-        // 3. Up Vector (Y)
-        SSE128_SIMDVector3D u = r.cross(f).asDirection();
-
-        // 4. Negate the Forward vector (Required for Right-Handed Coordinate Systems like OpenGL)
-        // Flip the sign bit in hardware without multiplication: XOR with -0.0f
-        __m128 negZero = _mm_set1_ps(-0.0f);
-        __m128 negF = _mm_xor_ps(f.reg, negZero);
-
-        // 5. Calculate Translation Vector
-        // Standard View Matrix translation is: [-dot(R, eye), -dot(U, eye), dot(F, eye)]
-        float tx = -r.dot(eye);
-        float ty = -u.dot(eye);
-        float tz = f.dot(eye); 
-        
-        // Pack into a single register for the 4th column. (_mm_set_ps takes args in reverse order: w, z, y, x)
-        __m128 translation = _mm_set_ps(1.0f, tz, ty, tx);
-
-        // 6. Setup rows for Hardware Transposition
-        __m128 row0 = r.reg;                              // { Rx, Ry, Rz, 0 }
-        __m128 row1 = u.reg;                              // { Ux, Uy, Uz, 0 }
-        __m128 row2 = negF;                               // {-Fx,-Fy,-Fz, 0 }
-        __m128 row3 = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f); // { 0,  0,  0,  1 }
-
-        // 7. THE MAGIC TRICK: Hardware Transpose
-        // Flips the 3x3 rotation axes into Column-Major format instantly.
-        _MM_TRANSPOSE4_PS(row0, row1, row2, row3);
-
-        // 8. Store the columns, overwriting the transposed 4th column with our calculated translation.
-        SIMD_SSE128_Matrix4x4 mat;
-        mat.col[0] = row0;
-        mat.col[1] = row1;
-        mat.col[2] = row2;
-        mat.col[3] = translation; 
-
-        return mat;
-    }
-
-    // ==================================================================================
-    // MATRICES & INTERPOLATION
-    // ==================================================================================
-    /*
-        - Vector3DScalar (NO SSE-Accelerated)
-        - Matrix generation requires sequential FPU (Floating Point Unit) math.
-        - When dealing with a single entity, packing data into 128 bit SSE registers actually hurts performance.
-        - CPU wastes clock cycles shuffling the data from the FPU, into the SSE registers for the cross product and then unpack it again for the Matrix.
-        - To solve this, never leave SIMD registers (AAA Engines: a 4x4 matrix and a 3D vector are always 128-bit SIMD registers).
-        - Load the camera data into an SSE register, perform all LookAt, Projection and View Matrix math inside SSE, and only extract the data when pushing it to the GPU via uniform buffers.
-    */
-
-    // --- __MM_TRNASPOSE4_PS ---
-    /*
-        - Rendering APIs require matrices to be formatted in column-major order.
-        - Instead of extracting floats sequentially to flip the rows into columns, SSE has a built in macro to transpose a 4x4 matrix across four registers in a few clock cycles.
-    */
-    static FORCE_INLINE SIMD_SSE128_Matrix4x4 LookAtLWC_SIMD(const Vector3DWorldV1& eye, const Vector3DWorldV1& target, const SSE128_SIMDVector3D& upVec) {
-        
-        // 1. Calculate World Difference & Cast to 32-bit SIMD (SSE128_SIMDVector3D is your SSE wrapper class)
-        Vector3DWorldV1 worldDiff = target - eye;
-        SSE128_SIMDVector3D f = SSE128_SIMDVector3D(static_cast<float>(worldDiff.x), 
-                            static_cast<float>(worldDiff.y), 
-                            static_cast<float>(worldDiff.z), 
-                            0.0f); // Ensure W is 0.0f for directional vectors
-        
-        // Normalize Forward
-        float fLenSq = f.dot(f);
-        if (fLenSq > 1e-8f) f = f * (1.0f / std::sqrt(fLenSq));
-
-        // 2. Right Vector (X) - SIMD Cross Product
-        SSE128_SIMDVector3D r = f.cross(upVec);
-        float rLenSq = r.dot(r);
-        if (rLenSq > 1e-8f) r = r * (1.0f / std::sqrt(rLenSq));
-
-        // 3. Up Vector (Y) - SIMD Cross Product
-        SSE128_SIMDVector3D u = r.cross(f);
-
-        // 4. Negate the Forward vector (Required for Right-Handed Coordinate Systems)
-        // Flip the sign bit in hardware without multiplication: XOR with -0.0f
-        __m128 negZero = _mm_set1_ps(-0.0f);
-        __m128 negF = _mm_xor_ps(f.reg, negZero);
-
-        // 5. Load our rows. 
-        // We force the W component of these row vectors to 0.0f, except for the bottom row.
-        __m128 row0 = r.reg;     // { Rx, Ry, Rz, 0 }
-        __m128 row1 = u.reg;     // { Ux, Uy, Uz, 0 }
-        __m128 row2 = negF;      // {-Fx,-Fy,-Fz, 0 }
-        __m128 row3 = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f); // { 0, 0, 0, 1 }
-
-        // 6. THE MAGIC TRICK: Hardware Transpose
-        // This flips our rows into Column-Major format in-place!
-        _MM_TRANSPOSE4_PS(row0, row1, row2, row3);
-
-        // 7. Store the transposed registers directly into the matrix columns.
-        SIMD_SSE128_Matrix4x4 mat;
-        mat.col[0] = row0;
-        mat.col[1] = row1;
-        mat.col[2] = row2;
-        mat.col[3] = row3;
-
-        // Notice we do NOT calculate translation (-r.dot(eye), etc.). 
-        // Because we are using Large World Coordinates (LWC), the camera is ALWAYS at (0,0,0)!
-        
+        mat.col[0] = _mm_set_ps(0.0f, 0.0f, 0.0f, 1.0f); 
+        mat.col[1] = _mm_set_ps(0.0f, 0.0f, 1.0f, 0.0f); 
+        mat.col[2] = _mm_set_ps(0.0f, 1.0f, 0.0f, 0.0f); 
+        mat.col[3] = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f); 
         return mat;
     }
 };
