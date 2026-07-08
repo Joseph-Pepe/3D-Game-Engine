@@ -105,6 +105,8 @@ namespace Engine::Math::SIMD {
             return vreinterpretq_f32_u32(veorq_u32(vreinterpretq_u32_f32(v), mask));
         }
 
+        FORCE_INLINE Float4 Negate(Float4 v) { return vnegq_f32(v); }
+
         FORCE_INLINE Float4 QuaternionMul(Float4 q1, Float4 q2) {
             // Scalar extraction on M-Series ARM is vastly faster than complex NEON bitmask shuffles
             float x1 = ExtractX(q1), y1 = ExtractY(q1), z1 = ExtractZ(q1), w1 = ExtractW(q1);
@@ -115,6 +117,49 @@ namespace Engine::Math::SIMD {
                 (w1 * z2) + (x1 * y2) - (y1 * x2) + (z1 * w2),
                 (w1 * w2) - (x1 * x2) - (y1 * y2) - (z1 * z2)
             );
+        }
+
+        // --- ARM NEON MATRIX INVERSE (Geometric Cramer's Rule) ---
+        FORCE_INLINE void Inverse4x4(Float4& c0, Float4& c1, Float4& c2, Float4& c3) {
+            // 1. Transpose the matrix to work with rows
+            Float4 r0 = c0, r1 = c1, r2 = c2, r3 = c3;
+            Transpose4(r0, r1, r2, r3);
+
+            // 2. 2x2 Sub-determinants
+            Float4 v0 = Cross(r0, r1);
+            Float4 v1 = Cross(r2, r3);
+
+            // --- Vectorized Adjugate Matrix --
+            // NEON doesn't support Intel's specific hex shuffles, so it uses its superior hardware Fused-Multiply-Add to evaluate the sub-determinants.
+            Float4 adj0 = Sub(Mul(r1, Set1(ExtractX(v1))), Mul(r2, Set1(ExtractY(v1))));
+            adj0 = Add(adj0, Mul(r3, Set1(ExtractZ(v1))));
+
+            Float4 adj1 = Sub(Mul(r2, Set1(ExtractX(v0))), Mul(r3, Set1(ExtractY(v0))));
+            adj1 = Add(adj1, Mul(r0, Set1(ExtractZ(v0))));
+
+            Float4 adj2 = Sub(Mul(r3, Set1(ExtractX(v0))), Mul(r0, Set1(ExtractY(v0))));
+            adj2 = Add(adj2, Mul(r1, Set1(ExtractZ(v0))));
+
+            Float4 adj3 = Sub(Mul(r0, Set1(ExtractX(v1))), Mul(r1, Set1(ExtractY(v1))));
+            adj3 = Add(adj3, Mul(r2, Set1(ExtractZ(v1))));
+
+            // 3. Calculate Determinant (Dot product of Row 0 and Adjugate Column 0)
+            float det = Dot4(r0, adj0);
+
+             // If det is 0, the matrix is singular (cannot be inverted). We just return Identity to prevent NaN explosions.
+            if (std::abs(det) < 1e-8f) {
+                c0 = Set(1.0f, 0.0f, 0.0f, 0.0f); c1 = Set(0.0f, 1.0f, 0.0f, 0.0f);
+                c2 = Set(0.0f, 0.0f, 1.0f, 0.0f); c3 = Set(0.0f, 0.0f, 0.0f, 1.0f);
+                return;
+            }
+
+            // 4. Divide by Determinant (Multiply by Inverse)
+            Float4 invDet = Set1(1.0f / det);
+            c0 = Mul(adj0, invDet); c1 = Mul(adj1, invDet);
+            c2 = Mul(adj2, invDet); c3 = Mul(adj3, invDet);
+
+            // 5. Final Transpose back to Column-Major
+            Transpose4(c0, c1, c2, c3);
         }
 
         FORCE_INLINE Float4 CmpGt(Float4 a, Float4 b) { return vreinterpretq_f32_u32(vcgtq_f32(a, b)); }
@@ -249,9 +294,15 @@ namespace Engine::Math::SIMD {
             r3 = _mm_movehl_ps(_mm_unpackhi_ps(tmp1, tmp3), tmp1);
         }
 
+        // Conjugate: Flip the sign bit of 3 floats (x, y, z) instantly using XOR (-x, -y, -z, w), but leaves w alone (i.e., inverse rotation).
         FORCE_INLINE Float4 FlipSignXYZ(Float4 v) {
             __m128 signMask = _mm_castsi128_ps(_mm_set_epi32(0, 0x80000000, 0x80000000, 0x80000000));
             return _mm_xor_ps(v, signMask);
+        }
+
+        // Shortest Path: Flip the sign bit of all 4 floats instantly using XOR (-x, -y, -z, -w) to represent the same 3D orientation in space, but sit on opposite poles of the 4D hypersphere's surface.
+        FORCE_INLINE Float4 Negate(Float4 v) { 
+            return _mm_xor_ps(v, _mm_set1_ps(-0.0f)); 
         }
 
         // Q1 = this (a, b, c, d) | Q2 = rhs (x, y, z, w)
@@ -280,6 +331,93 @@ namespace Engine::Math::SIMD {
             res = _mm_add_ps(res, _mm_xor_ps(_mm_mul_ps(z1, tmp2), signZ));
 
             return res;
+        }
+
+        // --- INTEL SSE MATRIX INVERSE (AP-928 Cramer's Rule Unroll) ---
+        // Uses parallel hex shuffles to calculate 2x2 sub-determinants in registers.
+        FORCE_INLINE void Inverse4x4(Float4& c0, Float4& c1, Float4& c2, Float4& c3) {
+            __m128 tmp1, row0, row1, row2, row3;
+            __m128 minor0, minor1, minor2, minor3;
+            __m128 det;
+
+            // 1. Transpose the matrix
+            tmp1 = _mm_unpacklo_ps(c0, c1);
+            __m128 tmp2 = _mm_unpacklo_ps(c2, c3);
+            __m128 tmp3 = _mm_unpackhi_ps(c0, c1);
+            __m128 tmp4 = _mm_unpackhi_ps(c2, c3);
+            row0 = _mm_movelh_ps(tmp1, tmp2);
+            row1 = _mm_movehl_ps(tmp2, tmp1);
+            row2 = _mm_movelh_ps(tmp3, tmp4);
+            row3 = _mm_movehl_ps(tmp4, tmp3);
+
+            // 2. 2x2 Sub-determinants & Minors via parallel shuffles
+            tmp1 = _mm_mul_ps(row2, row3);
+            tmp1 = _mm_shuffle_ps(tmp1, tmp1, 0xB1);
+            minor0 = _mm_mul_ps(row1, tmp1);
+            minor1 = _mm_mul_ps(row0, tmp1);
+            tmp1 = _mm_shuffle_ps(tmp1, tmp1, 0x4E);
+            minor0 = _mm_sub_ps(_mm_mul_ps(row1, tmp1), minor0);
+            minor1 = _mm_sub_ps(_mm_mul_ps(row0, tmp1), minor1);
+            minor1 = _mm_shuffle_ps(minor1, minor1, 0x4E);
+
+            tmp1 = _mm_mul_ps(row1, row2);
+            tmp1 = _mm_shuffle_ps(tmp1, tmp1, 0xB1);
+            minor0 = _mm_add_ps(_mm_mul_ps(row3, tmp1), minor0);
+            minor3 = _mm_mul_ps(row0, tmp1);
+            tmp1 = _mm_shuffle_ps(tmp1, tmp1, 0x4E);
+            minor0 = _mm_sub_ps(minor0, _mm_mul_ps(row3, tmp1));
+            minor3 = _mm_sub_ps(_mm_mul_ps(row0, tmp1), minor3);
+            minor3 = _mm_shuffle_ps(minor3, minor3, 0x4E);
+
+            tmp1 = _mm_mul_ps(_mm_shuffle_ps(row1, row1, 0x4E), row3);
+            tmp1 = _mm_shuffle_ps(tmp1, tmp1, 0xB1);
+            row2 = _mm_shuffle_ps(row2, row2, 0x4E);
+            minor0 = _mm_add_ps(_mm_mul_ps(row2, tmp1), minor0);
+            minor2 = _mm_mul_ps(row0, tmp1);
+            tmp1 = _mm_shuffle_ps(tmp1, tmp1, 0x4E);
+            minor0 = _mm_sub_ps(minor0, _mm_mul_ps(row2, tmp1));
+            minor2 = _mm_sub_ps(_mm_mul_ps(row0, tmp1), minor2);
+            minor2 = _mm_shuffle_ps(minor2, minor2, 0x4E);
+
+            tmp1 = _mm_mul_ps(row0, row1);
+            tmp1 = _mm_shuffle_ps(tmp1, tmp1, 0xB1);
+            minor2 = _mm_add_ps(_mm_mul_ps(row3, tmp1), minor2);
+            minor3 = _mm_sub_ps(_mm_mul_ps(row2, tmp1), minor3);
+            tmp1 = _mm_shuffle_ps(tmp1, tmp1, 0x4E);
+            minor2 = _mm_sub_ps(minor2, _mm_mul_ps(row3, tmp1));
+            minor3 = _mm_sub_ps(minor3, _mm_mul_ps(row2, tmp1));
+
+            tmp1 = _mm_mul_ps(row0, row3);
+            tmp1 = _mm_shuffle_ps(tmp1, tmp1, 0xB1);
+            minor1 = _mm_sub_ps(minor1, _mm_mul_ps(row2, tmp1));
+            minor2 = _mm_add_ps(_mm_mul_ps(row1, tmp1), minor2);
+            tmp1 = _mm_shuffle_ps(tmp1, tmp1, 0x4E);
+            minor1 = _mm_add_ps(_mm_mul_ps(row2, tmp1), minor1);
+            minor2 = _mm_sub_ps(minor2, _mm_mul_ps(row1, tmp1));
+
+            tmp1 = _mm_mul_ps(row0, row2);
+            tmp1 = _mm_shuffle_ps(tmp1, tmp1, 0xB1);
+            minor1 = _mm_add_ps(_mm_mul_ps(row3, tmp1), minor1);
+            minor3 = _mm_sub_ps(minor3, _mm_mul_ps(row1, tmp1));
+            tmp1 = _mm_shuffle_ps(tmp1, tmp1, 0x4E);
+            minor1 = _mm_sub_ps(minor1, _mm_mul_ps(row3, tmp1));
+            minor3 = _mm_add_ps(_mm_mul_ps(row1, tmp1), minor3);
+
+            // 3. Calculate Determinant
+            det = _mm_mul_ps(row0, minor0);
+            det = _mm_add_ps(_mm_shuffle_ps(det, det, 0x4E), det);
+            det = _mm_add_ss(_mm_shuffle_ps(det, det, 0xB1), det);
+            
+            // Hardware Reciprocal to divide by determinant
+            tmp1 = _mm_rcp_ss(det);
+            det = _mm_sub_ss(_mm_add_ss(tmp1, tmp1), _mm_mul_ss(det, _mm_mul_ss(tmp1, tmp1)));
+            det = _mm_shuffle_ps(det, det, 0x00);
+
+            // 4. Multiply Minor by Inverse Determinant
+            c0 = _mm_mul_ps(det, minor0);
+            c1 = _mm_mul_ps(det, minor1);
+            c2 = _mm_mul_ps(det, minor2);
+            c3 = _mm_mul_ps(det, minor3);
         }
 
         FORCE_INLINE Float4 CmpGt(Float4 a, Float4 b) { return _mm_cmpgt_ps(a, b); }
@@ -490,6 +628,23 @@ public:
 };
 
 // ==================================================================================
+// EULER ANGLES (GIMBAL LOCK) & QUATERNIONS
+// ==================================================================================
+/*
+    - Euler Angles: Yaw, Pitch, Roll (requires pitch to be clamped to prevent screen flipping).
+    - Prevents smooth interpolation and complicates multi-axis rotations (gimbal lock).
+
+      // Constrain pitch to prevent screen-flipping (Gimbal Lock Prevention)
+      if (Pitch > 89.0f) Pitch = 89.0f;
+      if (Pitch < -89.0f) Pitch = -89.0f;
+
+    - Quaternions: Represents a rotation in 3D space using a 4D complex number (q = w + xi + yi + zi).
+    - Eradicates gimbal lock entirely because it represents spherical rotation s directly (no snapping or axis flips). 
+    - Allows us to combine rotations using pure SIMD Fused Multiply-Add (FMA) arithmetic.
+    - Maps perfectly to a 128-bit register (Hamiltonian Product) using a handful of insruction cycles. 
+*/
+
+// ==================================================================================
 // SIMD QUATERNION (CROSS-PLATFORM)
 // ==================================================================================
 struct alignas(16) SIMDQuaternion {
@@ -520,20 +675,23 @@ struct alignas(16) SIMDQuaternion {
     FORCE_INLINE SIMDVector3D GetUpVector() const { return RotateVector(SIMDVector3D(0.0f, 1.0f, 0.0f, 0.0f)); }       // Returns the normalized up vector (+Y)
 
     // --- NORMALIZED LERP (N-Lerp) ---
-    // Insanely fast. Used for general gameplay rotation and microscopic adjustments.
-     // Lerp draws a straight, linear chord (a line) across a rotation sphere's interior (through the 4D sphere), causing the camera's rotational speed to accelerate and decelerate slightly between waypoints.
+    /*
+        - Draws a straight mathematical line (a chord) through the center of a 4D sphere to get from point A to point B.
+        - It then normalizes the result to snap it back to the surface of the sphere.
+        - Uses pure SIMD addition and multiplcation (i.e., ultra-fast).
+        - Causes the camera's rotational speed to accelerate and decelerate slightly between waypoints (i.e., velocity is not constant since the rotation speeds up slightly in the middle of interpolation and slows down at the ends).
+        - e.g., 90% of gameplay logic, general gameplay rotation, microscopic adjustments, making an AI smoothly turn to face the player, snapping the camera behind the player's back.
+        - e.g. useful as a Slerp fallback when an angle between two quaternions is incredibly small or nearly identical to prevent Slerp formula from dividing by sin(0) which leads to NaN.
+    */
     static FORCE_INLINE SIMDQuaternion NLerp(const SIMDQuaternion& q1, const SIMDQuaternion& q2, float t) {
         
         // 1. Shortest Path Enforcement
-        // If the dot product is negative, the quaternions point to opposite hemispheres.
-        // We must negate q2 to ensure the interpolation takes the shortest visual path.
+        // If the dot product is negative, the quaternions point to opposite hemispheres which means the camera is going to take longest path around sphere to reach target.
+        // We must negate q2 to ensure the interpolation takes the shortest visual path to reach the target.
         Engine::Math::SIMD::Float4 q2Reg = q2.reg;
         if (q1.dot(q2) < 0.0f) {
-            #ifdef MATH_ISA_ARM
-                q2Reg = vnegq_f32(q2Reg);
-            #else
-                q2Reg = _mm_xor_ps(q2Reg, _mm_set1_ps(-0.0f));
-            #endif
+            // Enforce shortest path by flipping ALL signs (X, Y, Z, W)
+            q2Reg = Engine::Math::SIMD::Negate(q2Reg);
         }
 
         // 2. Linear Interpolation (res = q1*(1-t) + q2*t)
@@ -551,10 +709,14 @@ struct alignas(16) SIMDQuaternion {
         return result;
     }
 
-    // --- SPHERICAL LINEAR INTERPOLATION (SLERP) ---
-    // Interpolate rotations: Used for implementing smooth camera controls, cinematic splines, or AI rotation targeting (making AI entities slowly turn towards the player).
-    // Constant velocity rotation along the shortest path of the sphere.
-    // Slerp traces the curve along the surface of a sphere, guarenteeing a perfectly constant velocity for CinematicTrackController.
+    // --- SPHERICAL LINEAR INTERPOLATION (SLERP) --- 
+    /*
+        - Traces a path along the surface of a 4D sphere (i.e., interpolate rotations).
+        - Constant velocity rotation along the shortest path of the sphere (i.e. generates constant velocity for CinematicTrackController).
+        - e.g., rotational speed will be smooth from start to finish for a camera panning between two targets.
+        - e.g., used for implementing smooth camera controls, cinematic splines, or AI rotation targeting (making AI entities slowly turn towards the player).
+        - e.g., cinematic camera sweeps, interpolating keyframes in skeletal animation like smoothly rotating a joint between two distant animation frames.
+    */
     static FORCE_INLINE SIMDQuaternion Slerp(const SIMDQuaternion& q1, const SIMDQuaternion& q2, float t) {
         float cosOmega = q1.dot(q2);
         Engine::Math::SIMD::Float4 q2Reg = q2.reg;
@@ -564,14 +726,8 @@ struct alignas(16) SIMDQuaternion {
         // We flip Q2 to force the camera to take the shortest physical rotation path.
         if (cosOmega < 0.0f) {
             cosOmega = -cosOmega;
-            q2Reg = Engine::Math::SIMD::FlipSignXYZ(q2Reg); // We need a full negate here, not just XYZ
-            // For a true negate in your cross platform layer:
-            #ifdef MATH_ISA_ARM
-                q2Reg = vnegq_f32(q2Reg);
-            #else
-                // Flip the sign bit of all 4 floats instantly using XOR
-                q2Reg = _mm_xor_ps(q2Reg, _mm_set1_ps(-0.0f));
-            #endif
+            // Enforce shortest path by flipping ALL signs (X, Y, Z, W)
+            q2Reg = Engine::Math::SIMD::Negate(q2Reg);
         }
 
         // 2. GIMBAL / PRECISION FALLBACK
@@ -695,20 +851,87 @@ struct alignas(16) SIMDQuaternion {
     }
 };
 
+/*
+    // Storing data in an array of floats inside a struct that is meant to be used for SIMD is an anti-pattern (i.e., Load-Hit-Store penalty).
+    class Vector3DStack {
+    public:
+        alignas(16) float data[4]; 
+
+        // Constructor: Default initializes to {0, 0, 0, 0}
+        Vector3DStack(float x = 0.0f, float y = 0.0f, float z = 0.0f) : data{x, y, z, 0.0f} {}
+
+        // Addition: C = A + B (Load-Hit-Store penalty)
+        FORCE_INLINE Vector3DStack operator+(const Vector3DStack& other) const {
+            Vector3DStack result;
+            
+            __m128 v1 = _mm_load_ps(this->data);
+            __m128 v2 = _mm_load_ps(other.data);
+            _mm_store_ps(result.data, _mm_add_ps(v1, v2));
+
+            return result;
+        }
+
+        // Utility to easily print the vector
+        void print() const {
+            std::println("[{}, {}, {}, {}]", data[0], data[1], data[2], data[3]);
+        }
+    };
+*/
+
 // ==================================================================================
 // SIMD 4x4 MATRIX (CROSS-PLATFORM)
 // ==================================================================================
+/* 
+    - A 4x4 matrix should not be a raw array of 16 floats because every operation would require _mm_load_ps to fetch from memory and _mm_store_ps to save the result (i.e., Load-Hit-Store penalty).
+    - Instead it should be an array of four 128-bit SIMD registers to keep camera math on the silicon.
+    - Allocates 4 (128-bit) hardware execution registers inside the CPU.
+    - 4 x 128 = 512-bits = 64-bytes (perfectly fits in cache).
+*/
 struct alignas(64) Matrix4x4_SIMD {
+    // 4 columns, each taking up exactly one 128-bit register
     Engine::Math::SIMD::Float4 col[4];
 
+    // Creates a blank slate matrix (No rotation, no scale, at origin 0,0,0).
     static FORCE_INLINE Matrix4x4_SIMD Identity() {
         Matrix4x4_SIMD mat;
-        mat.col[0] = Engine::Math::SIMD::Set(1.0f, 0.0f, 0.0f, 0.0f);
-        mat.col[1] = Engine::Math::SIMD::Set(0.0f, 1.0f, 0.0f, 0.0f);
-        mat.col[2] = Engine::Math::SIMD::Set(0.0f, 0.0f, 1.0f, 0.0f);
-        mat.col[3] = Engine::Math::SIMD::Set(0.0f, 0.0f, 0.0f, 1.0f);
+
+        // Creates an Identity Matrix entirely inside the registers.
+        mat.col[0] = Engine::Math::SIMD::Set(1.0f, 0.0f, 0.0f, 0.0f);  // { 1, 0, 0, 0 }
+        mat.col[1] = Engine::Math::SIMD::Set(0.0f, 1.0f, 0.0f, 0.0f);  // { 0, 1, 0, 0 }
+        mat.col[2] = Engine::Math::SIMD::Set(0.0f, 0.0f, 1.0f, 0.0f);  // { 0, 0, 1, 0 }
+        mat.col[3] = Engine::Math::SIMD::Set(0.0f, 0.0f, 0.0f, 1.0f);  // { 0, 0, 0, 1 }
         return mat;
     }
+
+    // ============================================================
+    // --- HIGH-PERFORMANCE SIMD MATRIX INVERSE (Cramer's Rule) ---
+    // ============================================================
+    /*
+        - Guassian Elimination requires lots of branching (if-statements) to handle pivoting which breaks SIMD execution.
+        - Cramer's Rule is the most mathematically optimal way to invert 4x4 matrices (i.e., no branching).
+        - Can calculate the determinants of multiple sub-matrices in parallel across 4 lanes of a register.
+        - Usually pulled directly from the DirectXMath or GLM SIMD headers to guarantee floating-point stability), but this is a third-party dependency that we don't want. 
+        - If a matrix moves an object 5 units down, its inverse moves it 5 units up (i.e., mathematical opposite of a transformation).
+        - e.g., required for mouse picking, screen-to-world raycasting, and normal matrix generation.
+        - e.g., translates (or converts) 2D mouse clicks [coordinate (x, y)] into 3D world rays to let us know what the user clicked in the world.
+        - e.g., converts a 2D screen click back into a 3D world direction (Screen Space -> World space).
+    */
+   FORCE_INLINE Matrix4x4_SIMD Inverse() const {
+        Matrix4x4_SIMD inv;
+        
+        // 1. Extract columns
+        inv.col[0] = col[0];
+        inv.col[1] = col[1];
+        inv.col[2] = col[2];
+        inv.col[3] = col[3];
+
+        // 2x2 Sub-determinants (ARM/Intel's Cramer's Rule implementation), let the Hardware Abstraction Layer route to the fastest microcode.
+        Engine::Math::SIMD::Inverse4x4(inv.col[0], inv.col[1], inv.col[2], inv.col[3]);
+        
+        // Returns the fully inverted matrix
+        return inv;
+    }
+    
 
     // Creates a Perspective Projection Matrix
     static FORCE_INLINE Matrix4x4_SIMD Perspective_SIMD(float fovY_degrees, float aspect, float nearZ, float farZ) {
