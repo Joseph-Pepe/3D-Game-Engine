@@ -19,28 +19,6 @@
 #endif
 
 // ==================================================================================
-// FAST MATH UTILITIES
-// ==================================================================================
-
-// --- AVX2 FAST HORIZONTAL SUM ---
-// Folds an 8-wide __m256 register down to a single scalar float inside the silicon registers without touching memory.
-FORCE_INLINE float hsum_avx2(__m256 v) {
-    // 1. Split the 256-bit register into two 128-bit halves and add them
-    __m128 hi = _mm256_extractf128_ps(v, 1);
-    __m128 lo = _mm256_castps256_ps128(v);
-    lo = _mm_add_ps(lo, hi);
-
-    // 2. Collapse the remaining 4 floats down to 1 (Standard SSE shuffle reduction)
-    hi = _mm_movehl_ps(hi, lo);
-    lo = _mm_add_ps(lo, hi);
-    hi = _mm_shuffle_ps(lo, lo, _MM_SHUFFLE(1, 1, 1, 1));
-    lo = _mm_add_ps(lo, hi);
-
-    // 3. Extract the final single float
-    return _mm_cvtss_f32(lo);
-}
-
-// ==================================================================================
 // SSE Accelerated Vectors 
 // ==================================================================================
 
@@ -271,34 +249,6 @@ public:
 };
 
 // ==================================================================================
-// LARGE WORLD COORDINATES (LWC)
-// ==================================================================================
-struct Vector3DWorldV1 {
-    // Dedicated 64-bit scalar vector.
-    double x, y, z;
-
-    constexpr Vector3DWorldV1(double x = 0.0, double y = 0.0, double z = 0.0) 
-        : x(x), y(y), z(z) {}
-
-    // Standard addition for moving objects in the world
-    FORCE_INLINE constexpr Vector3DWorldV1 operator+(const Vector3DWorldV1& other) const {
-        return Vector3DWorldV1(x + other.x, y + other.y, z + other.z);
-    }
-
-    // Subtraction is the most important operator in LWC.
-    // It returns the difference between two massive world coordinates.
-    FORCE_INLINE constexpr Vector3DWorldV1 operator-(const Vector3DWorldV1& other) const {
-        return Vector3DWorldV1(x - other.x, y - other.y, z - other.z);
-    }
-
-    // --- THE LWC BRIDGE ---
-    // Safely casts a 64-bit world difference down to your ultra-fast 32-bit SIMD vector.
-    FORCE_INLINE Vector3DStack toFloatVector() const {
-        return Vector3DStack(static_cast<float>(x), static_cast<float>(y), static_cast<float>(z));
-    }
-};
-
-// ==================================================================================
 // SIMD QUATERNION (128-bit)
 // ==================================================================================
 struct alignas(16) Quaternion {
@@ -320,10 +270,6 @@ struct alignas(16) Quaternion {
 
     FORCE_INLINE SSE128_SIMDVector3D GetRightVector() const {
         return RotateVector(SSE128_SIMDVector3D(1.0f, 0.0f, 0.0f, 0.0f));
-    }
-
-    FORCE_INLINE SSE128_SIMDVector3D GetUpVector() const {
-        return RotateVector(SSE128_SIMDVector3D(0.0f, 1.0f, 0.0f, 0.0f));
     }
 
     static FORCE_INLINE Quaternion AngleAxis(float angleDegrees, const SSE128_SIMDVector3D& axis) {
@@ -414,16 +360,6 @@ struct alignas(16) Quaternion {
         return _mm_cvtss_f32(_mm_dp_ps(reg, other.reg, 0xFF));
     }
 
-    static FORCE_INLINE Quaternion Lerp(const Quaternion& q1, const Quaternion& q2, float t) {
-        __m128 tReg = _mm_set1_ps(t);
-        __m128 oneMinusT = _mm_sub_ps(_mm_set1_ps(1.0f), tReg);
-        __m128 res = _mm_add_ps(_mm_mul_ps(q1.reg, oneMinusT), _mm_mul_ps(q2.reg, tReg));
-        
-        Quaternion result(res);
-        result.Normalize();
-        return result;
-    }
-
     // --- SPHERICAL LINEAR INTERPOLATION (SLERP) ---
     static FORCE_INLINE Quaternion Slerp(const Quaternion& q1, const Quaternion& q2, float t) {
         float cosOmega = q1.dot(q2);
@@ -508,19 +444,4 @@ FORCE_INLINE SIMD_SSE128_Matrix4x4 operator*(const SIMD_SSE128_Matrix4x4& a, con
         res.col[i] = col;
     }
     return res;
-}
-
-static SIMD_SSE128_Matrix4x4 Orthographic(float left, float right, float bottom, float top, float nearZ, float farZ) {
-    SIMD_SSE128_Matrix4x4 mat;
-    
-    float invRL = 1.0f / (right - left);
-    float invTB = 1.0f / (top - bottom);
-    float invFN = 1.0f / (farZ - nearZ);
-
-    mat.col[0] = _mm_set_ps(0.0f, 0.0f, 0.0f, 2.0f * invRL);
-    mat.col[1] = _mm_set_ps(0.0f, 0.0f, 2.0f * invTB, 0.0f);
-    mat.col[2] = _mm_set_ps(0.0f, -2.0f * invFN, 0.0f, 0.0f);
-    mat.col[3] = _mm_set_ps(1.0f, -(farZ + nearZ) * invFN, -(top + bottom) * invTB, -(right + left) * invRL);
-
-    return mat;
 }
