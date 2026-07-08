@@ -475,22 +475,15 @@ struct alignas(64) SIMD_SSE128_Matrix4x4 {
 };
 
 // --- SIMD MATRIX OPERATORS ---
-// Multiplies a SIMD Vector against a SIMD Matrix (i.e., use the broadcast and multiply-add)
 FORCE_INLINE SSE128_SIMDVector3D operator*(const SIMD_SSE128_Matrix4x4& mat, const SSE128_SIMDVector3D& v) {
-    // Broadcast a single vertex component into all four lanes of a register, and multiply it by the first column, and accumulate.
-
-    // 1. Broadcast vertex X, Y, Z, W into four separate registers
-    __m128 vx = _mm_shuffle_ps(v.reg, v.reg, _MM_SHUFFLE(0, 0, 0, 0)); // {x, x, x, x}
-    __m128 vy = _mm_shuffle_ps(v.reg, v.reg, _MM_SHUFFLE(1, 1, 1, 1)); // {y, y, y, y}
-    __m128 vz = _mm_shuffle_ps(v.reg, v.reg, _MM_SHUFFLE(2, 2, 2, 2)); // {z, z, z, z}
-    __m128 vw = _mm_shuffle_ps(v.reg, v.reg, _MM_SHUFFLE(3, 3, 3, 3)); // {w, w, w, w}
-
-    // 2. Multiply each broadcasted component by its corresponding matrix column
+    __m128 vx = _mm_shuffle_ps(v.reg, v.reg, _MM_SHUFFLE(0, 0, 0, 0)); 
+    __m128 vy = _mm_shuffle_ps(v.reg, v.reg, _MM_SHUFFLE(1, 1, 1, 1)); 
+    __m128 vz = _mm_shuffle_ps(v.reg, v.reg, _MM_SHUFFLE(2, 2, 2, 2)); 
+    __m128 vw = _mm_shuffle_ps(v.reg, v.reg, _MM_SHUFFLE(3, 3, 3, 3)); 
+    
     __m128 res = _mm_mul_ps(vx, mat.col[0]);
     
-    // 3. Fused Multiply-Add the rest of the columns
-    // res = (vy * col1) + res
-    res = _mm_fmadd_ps(vy, mat.col[1], res);  // _mm_fmadd_ps: requirees FMA3 instructions, which is part of AVX2, supported by almost all CPUs made after 2013.
+    res = _mm_fmadd_ps(vy, mat.col[1], res);  
     res = _mm_fmadd_ps(vz, mat.col[2], res);
     res = _mm_fmadd_ps(vw, mat.col[3], res);
 
@@ -499,11 +492,8 @@ FORCE_INLINE SSE128_SIMDVector3D operator*(const SIMD_SSE128_Matrix4x4& mat, con
 
 // --- SIMD MATRIX MULTIPLICATION (C = A * B) ---
 FORCE_INLINE SIMD_SSE128_Matrix4x4 operator*(const SIMD_SSE128_Matrix4x4& a, const SIMD_SSE128_Matrix4x4& b) {
-    // Multiplies two 64-byte matrices.
     SIMD_SSE128_Matrix4x4 res;
     
-    // For each column in B, broadcast its X, Y, Z, W components and multiply them 
-    // against the corresponding columns of A.
     for (int i = 0; i < 4; ++i) {
         __m128 vx = _mm_shuffle_ps(b.col[i], b.col[i], _MM_SHUFFLE(0, 0, 0, 0));
         __m128 vy = _mm_shuffle_ps(b.col[i], b.col[i], _MM_SHUFFLE(1, 1, 1, 1));
@@ -520,38 +510,7 @@ FORCE_INLINE SIMD_SSE128_Matrix4x4 operator*(const SIMD_SSE128_Matrix4x4& a, con
     return res;
 }
 
-// --- MODEL MATRIX BUILDER (TRS) ---
-// M = Translation * Rotation * Scale
-static FORCE_INLINE SIMD_SSE128_Matrix4x4 TRS(const SSE128_SIMDVector3D& translation, const Quaternion& rotation, const SSE128_SIMDVector3D& scale) {
-    // Without this function, every 3D mesh you load will spawn directly at the origin (0, 0, 0) at a default scale of 1.0.
-    SIMD_SSE128_Matrix4x4 mat;
-
-    // 1. Convert Quaternion to a 3x3 Rotation Matrix
-    float x2 = rotation.x() + rotation.x(), y2 = rotation.y() + rotation.y(), z2 = rotation.z() + rotation.z();
-    float xx = rotation.x() * x2, xy = rotation.x() * y2, xz = rotation.x() * z2;
-    float yy = rotation.y() * y2, yz = rotation.y() * z2, zz = rotation.z() * z2;
-    float wx = rotation.w() * x2, wy = rotation.w() * y2, wz = rotation.w() * z2;
-
-    // 2. Apply Scale directly to the rotation columns
-    __m128 scaleReg = scale.reg;
-    float sx = _mm_cvtss_f32(_mm_shuffle_ps(scaleReg, scaleReg, _MM_SHUFFLE(0,0,0,0)));
-    float sy = _mm_cvtss_f32(_mm_shuffle_ps(scaleReg, scaleReg, _MM_SHUFFLE(1,1,1,1)));
-    float sz = _mm_cvtss_f32(_mm_shuffle_ps(scaleReg, scaleReg, _MM_SHUFFLE(2,2,2,2)));
-
-    mat.col[0] = _mm_set_ps(0.0f, (xz + wy) * sx, (xy - wz) * sx, (1.0f - (yy + zz)) * sx);
-    mat.col[1] = _mm_set_ps(0.0f, (yz - wx) * sy, (1.0f - (xx + zz)) * sy, (xy + wz) * sy);
-    mat.col[2] = _mm_set_ps(0.0f, (1.0f - (xx + yy)) * sz, (yz + wx) * sz, (xz - wy) * sz);
-
-    // 3. Inject Translation into the 4th Column (Ensure W = 1.0f)
-    __m128 wOne = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f); 
-    mat.col[3] = _mm_blend_ps(translation.reg, wOne, 0x08);
-
-    return mat;
-}
-
-// Creates an Orthographic Projection Matrix (For UI, 2D elements, and Directional Shadows)
 static SIMD_SSE128_Matrix4x4 Orthographic(float left, float right, float bottom, float top, float nearZ, float farZ) {
-    // Used for rendering a 2D minimap, crosshairs, and calculate cascaded shadow maps (render scene from perspective of the sun). 
     SIMD_SSE128_Matrix4x4 mat;
     
     float invRL = 1.0f / (right - left);
