@@ -67,7 +67,7 @@ public:
     // --- BUILD THE GRID (O(n) Time) ---
     // Pass in your Local (32-bit float) positions. Do NOT pass Large World Coordinates here.
     // LWC coordinates should be converted to camera-relative floats before physics ticks.
-    void BuildGrid(std::span<const Vector3DStack> entityPositions, size_t activeEntities) {
+    void BuildGrid(std::span<const Vector3D> entityPositions, size_t activeEntities) {
         
         // 1. Reset cell counts to zero
         std::fill(m_cellCounts.begin(), m_cellCounts.end(), 0);
@@ -108,7 +108,7 @@ public:
 
     // --- QUERY THE GRID ---
     // Returns a span of entity indices that share the same grid cell.
-    FORCE_INLINE std::span<const uint32_t> GetEntitiesInCell(const Vector3DStack& position) const {
+    FORCE_INLINE std::span<const uint32_t> GetEntitiesInCell(const Vector3D& position) const {
         int gridX = static_cast<int>(std::floor(position.data[0] * m_invCellSize));
         int gridY = static_cast<int>(std::floor(position.data[1] * m_invCellSize));
         int gridZ = static_cast<int>(std::floor(position.data[2] * m_invCellSize));
