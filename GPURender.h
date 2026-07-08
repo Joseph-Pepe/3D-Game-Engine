@@ -24,7 +24,7 @@ FORCE_INLINE Matrix4 CalculateCameraMatrix(const Vector3DWorld& cameraWorldPos,
                                            float fov, float aspect, float nearZ, float farZ) {
                                                
     // 1. Build the LWC Camera-Relative View Matrix (Translation is forced to 0)
-    Vector3DStack upVec(0.0f, 1.0f, 0.0f);
+    Vector3D upVec(0.0f, 1.0f, 0.0f);
     Matrix4 view = Matrix4::LookAtLWC(cameraWorldPos, cameraTarget, upVec);
 
     // 2. Build the Standard Projection Matrix
