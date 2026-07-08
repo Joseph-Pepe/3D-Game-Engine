@@ -1557,8 +1557,8 @@ public:
 
                     // X and Y are ALWAYS needed
                     // Instantly collapse the AVX2 accumulator registers using pure silicon math
-                    scalarForceX += hsum_avx2(accX);
-                    scalarForceY += hsum_avx2(accY);
+                    scalarForceX += Engine::ISAArch::reduce(accX);
+                    scalarForceY += Engine::ISAArch::reduce(accY);
 
                     // Apply the final accumulated push force directly to Particle i's velocity
                     r_vX[i] += scalarForceX;
@@ -1572,7 +1572,7 @@ public:
                         // for (int k = 0; k < 8; ++k) {
                         //     scalarForceZ += tempZ[k];
                         // }
-                        scalarForceZ += hsum_avx2(accZ);
+                        scalarForceZ += Engine::ISAArch::reduce(accZ);
                         r_vZ[i] += scalarForceZ;
                     }
                 }
