@@ -18,7 +18,7 @@
     /*
         // Replaces (std::vector). Zero heap allocations. Data is perfectly contiguous on the stack.
         // Extremely cache friendly for your SIMD wrappers.
-        std::inplace_vector<SSE128_SIMDVector3D, 64> localCluster;
+        std::inplace_vector<SIMDVector3D, 64> localCluster;
     */
 
     // Alias the standard version into the engine namespace
@@ -73,7 +73,7 @@ FORCE_INLINE Vector3D Lerp(const Vector3D& a, const Vector3D& b, float t) {
 }
 
 // 128-bit PURE SIMD Lerp (Executes entirely inside SSE/AVX registers)
-FORCE_INLINE SSE128_SIMDVector3D Lerp(const SSE128_SIMDVector3D& a, const SSE128_SIMDVector3D& b, float t) {
+FORCE_INLINE SIMDVector3D Lerp(const SIMDVector3D& a, const SIMDVector3D& b, float t) {
     // V = A + t * (B - A)
     return a + ((b - a) * t);
 }
@@ -92,16 +92,16 @@ FORCE_INLINE Vector3D CatmullRom(const Vector3D& p0, const Vector3D& p1,
     return (v0 + v1 + v2 + v3) * 0.5f;
 }
 
-FORCE_INLINE SSE128_SIMDVector3D CatmullRom(const SSE128_SIMDVector3D& p0, const SSE128_SIMDVector3D& p1, 
-                                 const SSE128_SIMDVector3D& p2, const SSE128_SIMDVector3D& p3, float t) {
+FORCE_INLINE SIMDVector3D CatmullRom(const SIMDVector3D& p0, const SIMDVector3D& p1, 
+                                 const SIMDVector3D& p2, const SIMDVector3D& p3, float t) {
     float t2 = t * t;
     float t3 = t2 * t;
 
     // Evaluates in a few CPU cycles using standard SIMD FMA
-    SSE128_SIMDVector3D v0 = p1 * 2.0f;
-    SSE128_SIMDVector3D v1 = (p2 - p0) * t;
-    SSE128_SIMDVector3D v2 = (p0 * 2.0f - p1 * 5.0f + p2 * 4.0f - p3) * t2;
-    SSE128_SIMDVector3D v3 = (p1 * 3.0f - p0 - p2 * 3.0f + p3) * t3;
+    SIMDVector3D v0 = p1 * 2.0f;
+    SIMDVector3D v1 = (p2 - p0) * t;
+    SIMDVector3D v2 = (p0 * 2.0f - p1 * 5.0f + p2 * 4.0f - p3) * t2;
+    SIMDVector3D v3 = (p1 * 3.0f - p0 - p2 * 3.0f + p3) * t3;
 
     return (v0 + v1 + v2 + v3) * 0.5f;
 }
@@ -140,7 +140,7 @@ struct CameraInputAxes {
 // This is attached to your Entity. It has zero movement logic. It knows nothing about splines, keyboards, or gamepads.
 // It only knows its physical properties and how to build its matrices using optimized SIMD functions.
 struct alignas(16) CameraComponent {
-    SSE128_SIMDVector3D Position;       // 16 bytes
+    SIMDVector3D Position;       // 16 bytes
     Quaternion Orientation;  // 16 bytes (Identity by default)
 
     float FOV = 90.0f;
@@ -149,7 +149,7 @@ struct alignas(16) CameraComponent {
     float FarClip = 10000.0f;
 
     // Default initialization
-    CameraComponent(SSE128_SIMDVector3D startPos = SSE128_SIMDVector3D(0.0f, 0.0f, 0.0f)) {
+    CameraComponent(SIMDVector3D startPos = SIMDVector3D(0.0f, 0.0f, 0.0f)) {
         Position = startPos;
         Orientation = Quaternion(); // {0,0,0,1}
     }
@@ -167,9 +167,9 @@ struct alignas(16) CameraComponent {
         float wx = invQ.w() * x2, wy = invQ.w() * y2, wz = invQ.w() * z2;
 
         // 3. Build the Rotation Axes (Right, Up, Forward)
-        SSE128_SIMDVector3D r(1.0f - (yy + zz), xy - wz, xz + wy, 0.0f);
-        SSE128_SIMDVector3D u(xy + wz, 1.0f - (xx + zz), yz - wx, 0.0f);
-        SSE128_SIMDVector3D f(xz - wy, yz + wx, 1.0f - (xx + yy), 0.0f);
+        SIMDVector3D r(1.0f - (yy + zz), xy - wz, xz + wy, 0.0f);
+        SIMDVector3D u(xy + wz, 1.0f - (xx + zz), yz - wx, 0.0f);
+        SIMDVector3D f(xz - wy, yz + wx, 1.0f - (xx + yy), 0.0f);
 
         // 4. Calculate SIMD Translation: T = -R * Position
         float tx = -r.dot(Position);
@@ -189,11 +189,11 @@ struct alignas(16) CameraComponent {
 
     void PrintTelemetry() const {
         // Dynamically calculate the Forward vector from the Quaternion
-        SSE128_SIMDVector3D localForward(0.0f, 0.0f, -1.0f, 0.0f);
-        SSE128_SIMDVector3D currentFront = Orientation.RotateVector(localForward);
+        SIMDVector3D localForward(0.0f, 0.0f, -1.0f, 0.0f);
+        SIMDVector3D currentFront = Orientation.RotateVector(localForward);
         
         // Calculate the absolute target position
-        SSE128_SIMDVector3D absoluteTarget = Position + currentFront;
+        SIMDVector3D absoluteTarget = Position + currentFront;
 
         std::println("Cam Pos: [{}, {}, {}] | Target: [{}, {}, {}]", 
                      Position.x(), Position.y(), Position.z(),
@@ -222,8 +222,8 @@ struct alignas(16) SpringArmComponent {
     float ProbeRadius = 15.0f; // Size of the camera to prevent clipping through tight corners
 
     // Offsets
-    SSE128_SIMDVector3D TargetOffset = SSE128_SIMDVector3D(0.0f, 50.0f, 0.0f); // e.g., Look at the character's head, not their feet
-    SSE128_SIMDVector3D SocketOffset = SSE128_SIMDVector3D(0.0f, 0.0f, 0.0f);  // Over-the-shoulder offset
+    SIMDVector3D TargetOffset = SIMDVector3D(0.0f, 50.0f, 0.0f); // e.g., Look at the character's head, not their feet
+    SIMDVector3D SocketOffset = SIMDVector3D(0.0f, 0.0f, 0.0f);  // Over-the-shoulder offset
 
     // Frame-rate Independent Lag Options
     bool bEnableCameraLag = true;
@@ -233,10 +233,10 @@ struct alignas(16) SpringArmComponent {
     SpringArmOcclusionMode OcclusionMode = SpringArmOcclusionMode::PullForward;
     
     // Internal state tracking for the smoothing math
-    SSE128_SIMDVector3D PreviousDesiredPosition;
+    SIMDVector3D PreviousDesiredPosition;
     
     SpringArmComponent() {
-        PreviousDesiredPosition = SSE128_SIMDVector3D(0.0f, 0.0f, 0.0f);
+        PreviousDesiredPosition = SIMDVector3D(0.0f, 0.0f, 0.0f);
     }
 };
 
@@ -245,7 +245,7 @@ class SpringArmController {
 public:
     // Frame-Rate Independent Exponential Decay Lerp
     // Mathematically guarantees identical smoothing curves at 30Hz, 60Hz, and 144Hz.
-    static FORCE_INLINE SSE128_SIMDVector3D DecayLerp(const SSE128_SIMDVector3D& current, const SSE128_SIMDVector3D& target, float decaySpeed, float deltaTime) {
+    static FORCE_INLINE SIMDVector3D DecayLerp(const SIMDVector3D& current, const SIMDVector3D& target, float decaySpeed, float deltaTime) {
         // formula: current = target + (current - target) * exp2(-decaySpeed * dt)
         float decayFactor = std::exp2(-decaySpeed * deltaTime);
         return target + ((current - target) * decayFactor);
@@ -253,7 +253,7 @@ public:
 
     // Evaluates the Spring Arm and directly mutates the CameraComponent
     void Update(
-        const SSE128_SIMDVector3D& playerPosition, 
+        const SIMDVector3D& playerPosition, 
         const Quaternion& playerRotation, // Where the player is aiming
         SpringArmComponent& arm, 
         CameraComponent& camera, 
@@ -262,19 +262,19 @@ public:
         float deltaTime) 
     {
         // 1. Calculate the actual target focal point (e.g., Character's head)
-        SSE128_SIMDVector3D worldTargetOffset = playerRotation.RotateVector(arm.TargetOffset);
-        SSE128_SIMDVector3D aimPoint = playerPosition + worldTargetOffset;
+        SIMDVector3D worldTargetOffset = playerRotation.RotateVector(arm.TargetOffset);
+        SIMDVector3D aimPoint = playerPosition + worldTargetOffset;
 
         // 2. Establish the back-vector (Where the camera WANTS to be)
         // A spring arm extends strictly backwards (-Z) relative to the rotation
-        SSE128_SIMDVector3D localArmDirection(0.0f, 0.0f, 1.0f, 0.0f); 
-        SSE128_SIMDVector3D worldArmDirection = playerRotation.RotateVector(localArmDirection);
+        SIMDVector3D localArmDirection(0.0f, 0.0f, 1.0f, 0.0f); 
+        SIMDVector3D worldArmDirection = playerRotation.RotateVector(localArmDirection);
 
         // 3. Calculate the over-the-shoulder offset
-        SSE128_SIMDVector3D worldSocketOffset = playerRotation.RotateVector(arm.SocketOffset);
+        SIMDVector3D worldSocketOffset = playerRotation.RotateVector(arm.SocketOffset);
 
         // 4. Calculate the desired un-obstructed position
-        SSE128_SIMDVector3D desiredPosition = aimPoint + (worldArmDirection * arm.TargetArmLength) + worldSocketOffset;
+        SIMDVector3D desiredPosition = aimPoint + (worldArmDirection * arm.TargetArmLength) + worldSocketOffset;
 
         // --- CAMERA SMOOTHING (LAG) ---
         if (arm.bEnableCameraLag) {
@@ -290,7 +290,7 @@ public:
         // Ensure your level geometry uses thick walls so the ray doesn't pass through culled backfaces!
 
         // 1. Vector pointing FROM Player TO Camera
-        SSE128_SIMDVector3D rayDirection = desiredPosition - aimPoint;
+        SIMDVector3D rayDirection = desiredPosition - aimPoint;
         float desiredDistance = std::sqrt(rayDirection.dot(rayDirection));
 
 
@@ -424,18 +424,18 @@ public:
     void UpdatePosition(CameraComponent& camera, const CameraInputAxes& input, float deltaTime) {
         
         // 1. Define the base coordinate axes
-        SSE128_SIMDVector3D localRight(1.0f, 0.0f, 0.0f, 0.0f);
-        SSE128_SIMDVector3D localUp(0.0f, 1.0f, 0.0f, 0.0f);
-        SSE128_SIMDVector3D localForward(0.0f, 0.0f, -1.0f, 0.0f);
+        SIMDVector3D localRight(1.0f, 0.0f, 0.0f, 0.0f);
+        SIMDVector3D localUp(0.0f, 1.0f, 0.0f, 0.0f);
+        SIMDVector3D localForward(0.0f, 0.0f, -1.0f, 0.0f);
 
         // 2. Rotate the base axes by the camera's current Quaternion
-        SSE128_SIMDVector3D camRight   = camera.Orientation.RotateVector(localRight);
-        SSE128_SIMDVector3D camUp      = camera.Orientation.RotateVector(localUp);
-        SSE128_SIMDVector3D camForward = camera.Orientation.RotateVector(localForward);
+        SIMDVector3D camRight   = camera.Orientation.RotateVector(localRight);
+        SIMDVector3D camUp      = camera.Orientation.RotateVector(localUp);
+        SIMDVector3D camForward = camera.Orientation.RotateVector(localForward);
 
         // 3. True branchless accumulation
         // If an input axis is 0.0f, that vector component naturally zeroes out.
-        SSE128_SIMDVector3D moveDirection = 
+        SIMDVector3D moveDirection = 
             (camForward * input.MoveZ) + 
             (camRight   * input.MoveX) + 
             (camUp      * input.MoveY);
@@ -460,11 +460,11 @@ public:
 
         // 1. Create Delta Quaternions from the mouse input
         // Pitch rotates around the LOCAL X Axis (1,0,0)
-        Quaternion pitchDelta = Quaternion::AngleAxis(pitchAngle, SSE128_SIMDVector3D(1.0f, 0.0f, 0.0f, 0.0f));
+        Quaternion pitchDelta = Quaternion::AngleAxis(pitchAngle, SIMDVector3D(1.0f, 0.0f, 0.0f, 0.0f));
         
         // Yaw rotates around the GLOBAL Y Axis (0,1,0) to prevent the camera from "rolling" diagonally 
         // If you want a Spaceship/Flight Sim camera, change this to Local Y!
-        Quaternion yawDelta = Quaternion::AngleAxis(yawAngle, SSE128_SIMDVector3D(0.0f, 1.0f, 0.0f, 0.0f));
+        Quaternion yawDelta = Quaternion::AngleAxis(yawAngle, SIMDVector3D(0.0f, 1.0f, 0.0f, 0.0f));
 
         // 2. Combine the Rotations via Hamilton Product
         // Order matters! Global Yaw pre-multiplies, Local Pitch post-multiplies.
@@ -597,18 +597,18 @@ public:
         // 3. Compute Smooth Spline Position
         Vector3D splinePos = CatmullRom(controlPoints[i0], controlPoints[i1], controlPoints[i2], controlPoints[i3], localT);
         
-        // Instantly load the 16-byte aligned stack data into a SIMD SSE128_SIMDVector3D
+        // Instantly load the 16-byte aligned stack data into a SIMD SIMDVector3D
         // .asPoint() ensures W = 1.0f for spatial translation
-        camera.Position = SSE128_SIMDVector3D(_mm_load_ps(splinePos.data)).asPoint(); 
+        camera.Position = SIMDVector3D(_mm_load_ps(splinePos.data)).asPoint(); 
 
         // 4. Overwrite Component Direction via Spline Target
         Vector3D splineTarget = Lerp(lookAtTargets[i1], lookAtTargets[i2], localT);
         
         // Load target directly into a SIMD register
-        SSE128_SIMDVector3D targetVec(_mm_load_ps(splineTarget.data));
+        SIMDVector3D targetVec(_mm_load_ps(splineTarget.data));
         
         // Calculate the new directional vector purely on the silicon
-        SSE128_SIMDVector3D newFront = targetVec - camera.Position;
+        SIMDVector3D newFront = targetVec - camera.Position;
         newFront = newFront.asDirection(); // Enforce W = 0.0f
         
         float lenSq = newFront.dot(newFront);
@@ -673,10 +673,10 @@ struct CameraStateProfile {
     float TargetArmLength = 300.0f;
     
     // Looks at the character's upper chest/head
-    SSE128_SIMDVector3D TargetOffset = SSE128_SIMDVector3D(0.0f, 60.0f, 0.0f); 
+    SIMDVector3D TargetOffset = SIMDVector3D(0.0f, 60.0f, 0.0f); 
     
     // Pushes the camera left/right for over-the-shoulder framing
-    SSE128_SIMDVector3D SocketOffset = SSE128_SIMDVector3D(0.0f, 0.0f, 0.0f);  
+    SIMDVector3D SocketOffset = SIMDVector3D(0.0f, 0.0f, 0.0f);  
     
     // How fast we transition INTO this state
     float TransitionSpeed = 12.0f; 
@@ -697,22 +697,22 @@ struct alignas(16) CameraStateComponent {
         // 1. Default Exploration
         ProfileExploration.FOV = 85.0f;
         ProfileExploration.TargetArmLength = 280.0f;
-        ProfileExploration.TargetOffset = SSE128_SIMDVector3D(0.0f, 50.0f, 0.0f);
-        ProfileExploration.SocketOffset = SSE128_SIMDVector3D(0.0f, 0.0f, 0.0f); // Center aligned
+        ProfileExploration.TargetOffset = SIMDVector3D(0.0f, 50.0f, 0.0f);
+        ProfileExploration.SocketOffset = SIMDVector3D(0.0f, 0.0f, 0.0f); // Center aligned
         ProfileExploration.TransitionSpeed = 8.0f; // Smooth, relaxed return to default
 
         // 2. Aiming the Gun
         ProfileAiming.FOV = 55.0f; // Zoomed in for precision
         ProfileAiming.TargetArmLength = 80.0f; // Pulled in tight to the shoulder
-        ProfileAiming.TargetOffset = SSE128_SIMDVector3D(0.0f, 65.0f, 0.0f); // Look higher up at the reticle
-        ProfileAiming.SocketOffset = SSE128_SIMDVector3D(55.0f, 0.0f, 0.0f); // Shift right to clear the center screen
+        ProfileAiming.TargetOffset = SIMDVector3D(0.0f, 65.0f, 0.0f); // Look higher up at the reticle
+        ProfileAiming.SocketOffset = SIMDVector3D(55.0f, 0.0f, 0.0f); // Shift right to clear the center screen
         ProfileAiming.TransitionSpeed = 18.0f; // Fast, snappy transition for combat responsiveness
 
         // 3. Sprinting
         ProfileSprinting.FOV = 100.0f; // Widen FOV for sense of speed
         ProfileSprinting.TargetArmLength = 350.0f; // Pull back slightly
-        ProfileSprinting.TargetOffset = SSE128_SIMDVector3D(0.0f, 40.0f, 0.0f); // Character leans forward, lower target
-        ProfileSprinting.SocketOffset = SSE128_SIMDVector3D(0.0f, 0.0f, 0.0f);
+        ProfileSprinting.TargetOffset = SIMDVector3D(0.0f, 40.0f, 0.0f); // Character leans forward, lower target
+        ProfileSprinting.SocketOffset = SIMDVector3D(0.0f, 0.0f, 0.0f);
         ProfileSprinting.TransitionSpeed = 5.0f; // Gradual buildup
 
         // Initialize
@@ -734,7 +734,7 @@ public:
     }
 
     // Vector Frame-Rate Independent Exponential Decay Lerp
-    static FORCE_INLINE SSE128_SIMDVector3D DecayLerp(const SSE128_SIMDVector3D& current, const SSE128_SIMDVector3D& target, float decaySpeed, float deltaTime) {
+    static FORCE_INLINE SIMDVector3D DecayLerp(const SIMDVector3D& current, const SIMDVector3D& target, float decaySpeed, float deltaTime) {
         float decayFactor = std::exp2(-decaySpeed * deltaTime);
         return target + ((current - target) * decayFactor);
     }
@@ -821,14 +821,14 @@ enum class FixedCameraMode : uint8_t {
 // Contiguous, cache-aligned data structure for a cinematic tracking zone
 struct alignas(16) CinematicZoneComponent {
     uint32_t ZoneID = 0;
-    SSE128_SIMDVector3D TriggerMin;
-    SSE128_SIMDVector3D TriggerMax;
+    SIMDVector3D TriggerMin;
+    SIMDVector3D TriggerMax;
     
     FixedCameraMode Mode = FixedCameraMode::StaticStation;
     
     // Rail bounds (If StaticStation, RailStart is the camera's fixed position)
-    SSE128_SIMDVector3D RailStart;
-    SSE128_SIMDVector3D RailEnd;
+    SIMDVector3D RailStart;
+    SIMDVector3D RailEnd;
     
     float FOV = 60.0f;          // Cinematic cameras often use tighter FOVs (e.g., 45-60)
     float TrackingLag = 15.0f;   // Smoothing weight for tracking speed
@@ -839,7 +839,7 @@ class CinematicRailController {
 public:
     // Performance Optimization: Cache-friendly processing loop
     void Update(
-        const SSE128_SIMDVector3D& playerPosition,
+        const SIMDVector3D& playerPosition,
         const Engine::STLContainer::inplace_vector<CinematicZoneComponent, 32>& activeZones,
         CameraComponent& outCamera,
         float deltaTime)
@@ -857,7 +857,7 @@ public:
         // Fallback if player leaves all defined tracking volumes
         if (!currentZone) return;
 
-        SSE128_SIMDVector3D targetCamPos;
+        SIMDVector3D targetCamPos;
 
         if (currentZone->Mode == FixedCameraMode::StaticStation) {
             targetCamPos = currentZone->RailStart;
@@ -884,7 +884,7 @@ public:
             t = std::clamp(t, 0.0f, 1.0f); // Clamp camera onto the physical rail bounds
 
             // Position = RailStart + t * (RailEnd - RailStart)
-            targetCamPos = SSE128_SIMDVector3D(_mm_add_ps(a, _mm_mul_ps(_mm_set1_ps(t), ab)));
+            targetCamPos = SIMDVector3D(_mm_add_ps(a, _mm_mul_ps(_mm_set1_ps(t), ab)));
         }
 
         // 2. Frame-Rate Independent Camera Lag (Smooth transitions along the rail)
@@ -893,7 +893,7 @@ public:
 
         // 3. Dynamic Framing / LookAt Rotation
         // Calculate the direction pointing from the smooth camera position directly to the player
-        SSE128_SIMDVector3D lookDirection = playerPosition - outCamera.Position;
+        SIMDVector3D lookDirection = playerPosition - outCamera.Position;
         lookDirection = lookDirection.asDirection(); // Force W component to 0.0f
 
         float lengthSq = lookDirection.dot(lookDirection);
@@ -912,7 +912,7 @@ public:
     }
 
 private:
-    static FORCE_INLINE bool IsPointInVolume(const SSE128_SIMDVector3D& p, const SSE128_SIMDVector3D& min, const SSE128_SIMDVector3D& max) {
+    static FORCE_INLINE bool IsPointInVolume(const SIMDVector3D& p, const SIMDVector3D& min, const SIMDVector3D& max) {
         // High throughput branchless boundary check using SIMD mask comparisons
         __m128 point = p.reg;
         __m128 boxMin = min.reg;
@@ -949,15 +949,15 @@ struct alignas(16) RawInputState {
 class CameraRelativeInputEngine {
 public:
     // Computes a branchless, frame-rate independent world movement vector relative to the camera viewport
-    [[nodiscard]] FORCE_INLINE SSE128_SIMDVector3D ComputeWorldMovement(const RawInputState& input, const CameraComponent& camera) noexcept {
+    [[nodiscard]] FORCE_INLINE SIMDVector3D ComputeWorldMovement(const RawInputState& input, const CameraComponent& camera) noexcept {
         // High throughput early-out for dead-zones
         float sqMag = (input.MoveAxisX * input.MoveAxisX) + (input.MoveAxisY * input.MoveAxisY);
-        if (sqMag < 0.01f) return SSE128_SIMDVector3D(0.0f, 0.0f, 0.0f);
+        if (sqMag < 0.01f) return SIMDVector3D(0.0f, 0.0f, 0.0f);
 
         // Extract camera directional axes from its orientation quaternion
         // Assuming a standard Y-Up coordinate system
-        SSE128_SIMDVector3D camForward = camera.Orientation.GetForwardVector();
-        SSE128_SIMDVector3D camRight   = camera.Orientation.GetRightVector();
+        SIMDVector3D camForward = camera.Orientation.GetForwardVector();
+        SIMDVector3D camRight   = camera.Orientation.GetRightVector();
 
         // Project camera vectors onto the horizontal gameplay plane (Y = 0) to prevent 
         // characters from flying or digging into the ground when looking up/down
@@ -980,7 +980,7 @@ public:
 
         // Accumulate input dimensions to compute final world velocity vector
         // MoveAxisY maps to Forward/Backward, MoveAxisX maps to Left/Right
-        SSE128_SIMDVector3D worldDirection = (camForward * input.MoveAxisY) + (camRight * input.MoveAxisX);
+        SIMDVector3D worldDirection = (camForward * input.MoveAxisY) + (camRight * input.MoveAxisX);
 
         // Clamp vector magnitude to 1.0f to prevent diagonal acceleration exploits
         float mag = std::sqrt((worldDirection.x() * worldDirection.x()) + (worldDirection.z() * worldDirection.z()));
@@ -1016,7 +1016,7 @@ private:
 public:
     // Fully SIMD accelerated zone parsing logic
     void Update(
-        const SSE128_SIMDVector3D& playerPosition,
+        const SIMDVector3D& playerPosition,
         const Engine::STLContainer::inplace_vector<CinematicZoneComponent, 32>& levelZones,
         CameraComponent& outCamera,
         float deltaTime) noexcept 
@@ -1078,7 +1078,7 @@ public:
             
             // Linear interpolate camera vectors across tracking zones
             float t = m_BlendState.BlendAlpha;
-            outCamera.Position = SSE128_SIMDVector3D::Lerp(sourceTrackResult.Position, targetTrackResult.Position, t);
+            outCamera.Position = SIMDVector3D::Lerp(sourceTrackResult.Position, targetTrackResult.Position, t);
             outCamera.Orientation = Quaternion::Slerp(sourceTrackResult.Orientation, targetTrackResult.Orientation, t);
             outCamera.FOV = sourceTrackResult.FOV + (targetTrackResult.FOV - sourceTrackResult.FOV) * t;
         }
@@ -1086,7 +1086,7 @@ public:
 
 private:
     // Evaluates a specific zone's mathematical rail or static station mapping logic
-    void EvaluateZoneTransform(const SSE128_SIMDVector3D& playerPos, const CinematicZoneComponent& zone, CameraComponent& outState) const noexcept {
+    void EvaluateZoneTransform(const SIMDVector3D& playerPos, const CinematicZoneComponent& zone, CameraComponent& outState) const noexcept {
         outState.FOV = zone.FOV;
 
         if (zone.Mode == FixedCameraMode::StaticStation) {
@@ -1106,11 +1106,11 @@ private:
             float factor = (scalarBottom > 1e-6f) ? (scalarTop / scalarBottom) : 0.0f;
             factor = std::clamp(factor, 0.0f, 1.0f);
 
-            outState.Position = SSE128_SIMDVector3D(_mm_add_ps(a, _mm_mul_ps(_mm_set1_ps(factor), ab)));
+            outState.Position = SIMDVector3D(_mm_add_ps(a, _mm_mul_ps(_mm_set1_ps(factor), ab)));
         }
 
         // Standard direct LookAt resolution algorithm
-        SSE128_SIMDVector3D lookDir = (playerPos - outState.Position).asDirection();
+        SIMDVector3D lookDir = (playerPos - outState.Position).asDirection();
         float lengthSq = lookDir.dot(lookDir);
         if (lengthSq > 1e-6f) {
             lookDir = lookDir * (1.0f / std::sqrt(lengthSq));
@@ -1118,7 +1118,7 @@ private:
         }
     }
 
-    static FORCE_INLINE bool IsPointInVolume(const SSE128_SIMDVector3D& p, const SSE128_SIMDVector3D& min, const SSE128_SIMDVector3D& max) noexcept {
+    static FORCE_INLINE bool IsPointInVolume(const SIMDVector3D& p, const SIMDVector3D& min, const SIMDVector3D& max) noexcept {
         __m128 point = p.reg;
         __m128 boxMin = min.reg;
         __m128 boxMax = max.reg;
