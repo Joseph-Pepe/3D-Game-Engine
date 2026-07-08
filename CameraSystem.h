@@ -67,7 +67,7 @@
 */
 
 // --- MATH UTILITIES FOR CAMERA PATHING (SPLINES & LINEAR ALGEBRA) ---
-FORCE_INLINE Vector3DStack Lerp(const Vector3DStack& a, const Vector3DStack& b, float t) {
+FORCE_INLINE Vector3D Lerp(const Vector3D& a, const Vector3D& b, float t) {
     // V = A + t * (B - A)
     return a + ((b - a) * t);
 }
@@ -78,16 +78,16 @@ FORCE_INLINE SSE128_SIMDVector3D Lerp(const SSE128_SIMDVector3D& a, const SSE128
     return a + ((b - a) * t);
 }
 
-FORCE_INLINE Vector3DStack CatmullRom(const Vector3DStack& p0, const Vector3DStack& p1, 
-                                      const Vector3DStack& p2, const Vector3DStack& p3, float t) {
+FORCE_INLINE Vector3D CatmullRom(const Vector3D& p0, const Vector3D& p1, 
+                                      const Vector3D& p2, const Vector3D& p3, float t) {
     float t2 = t * t;
     float t3 = t2 * t;
 
     // Evaluates in a few CPU cycles using standard ALUs
-    Vector3DStack v0 = p1 * 2.0f;
-    Vector3DStack v1 = (p2 - p0) * t;
-    Vector3DStack v2 = (p0 * 2.0f - p1 * 5.0f + p2 * 4.0f - p3) * t2;
-    Vector3DStack v3 = (p1 * 3.0f - p0 - p2 * 3.0f + p3) * t3;
+    Vector3D v0 = p1 * 2.0f;
+    Vector3D v1 = (p2 - p0) * t;
+    Vector3D v2 = (p0 * 2.0f - p1 * 5.0f + p2 * 4.0f - p3) * t2;
+    Vector3D v3 = (p1 * 3.0f - p0 - p2 * 3.0f + p3) * t3;
 
     return (v0 + v1 + v2 + v3) * 0.5f;
 }
@@ -543,24 +543,24 @@ private:
     // C++26 (std::inplace_vector): Stored directly on the stack/arena. Zero heap fragmentation. Replaces std::vector
     // #if ENGINE_HAS_CXX26_INPLACE_VECTOR
     //     // Specify the maximum number of waypoints (e.g., 64). This pre-allocates exactly 1024 bytes (64 * 16 bytes) directly inside the class footprint.
-    //     std::inplace_vector<Vector3DStack, 64> controlPoints;
-    //     std::inplace_vector<Vector3DStack, 64> lookAtTargets;
+    //     std::inplace_vector<Vector3D, 64> controlPoints;
+    //     std::inplace_vector<Vector3D, 64> lookAtTargets;
     // #else
-    //     // Kept as Vector3DStack because CatmullRom uses heavy vector math operations where SSE acceleration actually benefits the 4-point polynomial evaluation.
-    //     std::vector<Vector3DStack> controlPoints;
-    //     std::vector<Vector3DStack> lookAtTargets;
+    //     // Kept as Vector3D because CatmullRom uses heavy vector math operations where SSE acceleration actually benefits the 4-point polynomial evaluation.
+    //     std::vector<Vector3D> controlPoints;
+    //     std::vector<Vector3D> lookAtTargets;
     // #endif
 
     // Guaranteed zero-allocation stack storage using our custom C++26 engine container
-    Engine::STLContainer::inplace_vector<Vector3DStack, 64> controlPoints;
-    Engine::STLContainer::inplace_vector<Vector3DStack, 64> lookAtTargets;
+    Engine::STLContainer::inplace_vector<Vector3D, 64> controlPoints;
+    Engine::STLContainer::inplace_vector<Vector3D, 64> lookAtTargets;
 
     float currentProgress = 0.0f;  // Global timeline progress (0.0 to 1.0)
     float traversalSpeed = 0.1f;   // Percentage of track completed per second
 
 public:
     // Add a physical coordinate for the camera to fly through
-    void AddWaypoint(const Vector3DStack& pos, const Vector3DStack& lookAt) {
+    void AddWaypoint(const Vector3D& pos, const Vector3D& lookAt) {
         controlPoints.push_back(pos);
         lookAtTargets.push_back(lookAt);
     }
@@ -595,14 +595,14 @@ public:
         int i3 = std::min(static_cast<int>(count - 1), currentIndex + 2);
 
         // 3. Compute Smooth Spline Position
-        Vector3DStack splinePos = CatmullRom(controlPoints[i0], controlPoints[i1], controlPoints[i2], controlPoints[i3], localT);
+        Vector3D splinePos = CatmullRom(controlPoints[i0], controlPoints[i1], controlPoints[i2], controlPoints[i3], localT);
         
         // Instantly load the 16-byte aligned stack data into a SIMD SSE128_SIMDVector3D
         // .asPoint() ensures W = 1.0f for spatial translation
         camera.Position = SSE128_SIMDVector3D(_mm_load_ps(splinePos.data)).asPoint(); 
 
         // 4. Overwrite Component Direction via Spline Target
-        Vector3DStack splineTarget = Lerp(lookAtTargets[i1], lookAtTargets[i2], localT);
+        Vector3D splineTarget = Lerp(lookAtTargets[i1], lookAtTargets[i2], localT);
         
         // Load target directly into a SIMD register
         SSE128_SIMDVector3D targetVec(_mm_load_ps(splineTarget.data));
