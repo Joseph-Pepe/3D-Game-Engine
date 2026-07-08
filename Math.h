@@ -254,18 +254,23 @@ namespace Engine::Math::SIMD {
             return _mm_xor_ps(v, signMask);
         }
 
+        // Q1 = this (a, b, c, d) | Q2 = rhs (x, y, z, w)
         FORCE_INLINE Float4 QuaternionMul(Float4 q1, Float4 q2) {
+            // Shuffle Q1
             __m128 w1 = _mm_shuffle_ps(q1, q1, _MM_SHUFFLE(3, 3, 3, 3));
             __m128 x1 = _mm_shuffle_ps(q1, q1, _MM_SHUFFLE(0, 0, 0, 0));
             __m128 y1 = _mm_shuffle_ps(q1, q1, _MM_SHUFFLE(1, 1, 1, 1));
             __m128 z1 = _mm_shuffle_ps(q1, q1, _MM_SHUFFLE(2, 2, 2, 2));
 
+            // Shuffle Q2 for the specific Hamilton cross-terms
             __m128 tmp0 = _mm_shuffle_ps(q2, q2, _MM_SHUFFLE(3, 2, 1, 0));
             __m128 tmp1 = _mm_shuffle_ps(q2, q2, _MM_SHUFFLE(2, 3, 0, 1));
             __m128 tmp2 = _mm_shuffle_ps(q2, q2, _MM_SHUFFLE(1, 0, 3, 2));
 
+            // FMA (Fused Multiply-Add/Sub) sequence to resolve the complex numbers
             __m128 res = _mm_mul_ps(w1, q2);
             
+            // We use bitwise XOR to flip the signs for the subtraction terms in the Hamilton formula
             __m128 signX = _mm_castsi128_ps(_mm_set_epi32(0x80000000, 0x80000000, 0, 0x80000000));
             __m128 signY = _mm_castsi128_ps(_mm_set_epi32(0x80000000, 0, 0x80000000, 0x80000000));
             __m128 signZ = _mm_castsi128_ps(_mm_set_epi32(0x80000000, 0x80000000, 0x80000000, 0));
@@ -490,9 +495,12 @@ public:
 struct alignas(16) SIMDQuaternion {
     Engine::Math::SIMD::Float4 reg;
 
-    FORCE_INLINE SIMDQuaternion() : reg(Engine::Math::SIMD::Set(0.0f, 0.0f, 0.0f, 1.0f)) {}
+    FORCE_INLINE SIMDQuaternion() : reg(Engine::Math::SIMD::Set(0.0f, 0.0f, 0.0f, 1.0f)) {} // Identity {0,0,0,1}
     FORCE_INLINE SIMDQuaternion(Engine::Math::SIMD::Float4 m) : reg(m) {}
     FORCE_INLINE SIMDQuaternion(float _x, float _y, float _z, float _w) : reg(Engine::Math::SIMD::Set(_x, _y, _z, _w)) {}
+
+    // --- DOT PRODUCT ---
+    FORCE_INLINE float dot(const SIMDQuaternion& other) const { return Engine::Math::SIMD::Dot4(reg, other.reg);}
 
     // --- HARDWARE SETTERS ---
     // Allows individual lane mutations without spilling the register to the stack (Avoids Load-Hit-Store penalty).
@@ -506,60 +514,162 @@ struct alignas(16) SIMDQuaternion {
     FORCE_INLINE float z() const { return Engine::Math::SIMD::ExtractZ(reg); }
     FORCE_INLINE float w() const { return Engine::Math::SIMD::ExtractW(reg); }
 
-    FORCE_INLINE SIMDVector3D GetForwardVector() const { return RotateVector(SIMDVector3D(0.0f, 0.0f, -1.0f, 0.0f)); }
-    FORCE_INLINE SIMDVector3D GetRightVector() const { return RotateVector(SIMDVector3D(1.0f, 0.0f, 0.0f, 0.0f)); }
-    FORCE_INLINE SIMDVector3D GetUpVector() const { return RotateVector(SIMDVector3D(0.0f, 1.0f, 0.0f, 0.0f)); }
+    // --- DIRECTIONAL VECTOR ACCESSORS ---
+    FORCE_INLINE SIMDVector3D GetForwardVector() const { return RotateVector(SIMDVector3D(0.0f, 0.0f, -1.0f, 0.0f)); } // Returns the normalized forward vector (assuming -Z is forward)
+    FORCE_INLINE SIMDVector3D GetRightVector() const { return RotateVector(SIMDVector3D(1.0f, 0.0f, 0.0f, 0.0f)); }    // Returns the normalized right vector (+X)
+    FORCE_INLINE SIMDVector3D GetUpVector() const { return RotateVector(SIMDVector3D(0.0f, 1.0f, 0.0f, 0.0f)); }       // Returns the normalized up vector (+Y)
 
+    // --- NORMALIZED LERP (N-Lerp) ---
+    // Insanely fast. Used for general gameplay rotation and microscopic adjustments.
+     // Lerp draws a straight, linear chord (a line) across a rotation sphere's interior (through the 4D sphere), causing the camera's rotational speed to accelerate and decelerate slightly between waypoints.
+    static FORCE_INLINE SIMDQuaternion NLerp(const SIMDQuaternion& q1, const SIMDQuaternion& q2, float t) {
+        
+        // 1. Shortest Path Enforcement
+        // If the dot product is negative, the quaternions point to opposite hemispheres.
+        // We must negate q2 to ensure the interpolation takes the shortest visual path.
+        Engine::Math::SIMD::Float4 q2Reg = q2.reg;
+        if (q1.dot(q2) < 0.0f) {
+            #ifdef MATH_ISA_ARM
+                q2Reg = vnegq_f32(q2Reg);
+            #else
+                q2Reg = _mm_xor_ps(q2Reg, _mm_set1_ps(-0.0f));
+            #endif
+        }
+
+        // 2. Linear Interpolation (res = q1*(1-t) + q2*t)
+        Engine::Math::SIMD::Float4 tReg = Engine::Math::SIMD::Set1(t);
+        Engine::Math::SIMD::Float4 oneMinusT = Engine::Math::SIMD::Sub(Engine::Math::SIMD::Set1(1.0f), tReg);
+        
+        Engine::Math::SIMD::Float4 res = Engine::Math::SIMD::Add(
+            Engine::Math::SIMD::Mul(q1.reg, oneMinusT), 
+            Engine::Math::SIMD::Mul(q2Reg, tReg)
+        );
+        
+        // 3. Normalize to snap it back to the rotation sphere
+        SIMDQuaternion result(res);
+        result.Normalize();
+        return result;
+    }
+
+    // --- SPHERICAL LINEAR INTERPOLATION (SLERP) ---
+    // Interpolate rotations: Used for implementing smooth camera controls, cinematic splines, or AI rotation targeting (making AI entities slowly turn towards the player).
+    // Constant velocity rotation along the shortest path of the sphere.
+    // Slerp traces the curve along the surface of a sphere, guarenteeing a perfectly constant velocity for CinematicTrackController.
+    static FORCE_INLINE SIMDQuaternion Slerp(const SIMDQuaternion& q1, const SIMDQuaternion& q2, float t) {
+        float cosOmega = q1.dot(q2);
+        Engine::Math::SIMD::Float4 q2Reg = q2.reg;
+
+        // 1. SHORTEST PATH ENFORCEMENT
+        // If the dot product is negative, the quaternions point to opposite hemispheres.
+        // We flip Q2 to force the camera to take the shortest physical rotation path.
+        if (cosOmega < 0.0f) {
+            cosOmega = -cosOmega;
+            q2Reg = Engine::Math::SIMD::FlipSignXYZ(q2Reg); // We need a full negate here, not just XYZ
+            // For a true negate in your cross platform layer:
+            #ifdef MATH_ISA_ARM
+                q2Reg = vnegq_f32(q2Reg);
+            #else
+                // Flip the sign bit of all 4 floats instantly using XOR
+                q2Reg = _mm_xor_ps(q2Reg, _mm_set1_ps(-0.0f));
+            #endif
+        }
+
+        // 2. GIMBAL / PRECISION FALLBACK
+        // If the quaternions are nearly identical (angle is basically 0), 
+        // division by sin(Omega) will cause a NaN explosion. Fallback to N-Lerp.
+        if (cosOmega > 0.9999f) {
+            Engine::Math::SIMD::Float4 tReg = Engine::Math::SIMD::Set1(t);
+            Engine::Math::SIMD::Float4 oneMinusT = Engine::Math::SIMD::Sub(Engine::Math::SIMD::Set1(1.0f), tReg);
+            SIMDQuaternion result(Engine::Math::SIMD::Add(Engine::Math::SIMD::Mul(q1.reg, oneMinusT), Engine::Math::SIMD::Mul(q2Reg, tReg)));
+            result.Normalize();
+            return result;
+        }
+
+        // --- SPHERICAL MATH--- 
+
+        // 3. Extract the angle (Omega)
+        float omega = std::acos(cosOmega);
+        float invSinOmega = 1.0f / std::sin(omega);
+
+        // 4. Calculate the transcendental weights
+        float weight0 = std::sin((1.0f - t) * omega) * invSinOmega;
+        float weight1 = std::sin(t * omega) * invSinOmega;
+
+         // 5. SIMD RE-ASSEMBLY [res = (q1 * w0) + (q2 * w1)]
+        Engine::Math::SIMD::Float4 res = Engine::Math::SIMD::Add(
+            Engine::Math::SIMD::Mul(q1.reg, Engine::Math::SIMD::Set1(weight0)), 
+            Engine::Math::SIMD::Mul(q2Reg, Engine::Math::SIMD::Set1(weight1))
+        );
+
+        return SIMDQuaternion(res);
+    }
+
+    // --- ANGLE AXIS CONVERSION ---
+    // This is the ONLY time we use Trigonometry. Used when converting mouse/keyboard input to a rotation.
     static FORCE_INLINE SIMDQuaternion AngleAxis(float angleDegrees, const SIMDVector3D& axis) {
         float halfAngleRad = (angleDegrees * (std::numbers::pi_v<float> / 180.0f)) * 0.5f;
         
+        // Multiply the normalized axis by sin(half_angle)
         Engine::Math::SIMD::Float4 sinVec = Engine::Math::SIMD::Set1(std::sin(halfAngleRad));
         Engine::Math::SIMD::Float4 axisScaled = Engine::Math::SIMD::Mul(axis.reg, sinVec);
+
+        // Blend the Cosine value into the W lane (mask 0x08 = 1000 binary)
         Engine::Math::SIMD::Float4 wCos = Engine::Math::SIMD::Set(0.0f, 0.0f, 0.0f, std::cos(halfAngleRad));
         
         return SIMDQuaternion(Engine::Math::SIMD::BlendMaskW(axisScaled, wCos));
     }
 
+    // --- THE HAMILTON PRODUCT (SIMD QUATERNION MULTIPLICATION) ---
+    // Combines two rotations into one.
     FORCE_INLINE SIMDQuaternion operator*(const SIMDQuaternion& rhs) const {
         return SIMDQuaternion(Engine::Math::SIMD::QuaternionMul(reg, rhs.reg));
     }
 
+    // --- HARDWARE NORMALIZATION ---
     FORCE_INLINE void Normalize() {
         float dot = Engine::Math::SIMD::Dot4(reg, reg);
-        float invLen = 1.0f / std::sqrt(dot); // Replaced _mm_rsqrt_ps to ensure exact ARM/x86 matching
+        float invLen = 1.0f / std::sqrt(dot); // x86: Engine::Math::SIMD::Float4 = _mm_rsqrt_ps(dot); 
         reg = Engine::Math::SIMD::Mul(reg, Engine::Math::SIMD::Set1(invLen));
     }
 
+    // --- CONJUGATE (INVERSE ROTATION) ---
     FORCE_INLINE SIMDQuaternion Conjugate() const {
+        // Negates X, Y, and Z. Required to generate View Matrices!
         return SIMDQuaternion(Engine::Math::SIMD::FlipSignXYZ(reg));
     }
     
+    // --- PURE SIMD ROTATE VECTOR ---
+    // Rotates a 3D vector by this quaternion: V' = Q * V * Q^-1
+    // Drastically faster than extracting x, y, and z to memory! Fast path for rotating a vector by a quaternion.
     FORCE_INLINE SIMDVector3D RotateVector(const SIMDVector3D& v) const {
+        // 1. Mask out W (Force it to 0.0) to get purely the imaginary (x,y,z) axis
         SIMDVector3D qVec(Engine::Math::SIMD::BlendMaskW(reg, Engine::Math::SIMD::Zero()));
+
+        // 2. Broadcast the Real (w) component across all lanes
         Engine::Math::SIMD::Float4 wReg = Engine::Math::SIMD::Set1(w());
         
+        // 3. V' = V + 2w(Q_xyz x V) + 2(Q_xyz x (Q_xyz x V))
         SIMDVector3D t = qVec.cross(v) * 2.0f;
+
+        // Multiply t by w directly in the registers, avoiding scalar extraction
         SIMDVector3D tw(Engine::Math::SIMD::Mul(t.reg, wReg)); 
         return v + tw + qVec.cross(t);
     }
 
-    FORCE_INLINE float dot(const SIMDQuaternion& other) const {
-        return Engine::Math::SIMD::Dot4(reg, other.reg);
-    }
-
+    // --- DIRECTION TO QUATERNION ---
     // Converts a normalized forward vector into a rotation without using Trigonometry.
     static FORCE_INLINE SIMDQuaternion FromDirection(const SIMDVector3D& dir) {
         SIMDVector3D baseForward(0.0f, 0.0f, -1.0f, 0.0f); 
-        float d = baseForward.dot(dir);
+        float dot = baseForward.dot(dir);
         
-        // Edge Case: The entity needs to perfectly turn around 180 degrees
-        if (d < -0.9999f) {
+        // Edge Case: The entity (or camera) needs to perfectly turn around 180 degrees
+        if (dot < -0.9999f) {
             return SIMDQuaternion(0.0f, 1.0f, 0.0f, 0.0f); // 180-degree Yaw
         }
         
         // Build the Quaternion using the cross product axis and the half-way dot product
         SIMDVector3D axis = baseForward.cross(dir);
-        SIMDQuaternion q(axis.x(), axis.y(), axis.z(), 1.0f + d);
+        SIMDQuaternion q(axis.x(), axis.y(), axis.z(), 1.0f + dot);
         q.Normalize();
         return q;
     }
@@ -582,44 +692,6 @@ struct alignas(16) SIMDQuaternion {
             cr * cp * sy - sr * sp * cy, // Z
             cr * cp * cy + sr * sp * sy  // W
         );
-    }
-
-    // Interpolate rotations: Used for implementing smooth camera controls, cinematic splines, or AI rotation targeting (making AI entities slowly turn towards the player).
-    static FORCE_INLINE SIMDQuaternion Slerp(const SIMDQuaternion& q1, const SIMDQuaternion& q2, float t) {
-        float cosOmega = q1.dot(q2);
-        Engine::Math::SIMD::Float4 q2Reg = q2.reg;
-
-        if (cosOmega < 0.0f) {
-            cosOmega = -cosOmega;
-            q2Reg = Engine::Math::SIMD::FlipSignXYZ(q2Reg); // We need a full negate here, not just XYZ
-            // For a true negate in your cross platform layer:
-            #ifdef MATH_ISA_ARM
-                q2Reg = vnegq_f32(q2Reg);
-            #else
-                q2Reg = _mm_xor_ps(q2Reg, _mm_set1_ps(-0.0f));
-            #endif
-        }
-
-        if (cosOmega > 0.9999f) {
-            Engine::Math::SIMD::Float4 tReg = Engine::Math::SIMD::Set1(t);
-            Engine::Math::SIMD::Float4 oneMinusT = Engine::Math::SIMD::Sub(Engine::Math::SIMD::Set1(1.0f), tReg);
-            SIMDQuaternion result(Engine::Math::SIMD::Add(Engine::Math::SIMD::Mul(q1.reg, oneMinusT), Engine::Math::SIMD::Mul(q2Reg, tReg)));
-            result.Normalize();
-            return result;
-        }
-
-        float omega = std::acos(cosOmega);
-        float invSinOmega = 1.0f / std::sin(omega);
-
-        float weight0 = std::sin((1.0f - t) * omega) * invSinOmega;
-        float weight1 = std::sin(t * omega) * invSinOmega;
-
-        Engine::Math::SIMD::Float4 res = Engine::Math::SIMD::Add(
-            Engine::Math::SIMD::Mul(q1.reg, Engine::Math::SIMD::Set1(weight0)), 
-            Engine::Math::SIMD::Mul(q2Reg, Engine::Math::SIMD::Set1(weight1))
-        );
-
-        return SIMDQuaternion(res);
     }
 };
 
