@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <span>
 #include <algorithm>   // Required for std::min, std::copy, std::swap
+#include <bit>         // Required for std::bit_cast
 
 // --- COMPILER MACROS ---
 #ifndef FORCE_INLINE
@@ -117,12 +118,6 @@ namespace Engine::Math::Constants {
     static const Float4 SIN_C3 = SIMD_CONST(-0x1.555556p-3f);  // -0.16666666667f  (-1/3!)
     static const Float4 SIN_1  = SIMD_CONST(0x1.0p+0f);        //  1.0f
 
-    // FastACos Constants
-    static const Float4 ACOS_C3 = SIMD_CONST(-0x1.32d164p-6f); // -0.0187293f
-    static const Float4 ACOS_C2 = SIMD_CONST(0x1.302b1ap-4f);  //  0.0742610f
-    static const Float4 ACOS_C1 = SIMD_CONST(-0x1.b2694ep-3f); // -0.2121144f
-    static const Float4 ACOS_1  = SIMD_CONST(0x1.0p+0f);       //  1.0f
-
     // FastCos Constants (Horner's Method)
     static const Float4 COS_C8 = SIMD_CONST(0x1.a01a02p-16f);  //  0.00002480158f  ( 1/8!)
     static const Float4 COS_C6 = SIMD_CONST(-0x1.6c16c2p-10f); // -0.00138888888f  (-1/6!)
@@ -130,9 +125,34 @@ namespace Engine::Math::Constants {
     static const Float4 COS_C2 = SIMD_CONST(-0x1.000000p-1f);  // -0.5f            (-1/2!)
     static const Float4 COS_1  = SIMD_CONST(0x1.0p+0f);        //  1.0f
 
+    // FastACos Constants
+    static const Float4 ACOS_C3 = SIMD_CONST(-0x1.32d164p-6f); // -0.0187293f
+    static const Float4 ACOS_C2 = SIMD_CONST(0x1.302b1ap-4f);  //  0.0742610f
+    static const Float4 ACOS_C1 = SIMD_CONST(-0x1.b2694ep-3f); // -0.2121144f
+    static const Float4 ACOS_1  = SIMD_CONST(0x1.0p+0f);       //  1.0f
+
+    // FastTan Constants (Rational Approximation)
+    static const Float4 TAN_C0 = SIMD_CONST(0x1.0p+0f);        //  1.0f
+    static const Float4 TAN_C1 = SIMD_CONST(-0x1.111112p-3f);  // -0.13333333f
+    static const Float4 TAN_C2 = SIMD_CONST(0x1.ba2e8cp-9f);   //  0.00338663f
+    static const Float4 TAN_C3 = SIMD_CONST(0x1.0p+0f);        //  1.0f
+    static const Float4 TAN_C4 = SIMD_CONST(-0x1.d55556p-2f);  // -0.45833333f
+    static const Float4 TAN_C5 = SIMD_CONST(0x1.218526p-5f);   //  0.03534943f
+
     // PI Constants
     static const Float4 ACOS_C0 = SIMD_CONST(PI_HALF);         //  1.57079632679f
     static const Float4 ACOS_PI = SIMD_CONST(PI);              //  3.14159265359f
+}
+
+
+namespace Engine::Math::Functions {   
+    // Fast pure scalar absolute value. Compiles down to a single instruction (zero-cast bitwise clear).
+    FORCE_INLINE constexpr float abs(float v) {
+        // Treat the float as an integer, strip the 31st sign bit, and treat it as a float again.
+        uint32_t i = std::bit_cast<uint32_t>(v);
+        i &= 0x7FFFFFFF; // Clear the sign bit
+        return std::bit_cast<float>(i);
+    }
 }
 
 namespace Engine::Math::SIMD {    
@@ -251,7 +271,7 @@ namespace Engine::Math::SIMD {
             float det = Dot4(r0, adj0);
 
              // If det is 0, the matrix is singular (cannot be inverted). We just return Identity to prevent NaN explosions.
-            if (std::abs(det) < 1e-8f) {
+            if (Engine::Math::Functions::abs(det) < 1e-8f) {
                 c0 = Set(1.0f, 0.0f, 0.0f, 0.0f); c1 = Set(0.0f, 1.0f, 0.0f, 0.0f);
                 c2 = Set(0.0f, 0.0f, 1.0f, 0.0f); c3 = Set(0.0f, 0.0f, 0.0f, 1.0f);
                 return;
@@ -269,6 +289,18 @@ namespace Engine::Math::SIMD {
         // ARM NEON Absolute Value and Square Root
         FORCE_INLINE Float4 Abs(Float4 v) { return vabsq_f32(v); } // NEON has a dedicated absolute value instruction!
         FORCE_INLINE Float4 Sqrt(Float4 v) { return vsqrtq_f32(v); }
+
+        // --- ARM Hardware Reciprocal (Estimate + Newton-Raphson Step) ---
+        FORCE_INLINE Float4 Reciprocal(Float4 v) {
+            Float4 rec = vrecpeq_f32(v);                // Initial hardware precision estimate 
+            return vmulq_f32(rec, vrecpsq_f32(v, rec)); // Refinement step for accuracy (i.e., doubles precision to match standard IEEE-754 accuracy).
+        }
+
+        // --- ARM Hardware Reciprocal Square Root (Estimate + Newton-Raphson Step) ---
+        FORCE_INLINE Float4 ReciprocalSqrt(Float4 v) {
+            Float4 est = vrsqrteq_f32(v);                // Initial hardware estimate
+            return vmulq_f32(est, vrsqrtsq_f32(v, est)); // Newton-Raphson refinement
+        }
 
         FORCE_INLINE Float4 CmpGt(Float4 a, Float4 b) { return vreinterpretq_f32_u32(vcgtq_f32(a, b)); }
         FORCE_INLINE Float4 CmpLt(Float4 a, Float4 b) { return vreinterpretq_f32_u32(vcltq_f32(a, b)); }
@@ -305,6 +337,8 @@ namespace Engine::Math::SIMD {
     
         // Mask 0x08 (binary 1000) tells the hardware: "Take X, Y, Z from 'reg', take W from the zero vector."
         FORCE_INLINE Float4 BlendMaskW(Float4 a, Float4 b) { return _mm_blend_ps(a, b, 0x08); }
+
+        FORCE_INLINE int MoveMask(Float4 v) { return _mm_movemask_ps(v); }
 
         // ======================================================================
         // HARDWARE SETTERS (SSE4.1)
@@ -562,8 +596,70 @@ namespace Engine::Math::SIMD {
 
         FORCE_INLINE Float4 Sqrt(Float4 v) { return _mm_sqrt_ps(v); }
 
-        FORCE_INLINE int MoveMask(Float4 v) { return _mm_movemask_ps(v); }
+        // ==================================================================
+        // HARDWARE RECIPROCAL (NEWTON-RAPHSON)
+        // ==================================================================
+        /*
+            - Need Newton-Raphson iteration to provide stable rendering (no jitter) at extreme distances.
+            - Is vastly faster than standard division (~10-15 clock cycles) due to interleaving of instructions.
+            - Note: this is for AOS layouts, SOA layouts use _mm256_rsqrt_ps.
+        */
+
+        // --- Intel Hardware Reciprocal (Estimate + Newton-Raphson Step) ---
+        FORCE_INLINE Float4 Reciprocal(Float4 v) {
+            // 1. Initial hardware estimate (~11 bits of precision)
+            __m128 est = _mm_rcp_ps(v); 
+
+            // 2. Newton-Raphson iteration: est * (2.0 - v * est)
+            // Doubles precision to full 22-24 bit IEEE-754 standard accuracy.
+            __m128 v_est = _mm_mul_ps(v, est);
+            __m128 two_minus = _mm_sub_ps(Engine::Math::Constants::SIMD_TWO, v_est);
+            
+            return _mm_mul_ps(est, two_minus);
+        }
+
+        // --- Intel Hardware Reciprocal Square Root (Estimate + Newton-Raphson Step) ---
+        FORCE_INLINE Float4 ReciprocalSqrt(Float4 v) {
+            // Initial hardware estimate (~11 bits precision)
+            __m128 est = _mm_rsqrt_ps(v); 
+
+            // Newton-Raphson iteration: 0.5 * est * (3.0 - v * est * est)
+            __m128 est_squared = _mm_mul_ps(est, est);
+            __m128 half_est = _mm_mul_ps(est, SIMD_CONST(0.5f));
+            __m128 three_minus_v_est2 = _mm_sub_ps(SIMD_CONST(3.0f), _mm_mul_ps(v, est_squared));
+            
+            return _mm_mul_ps(half_est, three_minus_v_est2);
+        }
     #endif
+
+    // ======================================================================
+    // TRANSCENDENTAL RATIONAL APPROXIMATION (TANGENT)
+    // ======================================================================
+    /*
+        - Pure SIMD Rational Approximation of Tangent using a rational function, which divides one polynomial by another.
+        - Highly accurate within [-PI/4, PI/4]. 
+        - Automatically uses fast hardware division (rcp).
+    */
+
+    FORCE_INLINE Float4 FastTan(Float4 x) {
+        Float4 x2 = Mul(x, x); // x^2
+
+        // Numerator Polynomial: 1.0 + x^2 * (C1 + x^2 * C2)
+        Float4 num = FMAdd(x2, TAN_C2, TAN_C1); // C2 * x^2 + C1
+        num = FMAdd(num, x2, TAN_C0);           // num * x^2 + 1.0
+
+        // Denominator Polynomial: 1.0 + x^2 * (C4 + x^2 * C5)
+        Float4 den = FMAdd(x2, TAN_C5, TAN_C4); // C5 * x^2 + C4
+        den = FMAdd(den, x2, TAN_C3);           // den * x^2 + 1.0
+
+        // 3. Perform cross-platform hardware reciprocal (1 / den) to avoid slow CPU division
+        // ARM NEON Fast Reciprocal Approximation, Newton-Raphson refinement step
+        Float4 rec = Reciprocal(den);
+
+        // Result = x * (Numerator * (1 / Denominator))
+        Float4 res = Mul(num, rec);
+        return Mul(res, x);
+    }
 
     // ======================================================================
     // TRANSCENDENTAL APPROXIMATION (TAYLOR/MINIMAX POLYNOMIAL EXPANSION)
@@ -828,7 +924,10 @@ public:
     FORCE_INLINE void Normalize() {
         float lenSq = lengthSquared();
         if (lenSq > 1e-8f) {
-            *this = *this * (1.0f / std::sqrt(lenSq));
+            // Broadcast the dot product, get the fast 1/sqrt, and extract it to scale the vector.
+            Engine::Math::SIMD::Float4 lenSqReg = Engine::Math::SIMD::Set1(lenSq);
+            Engine::Math::SIMD::Float4 invLenReg = Engine::Math::SIMD::ReciprocalSqrt(lenSqReg);
+            *this = *this * Engine::Math::SIMD::ExtractX(invLenReg);
         }
     }
 
@@ -1021,8 +1120,11 @@ struct alignas(16) SIMDQuaternion {
     // --- HARDWARE NORMALIZATION ---
     FORCE_INLINE void Normalize() {
         float dot = Engine::Math::SIMD::Dot4(reg, reg);
-        float invLen = 1.0f / std::sqrt(dot); // x86: Engine::Math::SIMD::Float4 = _mm_rsqrt_ps(dot); 
-        reg = Engine::Math::SIMD::Mul(reg, Engine::Math::SIMD::Set1(invLen));
+        if (dot > 1e-8f) {
+            Engine::Math::SIMD::Float4 dotReg = Engine::Math::SIMD::Set1(dot);
+            Engine::Math::SIMD::Float4 invLenReg = Engine::Math::SIMD::ReciprocalSqrt(dotReg);
+            reg = Engine::Math::SIMD::Mul(reg, invLenReg); // Multiply directly, no extraction needed!
+        }
     }
 
     // --- CONJUGATE (INVERSE ROTATION) ---
@@ -1278,7 +1380,15 @@ struct alignas(64) Matrix4x4_SIMD {
     static FORCE_INLINE Matrix4x4_SIMD Perspective_SIMD(float fovY_degrees, float aspect, float nearZ, float farZ) {
         Matrix4x4_SIMD mat;
         float fovY_rad = fovY_degrees * Engine::Math::Constants::DEG_TO_RAD;
-        float tanHalfFovY = std::tan(fovY_rad / 2.0f);
+        
+        // 1. Pack the scalar angle into a 128-bit register
+        Float4 halfFovReg = Engine::Math::SIMD::Set1(fovY_rad * 0.5f);
+        
+        // 2. Evaluate using the SIMD Fast Tangent
+        Float4 tanReg = Engine::Math::SIMD::FastTan(halfFovReg);
+        
+        // 3. Extract the scalar result back out
+        float tanHalfFovY = Engine::Math::SIMD::ExtractX(tanReg);
 
         float m00 = 1.0f / (aspect * tanHalfFovY);
         float m11 = 1.0f / tanHalfFovY;
@@ -1307,13 +1417,11 @@ struct alignas(64) Matrix4x4_SIMD {
     static FORCE_INLINE Matrix4x4_SIMD LookAt_SIMD(const SIMDVector3D& eye, const SIMDVector3D& target, const SIMDVector3D& upVec) {
         // 1. Forward Vector (Z)
         SIMDVector3D f = (target - eye).asDirection(); // Force W=0.0f
-        float fLenSq = f.dot(f);
-        if (fLenSq > 1e-8f) f = f * (1.0f / std::sqrt(fLenSq));
+        f.Normalize();
 
         // 2. Right Vector (X)
         SIMDVector3D r = f.cross(upVec).asDirection();
-        float rLenSq = r.dot(r);
-        if (rLenSq > 1e-8f) r = r * (1.0f / std::sqrt(rLenSq));
+        r.Normalize();
 
         // 3. Up Vector (Y)
         SIMDVector3D u = r.cross(f).asDirection();
@@ -1378,17 +1486,11 @@ struct alignas(64) Matrix4x4_SIMD {
         SIMDVector3D f = worldForward.toFloatVector();
         
         // Use your fast SIMD dot product to normalize forward vector
-        float fLenSq = f.dot(f);
-        if (fLenSq > 1e-8f) {
-            f = f * (1.0f / std::sqrt(fLenSq));
-        }
+        f.Normalize();
 
         // 3. Right Vector (X) - SIMD Cross Product
         SIMDVector3D r = f.cross(upVec).asDirection();
-        float rLenSq = r.dot(r);
-        if (rLenSq > 1e-8f) {
-            r = r * (1.0f / std::sqrt(rLenSq));
-        }
+        r.Normalize();
 
         // 4. Up Vector (Y) - SIMD Cross Product
         SIMDVector3D u = r.cross(f).asDirection();
@@ -1885,7 +1987,9 @@ struct Frustum {
             SIMDVector3D normal = planes[i].asDirection(); // Mask out W
             float lengthSq = normal.dot(normal);
             if (lengthSq > 1e-8f) {
-                planes[i] = planes[i] * (1.0f / std::sqrt(lengthSq));
+                Engine::Math::SIMD::Float4 lenSqReg = Engine::Math::SIMD::Set1(lengthSq);
+                Engine::Math::SIMD::Float4 invLenReg = Engine::Math::SIMD::ReciprocalSqrt(lenSqReg);
+                planes[i] = planes[i] * Engine::Math::SIMD::ExtractX(invLenReg);
             }
         }
     }
