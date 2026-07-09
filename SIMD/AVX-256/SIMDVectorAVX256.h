@@ -23,7 +23,6 @@
 // --- THE MATH LAYER (Intel-specific Intrinsics SIMD) ---
 // AVX-256: This represents 8 vectors. It doesn't own memory; it just processes it (used for bulk data processing).
 // This is a custom SIMD wrapper that bypasses standard C++ compilers to explicitly command the CPU's execution ports.
-// SIMD Intrinsics: Cannot be evaluated at compile-time, only run-time.
 struct SIMDVector8 {
     // --- AVX-256: 8-Wide Batch ---
     __m256 x, y, z;
