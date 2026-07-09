@@ -292,7 +292,7 @@ public:
 
 // --- 16-BYTE ALIGNED ALLOCATOR FOR SSE ALIGNMENT ---
 template <typename T> 
-using AlignedVector16 = std::vector<T, AlignedAllocator<T, 16>>; // SSE     (16-byte aligned vector)
+using AlignedVector16 = std::vector<T, AlignedAllocator<T, 16>>; // SSE     (16-byte aligned vector), this dynamically allocates the memory on the heap, perfectly aligned.
 
 // --- 32-BYTE ALIGNED ALLOCATOR FOR AVX2 ALIGNMENT ---
 template <typename T>
