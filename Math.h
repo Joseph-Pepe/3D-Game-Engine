@@ -101,12 +101,15 @@ namespace Engine::Math::Constants {
         #define SIMD_VEC(x, y, z, w) _mm_set_ps(w, z, y, x) 
     #endif
 
-    // --- CORE ENGINE CONSTANTS ---
-    static const Float4 SIMD_ZERO     = SIMD_CONST(0x0.0p+0f);  //  0.0f
-    static const Float4 SIMD_ONE      = SIMD_CONST(0x1.0p+0f);  //  1.0f
-    static const Float4 SIMD_TWO      = SIMD_CONST(0x1.0p+1f);  //  2.0f
+    // --- CORE ENGINE CONSTANTS (L1 CACHED) ---
     static const Float4 SIMD_NEG_ONE  = SIMD_CONST(-0x1.0p+0f); // -1.0f
     static const Float4 SIMD_NEG_ZERO = SIMD_CONST(-0x0.0p+0f); // -0.0f
+    static const Float4 SIMD_ZERO     = SIMD_CONST(0x0.0p+0f);  //  0.0f
+    static const Float4 SIMD_HALF     = SIMD_CONST(0x1.0p-1f);  //  0.5f 
+    static const Float4 SIMD_ONE      = SIMD_CONST(0x1.0p+0f);  //  1.0f
+    static const Float4 SIMD_TWO      = SIMD_CONST(0x1.0p+1f);  //  2.0f
+    static const Float4 SIMD_THREE    = SIMD_CONST(0x1.8p+1f);  //  3.0f
+    
 
     // Common Vector Masks
     static const Float4 SIMD_MASK_W_ONE = SIMD_VEC(0x0.0p+0f, 0x0.0p+0f, 0x0.0p+0f, 0x1.0p+0f); // 0.0f, 0.0f, 0.0f, 1.0f
@@ -146,6 +149,58 @@ namespace Engine::Math::Constants {
 
 
 namespace Engine::Math::Functions {   
+    // --- SCALAR TRANSCENDENTAL APPROXIMATIONS ) ---
+
+    // 1. Standalone Scalar Sine (9th-Order Horner's Method) that is valid strictly for angles between [-PI, PI] (e.g., calculating a bullet trajectory arc).
+    FORCE_INLINE float FastSin(float x) {
+        float x2 = x * x;
+        float s = 0x1.71de3ap-19f;             // SIN_C9
+        s = (s * x2) - 0x1.a01a02p-13f;        // SIN_C7
+        s = (s * x2) + 0x1.111112p-7f;         // SIN_C5
+        s = (s * x2) - 0x1.555556p-3f;         // SIN_C3
+        s = (s * x2) + 1.0f;                   // SIN_1
+        return s * x;
+    }
+
+    // 2. Standalone Scalar Cosine (8th-Order Horner's Method) that is valid strictly for angles between [-PI, PI].
+    FORCE_INLINE float FastCos(float x) {
+        float x2 = x * x;
+        float c = 0x1.a01a02p-16f;             // COS_C8
+        c = (c * x2) - 0x1.6c16c2p-10f;        // COS_C6
+        c = (c * x2) + 0x1.555556p-5f;         // COS_C4
+        c = (c * x2) - 0.5f;                   // COS_C2
+        c = (c * x2) + 1.0f;                   // COS_1
+        return c;
+    }
+
+    // ==============================================
+    // --- EULER CONVERSIONS (COMBINED (SIN-COS)) ---
+    // ==============================================
+    /*
+        - Euler conversions usually need both Sine & Cosine of the same angle.
+        - Calculating them in one function is significantly faster than calling two separate functions because x^2 only needs to be calculated once.
+        - Valid strictly for angles between [-PI, PI].
+    */
+
+    // 3. Use ONLY when BOTH values are needed for the same angle (e.g., Euler conversions, rotation matrix).
+    FORCE_INLINE void FastSinCos(float x, float& outSin, float& outCos) {
+        // Evaluates both Sine and Cosine simultaneously to share the x^2 multiplication to save CPU cycles.
+        float x2 = x * x;
+        float s = 0x1.71de3ap-19f;             // SIN_C9
+        s = (s * x2) - 0x1.a01a02p-13f;        // SIN_C7
+        s = (s * x2) + 0x1.111112p-7f;         // SIN_C5
+        s = (s * x2) - 0x1.555556p-3f;         // SIN_C3
+        s = (s * x2) + 1.0f;                   // SIN_1
+        outSin = s * x;
+
+        float c = 0x1.a01a02p-16f;             // COS_C8
+        c = (c * x2) - 0x1.6c16c2p-10f;        // COS_C6
+        c = (c * x2) + 0x1.555556p-5f;         // COS_C4
+        c = (c * x2) - 0.5f;                   // COS_C2
+        c = (c * x2) + 1.0f;                   // COS_1
+        outCos = c;
+    }
+
     // Fast pure scalar absolute value. Compiles down to a single instruction (zero-cast bitwise clear).
     FORCE_INLINE constexpr float abs(float v) {
         // Treat the float as an integer, strip the 31st sign bit, and treat it as a float again.
@@ -163,8 +218,17 @@ namespace Engine::Math::SIMD {
 
         FORCE_INLINE Float4 Zero() { return vdupq_n_f32(0.0f); }
         FORCE_INLINE Float4 Set(float x, float y, float z, float w) { 
-            float arr[4] = {x, y, z, w}; 
-            return vld1q_f32(arr); 
+            #if defined(__GNUC__) || defined(__clang__)
+                // Modern Clang/GCC maps this directly to 'fmov' and 'ins' register instructions
+                return (float32x4_t){x, y, z, w}; 
+            #else
+                // Fallback: Pure register insertions (Zero Memory Access)
+                float32x4_t res = vdupq_n_f32(x);
+                res = vsetq_lane_f32(y, res, 1);
+                res = vsetq_lane_f32(z, res, 2);
+                res = vsetq_lane_f32(w, res, 3);
+                return res;
+            #endif
         }
         FORCE_INLINE Float4 Set1(float v) { return vdupq_n_f32(v); }
         
@@ -625,8 +689,8 @@ namespace Engine::Math::SIMD {
 
             // Newton-Raphson iteration: 0.5 * est * (3.0 - v * est * est)
             __m128 est_squared = _mm_mul_ps(est, est);
-            __m128 half_est = _mm_mul_ps(est, SIMD_CONST(0.5f));
-            __m128 three_minus_v_est2 = _mm_sub_ps(SIMD_CONST(3.0f), _mm_mul_ps(v, est_squared));
+            __m128 half_est = _mm_mul_ps(est, Engine::Math::Constants::SIMD_HALF);
+            __m128 three_minus_v_est2 = _mm_sub_ps(Engine::Math::Constants::SIMD_THREE, _mm_mul_ps(v, est_squared));
             
             return _mm_mul_ps(half_est, three_minus_v_est2);
         }
@@ -910,24 +974,55 @@ public:
     FORCE_INLINE SIMDVector3D asDirection() const { return SIMDVector3D(Engine::Math::SIMD::BlendMaskW(reg, Engine::Math::SIMD::Zero())); }
     
     // Blend in a 1.0f to the W lane (mask 0x08 = 1000 binary)! Forces W = 1.0f (Treats the vector as a Position/Point in space)
-    FORCE_INLINE SIMDVector3D asPoint() const { return SIMDVector3D(Engine::Math::SIMD::BlendMaskW(reg, Engine::Math::SIMD::Set(0.0f, 0.0f, 0.0f, 1.0f))); } 
+    FORCE_INLINE SIMDVector3D asPoint() const { 
+        return SIMDVector3D(Engine::Math::SIMD::BlendMaskW(reg, Engine::Math::Constants::SIMD_MASK_W_ONE)); // [0.0f, 0.0f, 0.0f, 0.0f] pre-baked in ultra-fast L1 cache for fast operations.
+    }
 
     // --- MAGNITUDE & NORMALIZATION ---
     FORCE_INLINE float lengthSquared() const {
         return dot(*this);
     }
 
+    // ======================================
+    // VECTOR MAGNITUDE (LENGTH)
+    // ======================================
+    /*
+        - std::sqrt is too slow and causes branch stalls (~50 clock cycle cost).
+
+          return std::sqrt(lengthSquared());        
+    */
+
     FORCE_INLINE float length() const {
-        return std::sqrt(lengthSquared());
+        float lenSq = lengthSquared();
+        
+        // Prevent division-by-zero or NaN explosions on zero-length vectors
+        if (lenSq < 1e-8f) {
+            return 0.0f;
+        }
+
+        // Calculate length using the fast Reciprocal Square Root identity: sqrt(x) = x * (1.0 / sqrt(x))
+        Engine::Math::SIMD::Float4 lenSqReg = Engine::Math::SIMD::Set1(lenSq);
+        Engine::Math::SIMD::Float4 invLenReg = Engine::Math::SIMD::ReciprocalSqrt(lenSqReg);
+        
+        return lenSq * Engine::Math::SIMD::ExtractX(invLenReg);
     }
 
     FORCE_INLINE void Normalize() {
-        float lenSq = lengthSquared();
-        if (lenSq > 1e-8f) {
-            // Broadcast the dot product, get the fast 1/sqrt, and extract it to scale the vector.
-            Engine::Math::SIMD::Float4 lenSqReg = Engine::Math::SIMD::Set1(lenSq);
-            Engine::Math::SIMD::Float4 invLenReg = Engine::Math::SIMD::ReciprocalSqrt(lenSqReg);
-            *this = *this * Engine::Math::SIMD::ExtractX(invLenReg);
+        // 1. PURE SIMD DOT PRODUCT: Calculates dot product and broadcasts it to all 4 lanes immediately!
+        // No scalar extraction. Data stays in the XMM / NEON register.
+        Engine::Math::SIMD::Float4 dotReg = Engine::Math::SIMD::Set1(Engine::Math::SIMD::Dot3(reg, reg));
+
+        // 2. EXTRACT FOR BRANCHING ONLY
+        // We still need a scalar just to check the 'if' condition safely.
+        float dotScalar = Engine::Math::SIMD::ExtractX(dotReg); 
+
+        if (dotScalar > 1e-8f) {
+            // 3. HARDWARE RECIPROCAL SQRT (1/sqrt)
+            Float4 invLenReg = Engine::Math::SIMD::ReciprocalSqrt(dotReg);
+
+            // 4. DIRECT SIMD MULTIPLICATION
+            // We multiply our internal register directly by the inverse length register.
+            reg = Engine::Math::SIMD::Mul(reg, invLenReg); 
         }
     }
 
@@ -1073,22 +1168,24 @@ struct alignas(16) SIMDQuaternion {
         // Evaluate all 3 sines simultaneously in ~20 clock cycles
         Engine::Math::SIMD::Float4 sines = Engine::Math::SIMD::FastSin(angles);
 
-        // Extract the evaluated sines ONLY when we absolutely must build the final weights
-        float sinOmega       = Engine::Math::SIMD::ExtractX(sines);
-        float sinOneMinusT   = Engine::Math::SIMD::ExtractY(sines);
-        float sinT           = Engine::Math::SIMD::ExtractZ(sines);
 
-        // 5. Calculate weights using the extracted sines
-        float invSinOmega = 1.0f / sinOmega;
+        // 5. FULLY SIMD WEIGHT CALCULATION (Zero Extraction, Zero Scalar Division)
 
-        // 6. Calculate the transcendental weights
-        float weight0 = sinOneMinusT * invSinOmega;
-        float weight1 = sinT * invSinOmega;
+        // Broadcast sin(omega) from the X lane to all 4 lanes: [sinOmega, sinOmega, sinOmega, sinOmega]
+        Engine::Math::SIMD::Float4 sinOmegaReg = Engine::Math::SIMD::BroadcastX(sines);
 
-        // 7. SIMD RE-ASSEMBLY [res = (q1 * w0) + (q2 * w1)]
+        // Fast hardware reciprocal: 1.0f / sin(omega) (~4 cycles instead of ~15)
+        Engine::Math::SIMD::Float4 invSinOmegaReg = Engine::Math::SIMD::Reciprocal(sinOmegaReg);
+
+        // Calculate the transcendental weights, multiply sines by the reciprocal to get the final weights!
+        // weights = [ 1.0f, weight0, weight1, garbage ]
+        Engine::Math::SIMD::Float4 weights = Engine::Math::SIMD::Mul(sines, invSinOmegaReg);
+
+        // 6. SIMD RE-ASSEMBLY [res = (q1 * w0) + (q2 * w1)]
         Engine::Math::SIMD::Float4 res = Engine::Math::SIMD::Add(
-            Engine::Math::SIMD::Mul(q1.reg, Engine::Math::SIMD::Set1(weight0)), 
-            Engine::Math::SIMD::Mul(q2Reg, Engine::Math::SIMD::Set1(weight1))
+            // Broadcast weight0 (Y lane) and weight1 (Z lane) directly from the register into the quaternion multipliers
+            Engine::Math::SIMD::Mul(q1.reg, Engine::Math::SIMD::BroadcastY(weights)), 
+            Engine::Math::SIMD::Mul(q2Reg, Engine::Math::SIMD::BroadcastZ(weights))
         );
 
         return SIMDQuaternion(res);
@@ -1100,13 +1197,19 @@ struct alignas(16) SIMDQuaternion {
         using namespace Engine::Math::SIMD;
 
         float halfAngleRad = angleDegrees * Engine::Math::Constants::DEG_TO_RAD * 0.5f;
+
+        // Variables to hold our evaluated trig results
+        float s, c;
         
-        // 1. Multiply the normalized axis by sin(half_angle)
-        Float4 sinVec = Set1(std::sin(halfAngleRad));
+        // Replaces std::sin and std::cos (~100 cycles) with a single batched polynomial approximation (~15 cycles).
+        Engine::Math::Functions::FastSinCos(halfAngleRad, s, c);
+
+        // 2. Multiply the normalized axis by sin(half_angle)
+        Float4 sinVec = Set1(s);
         Float4 axisScaled = Mul(axis.reg, sinVec);
 
-        // 2. Insert the Cosine value directly into the W lane! Skips the Blend instruction.
-        Float4 result = InsertW(axisScaled, std::cos(halfAngleRad));
+        // 3. Insert the Cosine value directly into the W lane! Skips the Blend instruction.
+        Float4 result = InsertW(axisScaled, c);
         
         return SIMDQuaternion(result);
     }
@@ -1169,18 +1272,65 @@ struct alignas(16) SIMDQuaternion {
         return q;
     }
 
-    // --- EULER TO QUATERNION ---
+    // --- EULER TO QUATERNION (SIMD) ---
     // Converts human-readable Euler Angles [Pitch (X), Yaw (Y), Roll (Z) in degrees] into quaternions.
     static FORCE_INLINE SIMDQuaternion FromEuler(float pitch, float yaw, float roll) {
-        // Level-editors, player controller, or camera script will provide rotations in standard euler angles (pitch, yaw, roll). 
+        using namespace Engine::Math::SIMD;
+
         float p = pitch * Engine::Math::Constants::DEG_TO_RAD * 0.5f;
         float y = yaw   * Engine::Math::Constants::DEG_TO_RAD * 0.5f;
         float r = roll  * Engine::Math::Constants::DEG_TO_RAD * 0.5f;
 
-        float sp = std::sin(p); float cp = std::cos(p);
-        float sy = std::sin(y); float cy = std::cos(y);
-        float sr = std::sin(r); float cr = std::cos(r);
+        // 1. BATCHED SIMD TRANSCENDENTAL EVALUATION
+        // Pack all three scalar angles into a single 128-bit register. (X=p, Y=y, Z=r, W=0)
+        Float4 angles = Set(p, y, r, 0.0f);
 
+        // 2. Evaluate all 3 Sines and 3 Cosines simultaneously.
+        // This replaces 6 scalar standard library calls (~300 cycles) with 2 SIMD polynomial expansions (~40 cycles total).
+        Float4 sines   = FastSin(angles);
+        Float4 cosines = FastCos(angles);
+
+        // 3. Extract the evaluated results
+        float sp = ExtractX(sines);
+        float sy = ExtractY(sines);
+        float sr = ExtractZ(sines);
+
+        float cp = ExtractX(cosines);
+        float cy = ExtractY(cosines);
+        float cr = ExtractZ(cosines);
+
+        // 4. Scalar Assembly
+        // The compiler will pipeline these standard FPU multiplications perfectly.
+        return SIMDQuaternion(
+            sr * cp * cy - cr * sp * sy, // X
+            cr * sp * cy + sr * cp * sy, // Y
+            cr * cp * sy - sr * sp * cy, // Z
+            cr * cp * cy + sr * sp * sy  // W
+        );
+    }
+
+    // --- EULER TO QUATERNION (OPTIMIZED SCALAR) ---
+    // Converts human-readable Euler Angles [Pitch (X), Yaw (Y), Roll (Z) in degrees] into quaternions.
+    static FORCE_INLINE SIMDQuaternion FromEulerScalar(float pitch, float yaw, float roll) {
+        // 1. Convert to Half-Radians
+        float p = pitch * Engine::Math::Constants::DEG_TO_RAD * 0.5f;
+        float y = yaw   * Engine::Math::Constants::DEG_TO_RAD * 0.5f;
+        float r = roll  * Engine::Math::Constants::DEG_TO_RAD * 0.5f;
+
+        // Variables to hold our evaluated trig results
+        float sp, cp, sy, cy, sr, cr;
+
+        // 2. Custom Scalar FastSinCos (3 calls * (~12 clock cycles)) = ~36 clock cycles total!
+        Engine::Math::Functions::FastSinCos(p, sp, cp);
+        Engine::Math::Functions::FastSinCos(y, sy, cy);
+        Engine::Math::Functions::FastSinCos(r, sr, cr);
+
+        // 2. std::sin, std::cos (6 calls * (~50 clock cycles)) = ~300 clock cycles total
+        // float sp = std::sin(p); float cp = std::cos(p);
+        // float sy = std::sin(y); float cy = std::cos(y);
+        // float sr = std::sin(r); float cr = std::cos(r);
+
+        // 3. Final Assembly
         return SIMDQuaternion(
             sr * cp * cy - cr * sp * sy, // X
             cr * sp * cy + sr * cp * sy, // Y
