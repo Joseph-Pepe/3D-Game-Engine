@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cmath>       // Trigonometry (C++26 constexpr supported)
+#include <numbers>     // C++20/26 Standardized Math Constants
 #include <cstdint>
 #include <array>
 #include <mdspan>
@@ -29,6 +30,7 @@
     This layer completely hides the CPU vendor. 
     It maps mathematically identical operations to Intel SSE/AVX and ARM NEON.
 */
+
 #if defined(__aarch64__) || defined(_M_ARM64)
     #include <arm_neon.h>
     #define MATH_ISA_ARM       // Apple Silicon (M-series), Mobile (iPhone, Android) (ARM64)
@@ -37,8 +39,104 @@
     #define MATH_ISA_X86       // Intel/AMD (PS5, Xbox, PC) (x86_x64)
 #endif
 
-namespace Engine::Math::SIMD {
+// ====================================================
+// HEXADECIMAL FLOATING-POINT LITERALS (0x)
+// ====================================================
+/*
+    - Base-10 decimals need to be converted (or parsed) into a Base-2 binary fraction (IEEE-754 format), so the CPU can use it (i.e., text to binary conversion).
+    - Different compilers round these conversions differently (i.e., compiled float on linux may be slightly different than a Window server at the very end of the mantissa).
 
+      Non-Deterministic [Server Authoritative Networking, Interpolation]: Minor floating-point drift does not matter b/c the server dictates the absolute truth (i.e., clients interpolate their local objects to match the server) in online first-person shooters and online open-world games.
+
+        1. Provide exact same inputs (e.g., 3.14159265359f) to MSVC compiler.
+        2. Provide exact same inputs (e.g., 3.14159265359f) to Clang compiler.
+        3. Both will not simulate the exact same physics and math results.
+
+    - A hex-float bypases Base-10 to Base-2 string parsing phase completely (i.e., zero chance of compiler rounding differences).
+    - Hands the compiler the exact raw silicon IEEE-754 mantissa and exponent bits.
+    - Provides bit-perfect deterministic guarantees across every compiler b/c it strips the compilers ability of rounding the math during the text-parsing phase.
+    - Ensures it runs identical on Xbox Series X (AMD), Playstation 5 (AMD), iPhone (ARM), and PC (AMD/Intel).
+
+      Deterministic [Rollback Netcode, Lock-Step Networking]: prevents desynchronization over the network in online fighting games.
+
+        1. Provide exact same inputs (e.g., 0x1.921fb6p+1f) to MSVC compiler.
+        2. Provide exact same inputs (e.g., 0x1.921fb6p+1f) to Clang compiler.
+        3. Both will simulate the exact same physics and math resultsdown to the final decimal place forever.
+*/
+
+namespace Engine::Math::Constants {
+
+    // Standard floating-point Pi
+    inline constexpr float PI = std::numbers::pi_v<float>;         // = 0x1.921fb6p+1f; | 3.14159265359f
+    inline constexpr float PI_HALF = PI * 0.5f;                    // = 0x1.921fb6p+0f; | 1.57079632679f
+    inline constexpr float PI_DOUBLE = PI * 2.0f;                  // = 0x1.921fb6p+2f; | 6.28318530718f
+
+    // Fast conversion multipliers (Evaluated at compile-time)
+    inline constexpr float DEG_TO_RAD = PI / 180.0f;               // = 0x1.1df46ap-6f; | 0.01745329251f (PI / 180.0f)
+    inline constexpr float RAD_TO_DEG = 180.0f / PI;               // = 0x1.ca5dc2p+5f; | 57.2957795131f (180.0f / PI)
+
+    // ======================================================================
+    // HARDWARE CONSTANTS
+    // ======================================================================
+    /*
+        - Pre-broadcasted 128-bit hardware constants.
+        - No Set1 broadcasts required; constants are pulled instantly from L1 Cache.
+        - This allows the CPU to load the entire vector instantly using a single 'movaps' instruction, completely eliminating the runtime cost of scalar broadcasting (_mm_set1_ps).
+    */
+    
+    #ifdef MATH_ISA_ARM
+        // --- ARM APPLE SILICON / MOBILE (NEON) ---
+        using Float4 = float32x4_t;
+
+        #define SIMD_CONST(val) {val, val, val, val}
+        #define SIMD_VEC(x, y, z, w) {x, y, z, w}
+    #else
+        // --- INTEL / AMD PC (SSE / AVX2) ---
+        using Float4 = __m128;
+
+        // MSVC/GCC will evaluate this at compile time for static consts
+        #define SIMD_CONST(val) _mm_set1_ps(val) 
+        // Intel intrinsic _mm_set_ps requires arguments in reverse (W, Z, Y, X) order!
+        #define SIMD_VEC(x, y, z, w) _mm_set_ps(w, z, y, x) 
+    #endif
+
+    // --- CORE ENGINE CONSTANTS ---
+    static const Float4 SIMD_ZERO     = SIMD_CONST(0x0.0p+0f);  //  0.0f
+    static const Float4 SIMD_ONE      = SIMD_CONST(0x1.0p+0f);  //  1.0f
+    static const Float4 SIMD_TWO      = SIMD_CONST(0x1.0p+1f);  //  2.0f
+    static const Float4 SIMD_NEG_ONE  = SIMD_CONST(-0x1.0p+0f); // -1.0f
+    static const Float4 SIMD_NEG_ZERO = SIMD_CONST(-0x0.0p+0f); // -0.0f
+
+    // Common Vector Masks
+    static const Float4 SIMD_MASK_W_ONE = SIMD_VEC(0x0.0p+0f, 0x0.0p+0f, 0x0.0p+0f, 0x1.0p+0f); // 0.0f, 0.0f, 0.0f, 1.0f
+
+    // FastSin Constants (Horner's Method)
+    static const Float4 SIN_C9 = SIMD_CONST(0x1.71de3ap-19f);  //  0.00000275573f  ( 1/9!)
+    static const Float4 SIN_C7 = SIMD_CONST(-0x1.a01a02p-13f); // -0.00019841269f  (-1/7!)
+    static const Float4 SIN_C5 = SIMD_CONST(0x1.111112p-7f);   //  0.00833333333f  ( 1/5!)
+    static const Float4 SIN_C3 = SIMD_CONST(-0x1.555556p-3f);  // -0.16666666667f  (-1/3!)
+    static const Float4 SIN_1  = SIMD_CONST(0x1.0p+0f);        //  1.0f
+
+    // FastACos Constants
+    static const Float4 ACOS_C3 = SIMD_CONST(-0x1.32d164p-6f); // -0.0187293f
+    static const Float4 ACOS_C2 = SIMD_CONST(0x1.302b1ap-4f);  //  0.0742610f
+    static const Float4 ACOS_C1 = SIMD_CONST(-0x1.b2694ep-3f); // -0.2121144f
+    static const Float4 ACOS_1  = SIMD_CONST(0x1.0p+0f);       //  1.0f
+
+    // FastCos Constants (Horner's Method)
+    static const Float4 COS_C8 = SIMD_CONST(0x1.a01a02p-16f);  //  0.00002480158f  ( 1/8!)
+    static const Float4 COS_C6 = SIMD_CONST(-0x1.6c16c2p-10f); // -0.00138888888f  (-1/6!)
+    static const Float4 COS_C4 = SIMD_CONST(0x1.555556p-5f);   //  0.04166666666f  ( 1/4!)
+    static const Float4 COS_C2 = SIMD_CONST(-0x1.000000p-1f);  // -0.5f            (-1/2!)
+    static const Float4 COS_1  = SIMD_CONST(0x1.0p+0f);        //  1.0f
+
+    // PI Constants
+    static const Float4 ACOS_C0 = SIMD_CONST(PI_HALF);         //  1.57079632679f
+    static const Float4 ACOS_PI = SIMD_CONST(PI);              //  3.14159265359f
+}
+
+namespace Engine::Math::SIMD {    
+    // DYNAMIC DISPATCH: Wire the engine to the silicon's maximum limit
     #ifdef MATH_ISA_ARM
         // --- ARM APPLE SILICON / MOBILE (NEON) ---
         using Float4 = float32x4_t;
@@ -68,6 +166,12 @@ namespace Engine::Math::SIMD {
         FORCE_INLINE float ExtractY(Float4 v) { return vgetq_lane_f32(v, 1); }
         FORCE_INLINE float ExtractZ(Float4 v) { return vgetq_lane_f32(v, 2); }
         FORCE_INLINE float ExtractW(Float4 v) { return vgetq_lane_f32(v, 3); }
+
+        // NEON allows broadcasting a specific lane directly from one register to another
+        FORCE_INLINE Float4 BroadcastX(Float4 v) { return vdupq_lane_f32(vget_low_f32(v), 0); }
+        FORCE_INLINE Float4 BroadcastY(Float4 v) { return vdupq_lane_f32(vget_low_f32(v), 1); }
+        FORCE_INLINE Float4 BroadcastZ(Float4 v) { return vdupq_lane_f32(vget_high_f32(v), 0); }
+        FORCE_INLINE Float4 BroadcastW(Float4 v) { return vdupq_lane_f32(vget_high_f32(v), 1); }
 
         FORCE_INLINE float Dot4(Float4 a, Float4 b) { return vaddvq_f32(vmulq_f32(a, b)); }
         FORCE_INLINE float Dot3(Float4 a, Float4 b) { 
@@ -162,11 +266,15 @@ namespace Engine::Math::SIMD {
             Transpose4(c0, c1, c2, c3);
         }
 
+        // ARM NEON Absolute Value and Square Root
+        FORCE_INLINE Float4 Abs(Float4 v) { return vabsq_f32(v); } // NEON has a dedicated absolute value instruction!
+        FORCE_INLINE Float4 Sqrt(Float4 v) { return vsqrtq_f32(v); }
+
         FORCE_INLINE Float4 CmpGt(Float4 a, Float4 b) { return vreinterpretq_f32_u32(vcgtq_f32(a, b)); }
         FORCE_INLINE Float4 CmpLt(Float4 a, Float4 b) { return vreinterpretq_f32_u32(vcltq_f32(a, b)); }
         FORCE_INLINE Float4 BitwiseAnd(Float4 a, Float4 b) { return vreinterpretq_f32_u32(vandq_u32(vreinterpretq_u32_f32(a), vreinterpretq_u32_f32(b))); }
         FORCE_INLINE Float4 BlendVariable(Float4 a, Float4 b, Float4 mask) { return vbslq_f32(vreinterpretq_u32_f32(mask), b, a); }
-        
+
         // Simulates Intel's _mm_movemask_ps by checking the high bit of each float
         FORCE_INLINE int MoveMask(Float4 v) {
             uint32x4_t mask = vreinterpretq_u32_f32(v);
@@ -179,7 +287,7 @@ namespace Engine::Math::SIMD {
         using Float4 = __m128;
 
         FORCE_INLINE Float4 Zero() { return _mm_setzero_ps(); }
-        FORCE_INLINE Float4 Set(float x, float y, float z, float w) { return _mm_set_ps(w, z, y, x); } // Note: _mm_set_ps takes arguments in reverse order (w, z, y, x)
+        FORCE_INLINE Float4 Set(float x, float y, float z, float w) { return _mm_set_ps(w, z, y, x); } // Pack all three required angles into a single 128-bit register. Note: _mm_set_ps takes arguments in reverse order (w, z, y, x). 
         FORCE_INLINE Float4 Set1(float v) { return _mm_set1_ps(v); } // Broadcasts scalar to all 4 slots        
         
         // ==============================
@@ -190,6 +298,8 @@ namespace Engine::Math::SIMD {
         FORCE_INLINE Float4 Add(Float4 a, Float4 b) { return _mm_add_ps(a, b); }
         FORCE_INLINE Float4 Sub(Float4 a, Float4 b) { return _mm_sub_ps(a, b); }
         FORCE_INLINE Float4 Mul(Float4 a, Float4 b) { return _mm_mul_ps(a, b); }
+
+        // _mm_fmadd_ps: requirees FMA3 instructions, which is part of AVX2, supported by almost all CPUs made after 2013.
         FORCE_INLINE Float4 FMAdd(Float4 a, Float4 b, Float4 c) { return _mm_fmadd_ps(a, b, c); } // (a * b) + c
 
     
@@ -215,6 +325,12 @@ namespace Engine::Math::SIMD {
         FORCE_INLINE float ExtractY(Float4 v) { return _mm_cvtss_f32(_mm_shuffle_ps(v, v, _MM_SHUFFLE(1, 1, 1, 1))); }  // Y requires a 1-cycle shuffle to move to lowest 32 bits before extraction.
         FORCE_INLINE float ExtractZ(Float4 v) { return _mm_cvtss_f32(_mm_shuffle_ps(v, v, _MM_SHUFFLE(2, 2, 2, 2))); }  // Z requires a 2-cycle shuffle to move to lowest 32 bits before extraction.
         FORCE_INLINE float ExtractW(Float4 v) { return _mm_cvtss_f32(_mm_shuffle_ps(v, v, _MM_SHUFFLE(3, 3, 3, 3))); }  // W requires a 3-cycle shuffle to move to lowest 32 bits before extraction.
+
+        // x86 uses shuffles to broadcast lanes without leaving the XMM registers
+        FORCE_INLINE Float4 BroadcastX(Float4 v) { return _mm_shuffle_ps(v, v, _MM_SHUFFLE(0, 0, 0, 0)); }
+        FORCE_INLINE Float4 BroadcastY(Float4 v) { return _mm_shuffle_ps(v, v, _MM_SHUFFLE(1, 1, 1, 1)); }
+        FORCE_INLINE Float4 BroadcastZ(Float4 v) { return _mm_shuffle_ps(v, v, _MM_SHUFFLE(2, 2, 2, 2)); }
+        FORCE_INLINE Float4 BroadcastW(Float4 v) { return _mm_shuffle_ps(v, v, _MM_SHUFFLE(3, 3, 3, 3)); }
 
         // ======================================
         // DOT PRODUCT INSTRUCTION (_mm_dp_ps)
@@ -279,19 +395,32 @@ namespace Engine::Math::SIMD {
             return _mm_sub_ps(_mm_mul_ps(tmp0, tmp1), _mm_mul_ps(tmp2, tmp3));
         }
 
-        FORCE_INLINE void Transpose4(Float4& r0, Float4& r1, Float4& r2, Float4& r3) {
-            // _MM_TRANSPOSE4_PS(r0, r1, r2, r3);
+        // =================================
+        // --- HARDWARE MATRIX TRANSPOSE ---
+        // =================================
+        /*
+            - Rendering APIs (OpenGL, Vulkan) require matrices to be formatted in Column-Major order.
+            - Instead of extracting 16 floats sequentially to memory to flip rows into columns, we use pure register unpacking and moves.
+            - This fuction mirrors Intel's _MM_TRANSPOSE4_PS(r0, r1, r2, r3) macros, but encapsulates it safely.
+        */
 
-            // Guarantees it modifies the passed in references, ensures compiler tracks the mutations correctly.
-            Float4 tmp0 = _mm_unpacklo_ps(r0, r1);
-            Float4 tmp2 = _mm_unpacklo_ps(r2, r3);
-            Float4 tmp1 = _mm_unpackhi_ps(r0, r1);
-            Float4 tmp3 = _mm_unpackhi_ps(r2, r3);
+         // Guarantees compiler properly tracks variable scopes and passed in references that were modified (i.e., ensures compiler tracks the mutations correctly).
+        FORCE_INLINE void Transpose4(/*Right Vector*/Float4& r0, /*Up Vector*/Float4& r1, /*Forward Vector*/Float4& r2, /*Translation*/Float4& r3) {
+            // _mm_unpacklo_ps takes lower two floats from both registers and zips them together (interleaved). 
+            Float4 tmp0 = _mm_unpacklo_ps(r0, r1); // r0 = (x0, y0, z0, w0), r1 = (x1, y1, z1, w1) -> tmp0 = [x0, x1, y0, y1]
+            Float4 tmp2 = _mm_unpacklo_ps(r2, r3); // r2 = (x2, y2, z2, w2), r3 = (x3, y3, z3, w3) -> tmp2 = [x2, x3, y2, y3]
 
-            r0 = _mm_movelh_ps(_mm_unpacklo_ps(tmp0, tmp2), tmp0);
-            r1 = _mm_movehl_ps(_mm_unpacklo_ps(tmp0, tmp2), tmp0);
-            r2 = _mm_movelh_ps(_mm_unpackhi_ps(tmp1, tmp3), tmp1);
-            r3 = _mm_movehl_ps(_mm_unpackhi_ps(tmp1, tmp3), tmp1);
+            // _mm_unpackhi_ps takes upper two floats from both registers and zips them together.
+            Float4 tmp1 = _mm_unpackhi_ps(r0, r1); // r0 = (x0, y0, z0, w0), r1 = (x1, y1, z1, w1) -> tmp1 = [z0, z1, w0, w1]
+            Float4 tmp3 = _mm_unpackhi_ps(r2, r3); // r2 = (x2, y2, z2, w2), r3 = (x3, y3, z3, w3) -> tmp3 = [z2, z3, w2, w3]
+ 
+            // 1. _mm_movelh_ps (Move Low to High) copies lower 64-bits (Low bits) of the second parameter (source register) into the upper 64-bits (High bits) of the first (destination register).
+            r0 = _mm_movelh_ps(tmp0, tmp2);  // [x0, x1] from tmp0, [x2, x3] from tmp2 -> r0 = [x0, x1, x2, x3] (Column 0)
+            r2 = _mm_movelh_ps(tmp1, tmp3);  // [z0, z1] from tmp1, [z2, z3] from tmp3 -> r2 = [z0, z1, z2, z3] (Column 2)
+
+            // _mm_movehl_ps (Move High to Low) copies upper 64-bits (High bits) of the second parameter (source register) into lower 64-bits (Low bits) of the first (destination register).
+            r1 = _mm_movehl_ps(tmp2, tmp0);  // High of tmp2 [y2, y3] into low, High of tmp0 [y0, y1] kept -> r1 = [y0, y1, y2, y3] (Column 1)
+            r3 = _mm_movehl_ps(tmp3, tmp1);  // High of tmp3 [w2, w3] into low, High of tmp1 [w0, w1] kept -> r3 = [w0, w1, w2, w3] (Column 3)
         }
 
         // Conjugate: Flip the sign bit of 3 floats (x, y, z) instantly using XOR (-x, -y, -z, w), but leaves w alone (i.e., inverse rotation).
@@ -302,7 +431,7 @@ namespace Engine::Math::SIMD {
 
         // Shortest Path: Flip the sign bit of all 4 floats instantly using XOR (-x, -y, -z, -w) to represent the same 3D orientation in space, but sit on opposite poles of the 4D hypersphere's surface.
         FORCE_INLINE Float4 Negate(Float4 v) { 
-            return _mm_xor_ps(v, _mm_set1_ps(-0.0f)); 
+            return _mm_xor_ps(v, _mm_set1_ps(Engine::Math::Constants::SIMD_NEG_ZERO)); // Instant XOR, no runtime broadcast
         }
 
         // Q1 = this (a, b, c, d) | Q2 = rhs (x, y, z, w)
@@ -424,8 +553,88 @@ namespace Engine::Math::SIMD {
         FORCE_INLINE Float4 CmpLt(Float4 a, Float4 b) { return _mm_cmplt_ps(a, b); }
         FORCE_INLINE Float4 BitwiseAnd(Float4 a, Float4 b) { return _mm_and_ps(a, b); }
         FORCE_INLINE Float4 BlendVariable(Float4 a, Float4 b, Float4 mask) { return _mm_blendv_ps(a, b, mask); }
+
+        // Intel SSE Absolute Value (Bitwise clear of the sign bit) and Square Root
+        FORCE_INLINE Float4 Abs(Float4 v) { 
+            __m128 absMask = _mm_castsi128_ps(_mm_set1_epi32(0x7FFFFFFF));
+            return _mm_and_ps(v, absMask); 
+        }
+
+        FORCE_INLINE Float4 Sqrt(Float4 v) { return _mm_sqrt_ps(v); }
+
         FORCE_INLINE int MoveMask(Float4 v) { return _mm_movemask_ps(v); }
     #endif
+
+    // ======================================================================
+    // TRANSCENDENTAL APPROXIMATION (TAYLOR/MINIMAX POLYNOMIAL EXPANSION)
+    // ======================================================================
+    /*
+        [std::sine]: ~50 cycles
+
+        - Use Horner's Method to factor the polynomial, which minimizes the number of multiplications and allows the CPU to pipeline the math perfectly.
+
+          Horner's Method: x * (1 + x^2 * (C3 + x^2 * (C5 + x^2 * (C7 + x^2 * C9))))
+
+        - Calculates the sine of 4 separate angles simultaneously in ~20 cycles.
+        - Drastically improves performance compared to [std::sine].
+    */
+    // Pure SIMD 9th-Order Polynomial Approximation of Sine.
+    // Valid for angles in radians between [-PI, PI]. Extremely fast.
+    FORCE_INLINE Float4 FastSin(Float4 x) {
+        Float4 x2 = Mul(x, x); // x^2
+
+        // 2. Execute Horner's Method purely between existing SIMD registers
+        Float4 res = FMAdd(x2, SIN_C9, SIN_C7); // C9  * x^2 + C7
+        res = FMAdd(res, x2, SIN_C5);           // res * x^2 + C5
+        res = FMAdd(res, x2, SIN_C3);           // res * x^2 + C3
+        res = FMAdd(res, x2, SIN_1);            // res * x^2 + 1.0                      
+
+        return Mul(res, x); // Final multiplication by x
+    }
+
+    // ======================================================================
+    // TRANSCENDENTAL APPROXIMATION (POLYNOMIAL APPROXIMATION (Arccosine))
+    // ======================================================================
+    /*
+        - Derived from Nvidia CG Toolkit.
+        - Max absolute error: ~0.0001 radians.
+    */
+    FORCE_INLINE Float4 FastACos(Float4 x) {
+        // Absolute value of x
+        Float4 absX = Abs(x);
+
+        // Horner's Method: C0 + x * (C1 + x * (C2 + x * C3))
+        Float4 res = FMAdd(absX, ACOS_C3, ACOS_C2);  // C3  * x + C2
+        res = FMAdd(res, absX, ACOS_C1);             // res * x + C1
+        res = FMAdd(res, absX, ACOS_C0);             // res * x + C0 (Pi/2)
+
+        // 3. Sqrt and blend [res = (res * sqrt(1.0 - absX))]
+        Float4 oneMinusX = Sub(ACOS_1, absX);
+        Float4 sqrtOneMinusX = Sqrt(oneMinusX);
+        res = Mul(res, sqrtOneMinusX);
+
+        // If x is negative, the result is Pi - res
+        Float4 resNeg = Sub(ACOS_PI, res);
+
+        // Blend based on original sign of x, if x < 0.0, use (Pi - res), else use res
+        Float4 cmpLtZero = CmpLt(x, Zero());
+        return BlendVariable(res, resNeg, cmpLtZero);
+    }
+
+    // ======================================================================
+    // Pure SIMD 8th-Order Polynomial Approximation of Cosine.
+    // ======================================================================
+    FORCE_INLINE Float4 FastCos(Float4 x) {
+        Float4 x2 = Mul(x, x); // x^2
+
+        // Horner's Method: 1 + x^2 * (C2 + x^2 * (C4 + x^2 * (C6 + x^2 * C8)))
+        Float4 res = FMAdd(x2, COS_C8, COS_C6); // C8  * x^2 + C6
+        res = FMAdd(res, x2, COS_C4);           // res * x^2 + C4
+        res = FMAdd(res, x2, COS_C2);           // res * x^2 + C2
+        res = FMAdd(res, x2, COS_1);            // res * x^2 + 1.0                      
+
+        return res;
+    }
 } // namespace Engine::Math::SIMD
 
 // ==================================================================================
@@ -514,13 +723,18 @@ public:
 };
 
 // ==================================================================================
-// 128-BIT ACCELERATED VECTORS (CROSS-PLATFORM)
+// 128-BIT SIMD ACCELERATED VECTORS (CROSS-PLATFORM: SSE, ARM)
 // ==================================================================================
 /* 
     - SIMD Accelerated Vector that needs to be used for bulk data processing.
     - SIMD Vectors must perform math operations on all its available lanes (4, 8, 16) simultaneously in hardware registers.
     - alignas(16) forces every instance of this class to align to 16 bytes (This tells the compiler: "Every instance of this class must start at a 16-byte boundary in memory").
     - Guarantees that whenever this struct is created, it starts on a 16-byte boundary.
+
+      // Usage is clean and readable
+      SIMDVector3D a(1.0f, 0.0f, 0.0f);
+      SIMDVector3D b(0.0f, 1.0f, 0.0f);
+      SIMDVector3D c = a + (b * 5.0f); // Completely optimized into registers by the compiler
 */
 class alignas(16) SIMDVector3D {
 public:
@@ -680,7 +894,7 @@ struct alignas(16) SIMDQuaternion {
         - It then normalizes the result to snap it back to the surface of the sphere.
         - Uses pure SIMD addition and multiplcation (i.e., ultra-fast).
         - Causes the camera's rotational speed to accelerate and decelerate slightly between waypoints (i.e., velocity is not constant since the rotation speeds up slightly in the middle of interpolation and slows down at the ends).
-        - e.g., 90% of gameplay logic, general gameplay rotation, microscopic adjustments, making an AI smoothly turn to face the player, snapping the camera behind the player's back.
+        - e.g., 99% of gameplay (bullet physics, character spines, hitboxes), general gameplay rotation, microscopic adjustments, making an AI smoothly turn to face the player, snapping the camera behind the player's back.
         - e.g. useful as a Slerp fallback when an angle between two quaternions is incredibly small or nearly identical to prevent Slerp formula from dividing by sin(0) which leads to NaN.
     */
     static FORCE_INLINE SIMDQuaternion NLerp(const SIMDQuaternion& q1, const SIMDQuaternion& q2, float t) {
@@ -716,42 +930,63 @@ struct alignas(16) SIMDQuaternion {
         - e.g., rotational speed will be smooth from start to finish for a camera panning between two targets.
         - e.g., used for implementing smooth camera controls, cinematic splines, or AI rotation targeting (making AI entities slowly turn towards the player).
         - e.g., cinematic camera sweeps, interpolating keyframes in skeletal animation like smoothly rotating a joint between two distant animation frames.
+        - e.g., slow-motion sniper bullet camera.
     */
-    static FORCE_INLINE SIMDQuaternion Slerp(const SIMDQuaternion& q1, const SIMDQuaternion& q2, float t) {
+   static FORCE_INLINE SIMDQuaternion Slerp(const SIMDQuaternion& q1, const SIMDQuaternion& q2, float t) {
         float cosOmega = q1.dot(q2);
         Engine::Math::SIMD::Float4 q2Reg = q2.reg;
 
-        // 1. SHORTEST PATH ENFORCEMENT
-        // If the dot product is negative, the quaternions point to opposite hemispheres.
-        // We flip Q2 to force the camera to take the shortest physical rotation path.
+        // 1. SHORTEST PATH ENFORCEMENT: If the dot product is negative, the quaternions point to opposite hemispheres.
         if (cosOmega < 0.0f) {
+            // We flip Q2 to force the camera to take the shortest physical rotation path.
             cosOmega = -cosOmega;
+
             // Enforce shortest path by flipping ALL signs (X, Y, Z, W)
-            q2Reg = Engine::Math::SIMD::Negate(q2Reg);
+            q2Reg = Engine::Math::SIMD::Negate(q2Reg); 
         }
 
-        // 2. GIMBAL / PRECISION FALLBACK
-        // If the quaternions are nearly identical (angle is basically 0), 
-        // division by sin(Omega) will cause a NaN explosion. Fallback to N-Lerp.
+        // 2. GIMBAL / PRECISION FALLBACK: If the quaternions are nearly identical (angle is basically 0), division by sin(Omega) will cause a NaN explosion. Fallback to N-Lerp.
         if (cosOmega > 0.9999f) {
+            // Linear Interpolation (res = q1*(1-t) + q2*t)
             Engine::Math::SIMD::Float4 tReg = Engine::Math::SIMD::Set1(t);
             Engine::Math::SIMD::Float4 oneMinusT = Engine::Math::SIMD::Sub(Engine::Math::SIMD::Set1(1.0f), tReg);
-            SIMDQuaternion result(Engine::Math::SIMD::Add(Engine::Math::SIMD::Mul(q1.reg, oneMinusT), Engine::Math::SIMD::Mul(q2Reg, tReg)));
+            SIMDQuaternion result(Engine::Math::SIMD::Add(
+                Engine::Math::SIMD::Mul(q1.reg, oneMinusT),
+                Engine::Math::SIMD::Mul(q2Reg, tReg)
+            ));
+            // 3. Normalize to snap it back to the rotation sphere
             result.Normalize();
             return result;
         }
 
-        // --- SPHERICAL MATH--- 
+        // --- SPHERICAL MATH (TRANSCENDENTALS: SINE/COS) --- 
 
-        // 3. Extract the angle (Omega)
-        float omega = std::acos(cosOmega);
-        float invSinOmega = 1.0f / std::sin(omega);
+        // 3. Extract the angle (Omega) using Fast SIMD Arccosine. We broadcast cosOmega into a register, and evaluate it instantly.
+        Engine::Math::SIMD::Float4 cosOmegaReg = Engine::Math::SIMD::Set1(cosOmega);
+        Engine::Math::SIMD::Float4 omegaReg = Engine::Math::SIMD::FastACos(cosOmegaReg);
 
-        // 4. Calculate the transcendental weights
-        float weight0 = std::sin((1.0f - t) * omega) * invSinOmega;
-        float weight1 = std::sin(t * omega) * invSinOmega;
+        // 4. BATCHED SIMD SINE EVALUATION (Zero Load-Hit-Store)
 
-         // 5. SIMD RE-ASSEMBLY [res = (q1 * w0) + (q2 * w1)]
+        // To build this without LHS (Load-Hit-Store) packing, we use the Set command ONCE with scalars, then multiply the entire register by omegaReg.
+        Engine::Math::SIMD::Float4 multiplierReg = Engine::Math::SIMD::Set(1.0f, (1.0f - t), t, 0.0f);  // We need a register formatted as: [ omega, (1-t), t, 0.0 ]
+        Engine::Math::SIMD::Float4 angles = Engine::Math::SIMD::Mul(omegaReg, multiplierReg); // angles = [ omega*1, omega*(1-t), omega*t, 0.0 ]
+
+        // Evaluate all 3 sines simultaneously in ~20 clock cycles
+        Engine::Math::SIMD::Float4 sines = Engine::Math::SIMD::FastSin(angles);
+
+        // Extract the evaluated sines ONLY when we absolutely must build the final weights
+        float sinOmega       = Engine::Math::SIMD::ExtractX(sines);
+        float sinOneMinusT   = Engine::Math::SIMD::ExtractY(sines);
+        float sinT           = Engine::Math::SIMD::ExtractZ(sines);
+
+        // 5. Calculate weights using the extracted sines
+        float invSinOmega = 1.0f / sinOmega;
+
+        // 6. Calculate the transcendental weights
+        float weight0 = sinOneMinusT * invSinOmega;
+        float weight1 = sinT * invSinOmega;
+
+        // 7. SIMD RE-ASSEMBLY [res = (q1 * w0) + (q2 * w1)]
         Engine::Math::SIMD::Float4 res = Engine::Math::SIMD::Add(
             Engine::Math::SIMD::Mul(q1.reg, Engine::Math::SIMD::Set1(weight0)), 
             Engine::Math::SIMD::Mul(q2Reg, Engine::Math::SIMD::Set1(weight1))
@@ -761,18 +996,20 @@ struct alignas(16) SIMDQuaternion {
     }
 
     // --- ANGLE AXIS CONVERSION ---
-    // This is the ONLY time we use Trigonometry. Used when converting mouse/keyboard input to a rotation.
+    // Converts a normalized 3D axis and an angle into a Quaternion. Used when converting mouse/keyboard input to a rotation.
     static FORCE_INLINE SIMDQuaternion AngleAxis(float angleDegrees, const SIMDVector3D& axis) {
-        float halfAngleRad = (angleDegrees * (std::numbers::pi_v<float> / 180.0f)) * 0.5f;
-        
-        // Multiply the normalized axis by sin(half_angle)
-        Engine::Math::SIMD::Float4 sinVec = Engine::Math::SIMD::Set1(std::sin(halfAngleRad));
-        Engine::Math::SIMD::Float4 axisScaled = Engine::Math::SIMD::Mul(axis.reg, sinVec);
+        using namespace Engine::Math::SIMD;
 
-        // Blend the Cosine value into the W lane (mask 0x08 = 1000 binary)
-        Engine::Math::SIMD::Float4 wCos = Engine::Math::SIMD::Set(0.0f, 0.0f, 0.0f, std::cos(halfAngleRad));
+        float halfAngleRad = angleDegrees * Engine::Math::Constants::DEG_TO_RAD * 0.5f;
         
-        return SIMDQuaternion(Engine::Math::SIMD::BlendMaskW(axisScaled, wCos));
+        // 1. Multiply the normalized axis by sin(half_angle)
+        Float4 sinVec = Set1(std::sin(halfAngleRad));
+        Float4 axisScaled = Mul(axis.reg, sinVec);
+
+        // 2. Insert the Cosine value directly into the W lane! Skips the Blend instruction.
+        Float4 result = InsertW(axisScaled, std::cos(halfAngleRad));
+        
+        return SIMDQuaternion(result);
     }
 
     // --- THE HAMILTON PRODUCT (SIMD QUATERNION MULTIPLICATION) ---
@@ -801,8 +1038,8 @@ struct alignas(16) SIMDQuaternion {
         // 1. Mask out W (Force it to 0.0) to get purely the imaginary (x,y,z) axis
         SIMDVector3D qVec(Engine::Math::SIMD::BlendMaskW(reg, Engine::Math::SIMD::Zero()));
 
-        // 2. Broadcast the Real (w) component across all lanes
-        Engine::Math::SIMD::Float4 wReg = Engine::Math::SIMD::Set1(w());
+        // 2. Broadcast the Real (w) component natively within the registers!
+        Float4 wReg = BroadcastW(reg);
         
         // 3. V' = V + 2w(Q_xyz x V) + 2(Q_xyz x (Q_xyz x V))
         SIMDVector3D t = qVec.cross(v) * 2.0f;
@@ -834,9 +1071,9 @@ struct alignas(16) SIMDQuaternion {
     // Converts human-readable Euler Angles [Pitch (X), Yaw (Y), Roll (Z) in degrees] into quaternions.
     static FORCE_INLINE SIMDQuaternion FromEuler(float pitch, float yaw, float roll) {
         // Level-editors, player controller, or camera script will provide rotations in standard euler angles (pitch, yaw, roll). 
-        float p = (pitch * (std::numbers::pi_v<float> / 180.0f)) * 0.5f;
-        float y = (yaw * (std::numbers::pi_v<float> / 180.0f)) * 0.5f;
-        float r = (roll * (std::numbers::pi_v<float> / 180.0f)) * 0.5f;
+        float p = pitch * Engine::Math::Constants::DEG_TO_RAD * 0.5f;
+        float y = yaw   * Engine::Math::Constants::DEG_TO_RAD * 0.5f;
+        float r = roll  * Engine::Math::Constants::DEG_TO_RAD * 0.5f;
 
         float sp = std::sin(p); float cp = std::cos(p);
         float sy = std::sin(y); float cy = std::cos(y);
@@ -851,6 +1088,50 @@ struct alignas(16) SIMDQuaternion {
     }
 };
 
+// ==================================================================================
+// MATRICES & INTERPOLATION (AVOID SCALAR-TO-SIMD TRANSITION PENALTY)
+// ==================================================================================
+/*
+    - Modern CPUs have distinct execution units and register files.
+
+        1. Floating Point Unit (FPU) is used for scalar math that handles one floating-point operation at a time (e.g., A = B + C) with its own set of scalar registers.
+        2. Vector Units (VU) are used for SIMD math that is designed to handle multiple data points simultaneously (e.g., 4, 8, or 16 floats) with its own separate set of wider registers (e.g., __m128: XMM, __m256: YMM).
+        
+    - When dealing with a single entity (or struct), packing scalar data (e.g., "float data[4]") into 128 bit SSE registers actually hurts performance (i.e., Load-Hit-Store / Shuffle Penalty).
+    - CPU wastes clock cycles shuffling the data from the FPU, packing it into the Vector Units (or SSE registers) for the cross product and then unpacking it again for the entity (e.g., Vector3DStack).
+
+        1. Loads 4 separate floats (x, y, z, w) from memory (or scalar registers).
+        2. Pack them into into 128-bit SIMD registers (i.e., slow).
+        3. Perform the SIMD math.
+        4. Unpack (or extract) the resultant floats back out of the SIMD registers and store it into scalar variables (i.e., slow).
+
+    - Takes more clock cycles to perform the packing and unpacking than just doing three multiplications and subtractions on the standard FPU.
+    - Never mix pure scalars (e.g., float) with SIMD registers (e.g., __m128).
+
+      // Rips the data out of the fast SIMD lanes and places it into the slow lanes and places it back into the fast lane (SIMD -> Scalar -> SIMD).
+      static FORCE_INLINE Matrix4x4_SIMD TRS(const SIMDQuaternion& rotation) {
+            // Extracts the 4 (32-bit) floats out of the 128-bit SIMDQuaternion register and puts it into 4 scalar registers (SIMD -> Scalar, slow).
+            float x2 = rotation.x();
+            float xx = rotation.x();
+            float yy = rotation.y();
+            float wx = rotation.w();
+
+            // Extracts the 3 (32-bit) floats out of the 128-bit SIMDQuaternion register and puts it into 3 scalar registers (SIMD -> Scalar, slow).
+            float sx = scale.x();
+            float sy = scale.y();
+            float sz = scale.z();
+
+            // 3. The Re-packing Bottleneck (Scalar -> SIMD, slow)
+            mat.col[0] = Engine::Math::SIMD::Set((1.0f - (yy + zz)) * sx, (xy + wz) * sx, (xz - wy) * sx, 0.0f);
+      }
+
+    - In modern CPU architectures, the processor is heavily pipelined (i.e., means it has different dedicated lanes or pathways for different types of data).
+    - SIMD pipeline is designed to handle 128-bit registers (e.g., SIMDQuaternion).
+    - Scalar pipeline is a narrow lane designed to handle single, 32-bit floats.
+    - Memory controller is a pathway that moves data to and from L1/L2 caches and RAM.
+    - Load-Hit-Store penalties occur when code forces the CPU to move data between the SIMD pipeline and Scalar pipeline (SIMD -> Scalar -> SIMD).
+*/
+
 /*
     // Storing data in an array of floats inside a struct that is meant to be used for SIMD is an anti-pattern (i.e., Load-Hit-Store penalty).
     class Vector3DStack {
@@ -860,14 +1141,26 @@ struct alignas(16) SIMDQuaternion {
         // Constructor: Default initializes to {0, 0, 0, 0}
         Vector3DStack(float x = 0.0f, float y = 0.0f, float z = 0.0f) : data{x, y, z, 0.0f} {}
 
-        // Addition: C = A + B (Load-Hit-Store penalty)
-        FORCE_INLINE Vector3DStack operator+(const Vector3DStack& other) const {
+        // Cross Product: v = <(y1 * z2) - (z1 * y2), (z1 * x2) - (x1 * z2), (x1 * y2) - (y1 * x2)> (Load-Hit-Store penalty)
+        FORCE_INLINE Vector3DStack cross(const Vector3DStack& other) const {
             Vector3DStack result;
             
-            __m128 v1 = _mm_load_ps(this->data);
-            __m128 v2 = _mm_load_ps(other.data);
-            _mm_store_ps(result.data, _mm_add_ps(v1, v2));
+            // 1. Loads 8 separate floats (x, y, z, w) from memory (or scalar registers).
+            __m128 a = _mm_load_ps(this->data);
+            __m128 b = _mm_load_ps(other.data);
 
+            // 2. Pack them into into 4 (128-bit) SIMD registers (i.e., slow)
+            __m128 tmp0 = _mm_shuffle_ps(a, a, _MM_SHUFFLE(3, 0, 2, 1));
+            __m128 tmp1 = _mm_shuffle_ps(b, b, _MM_SHUFFLE(3, 1, 0, 2));
+            __m128 tmp2 = _mm_shuffle_ps(a, a, _MM_SHUFFLE(3, 1, 0, 2));
+            __m128 tmp3 = _mm_shuffle_ps(b, b, _MM_SHUFFLE(3, 0, 2, 1));
+
+            // 3. Perform the SIMD math.
+            __m128 res = _mm_sub_ps(_mm_mul_ps(tmp0, tmp1), _mm_mul_ps(tmp2, tmp3));
+
+            // 4. Unpack (or extract) the resultant floats back out of the SIMD registers and store it into scalar variables (i.e., slow).
+            _mm_store_ps(result.data, res);
+            
             return result;
         }
 
@@ -882,13 +1175,21 @@ struct alignas(16) SIMDQuaternion {
 // SIMD 4x4 MATRIX (CROSS-PLATFORM)
 // ==================================================================================
 /* 
-    - A 4x4 matrix should not be a raw array of 16 floats because every operation would require _mm_load_ps to fetch from memory and _mm_store_ps to save the result (i.e., Load-Hit-Store penalty).
-    - Instead it should be an array of four 128-bit SIMD registers to keep camera math on the silicon.
+    - A SIMD 4x4 matrix struct should not contain a raw array of 16 floats because every operation would require _mm_load_ps to fetch from memory and _mm_store_ps to save the result (i.e., Load-Hit-Store penalty).
+    - To solve this, never leave SIMD registers (Matrix4x4_SIMD and SIMDVector3D are always 128-bit SIMD registers). 
+    - Instead it should be an array of four 128-bit SIMD registers to keep our camera math on the silicon.
+
+      1. Load the camera data into an SSE register.
+      2. Once the camera's position is loaded (or enters) a SIMD register it should stay there for its entire mathematical lifecycle.
+      3. Perform all LookAt, Projection and View Matrix math inside SIMD (SSE).
+      4. Only extract the data when pushing it to the GPU via uniform buffers.
+
+    - Matrix4x4_SIMD uses full 128-bit width of the SSE registers.
     - Allocates 4 (128-bit) hardware execution registers inside the CPU.
     - 4 x 128 = 512-bits = 64-bytes (perfectly fits in cache).
 */
 struct alignas(64) Matrix4x4_SIMD {
-    // 4 columns, each taking up exactly one 128-bit register
+    // 4 columns, each taking up exactly one 128-bit register, guarantees that once data enters the Vector Units, it stays in it.
     Engine::Math::SIMD::Float4 col[4];
 
     // Creates a blank slate matrix (No rotation, no scale, at origin 0,0,0).
@@ -931,12 +1232,52 @@ struct alignas(64) Matrix4x4_SIMD {
         // Returns the fully inverted matrix
         return inv;
     }
-    
 
-    // Creates a Perspective Projection Matrix
+    // =====================================================
+    // --- 2D ORTHOGRAPHIC RENDERING (PROJECTION MATRIX) ---
+    // =====================================================
+    /*
+        - Objects remain the exact same size regardless of how far they are from the camera. 
+        - Parallel lines remain perfectly parallel forever; they never converge (i.e., no concept of vanishing points).
+        - The Z coordinate is used strictly to determine rendering order (which object is drawn on top of the other), but is never used to scale or warp the X and Y coordinates.
+        - The viewable area is shaped like a perfect rectangular box (i.e., a rectangular prism).
+        - Critical for rendering 2D UI (e.g., text, minimaps, crosshairs, etc..)
+        - Used for rendering the scene from the sun's perspective when calculating Shadow Maps (shadows casted by directional light).
+    */
+
+    // Orthographic Projection Matrix
+    static FORCE_INLINE Matrix4x4_SIMD Orthographic_SIMD(float left, float right, float bottom, float top, float nearZ, float farZ) {
+        Matrix4x4_SIMD mat;
+        
+        float invRL = 1.0f / (right - left);
+        float invTB = 1.0f / (top - bottom);
+        float invFN = 1.0f / (farZ - nearZ);
+
+        using namespace Engine::Math::SIMD;
+        
+        mat.col[0] = Set(2.0f * invRL, 0.0f, 0.0f, 0.0f);    // Col 0: Right (X scale)
+        mat.col[1] = Set(0.0f, 2.0f * invTB, 0.0f, 0.0f);    // Col 1: Up (Y scale)
+        mat.col[2] = Set(0.0f, 0.0f, -2.0f * invFN, 0.0f);   // Col 2: Forward (Z scale)
+        mat.col[3] = Set(-(right + left) * invRL, -(top + bottom) * invTB, -(farZ + nearZ) * invFN, 1.0f);  // Col 3: Translation offsets
+
+        return mat;
+    }
+
+    // ====================================================
+    // --- 3D PERSPECTIVE RENDERING (PROJECTION MATRIX) ---
+    // ====================================================
+    /*
+        - Mimics how the way human eyes and camera lenses perceive the real world (i.e., objects appear smaller the further they are away from the camera).
+        - Parallel lines appear to converge at a vanishing point on the horizon.
+        - X and Y coordinates of a vertex are divided by its Z coordinate (depth) to shrink the object (i.e., perspective divide).
+        - A frustum is the viewable area that is shaped like a truncated pyramid, the near plane is small (right in front of camera), the far plane is massive (stretches out to the horizon).
+        - Used for 99% of games (first-person shooters, third-person action games, racing games, VR, etc..) to create a realistic and immersive 3D world feel for the player. 
+    */
+
+    // Perspective Projection Matrix
     static FORCE_INLINE Matrix4x4_SIMD Perspective_SIMD(float fovY_degrees, float aspect, float nearZ, float farZ) {
         Matrix4x4_SIMD mat;
-        float fovY_rad = fovY_degrees * (std::numbers::pi_v<float> / 180.0f);
+        float fovY_rad = fovY_degrees * Engine::Math::Constants::DEG_TO_RAD;
         float tanHalfFovY = std::tan(fovY_rad / 2.0f);
 
         float m00 = 1.0f / (aspect * tanHalfFovY);
@@ -953,33 +1294,52 @@ struct alignas(64) Matrix4x4_SIMD {
         return mat;
     }
 
+    // ============================================
+    // --- STANDARD VIEW MATRIX (32-BIT FLOATS) ---
+    // ============================================
+    /*
+        - Rotation + Translation
+        - Builds a 4x4 matrix containing both the rotation and translation.
+        - Used for 95% of standard games where the world is reasonably sized (under a few kilometers across) and constraied to 32-bit floats.
+        - e.g., arena shooters, platformers, fighting games.
+    */
+
     static FORCE_INLINE Matrix4x4_SIMD LookAt_SIMD(const SIMDVector3D& eye, const SIMDVector3D& target, const SIMDVector3D& upVec) {
-        SIMDVector3D f = (target - eye).asDirection();
+        // 1. Forward Vector (Z)
+        SIMDVector3D f = (target - eye).asDirection(); // Force W=0.0f
         float fLenSq = f.dot(f);
         if (fLenSq > 1e-8f) f = f * (1.0f / std::sqrt(fLenSq));
 
+        // 2. Right Vector (X)
         SIMDVector3D r = f.cross(upVec).asDirection();
         float rLenSq = r.dot(r);
         if (rLenSq > 1e-8f) r = r * (1.0f / std::sqrt(rLenSq));
 
+        // 3. Up Vector (Y)
         SIMDVector3D u = r.cross(f).asDirection();
 
-        // Negate Forward for Right-Handed coordinates
+        // 4. Negate Forward vector for Right-Handed coordinates (i.e., required for Right-Handed Coordinate Systems like OpenGL).
         Engine::Math::SIMD::Float4 negF = Engine::Math::SIMD::Mul(f.reg, Engine::Math::SIMD::Set1(-1.0f));
 
+        // 5. Calculate Translation Vector
+        // Standard View Matrix translation is: [-dot(R, eye), -dot(U, eye), dot(F, eye)]
         float tx = -r.dot(eye);
         float ty = -u.dot(eye);
         float tz = f.dot(eye); 
+
+        // 6. Pack into a single register for the 4th column.
         Engine::Math::SIMD::Float4 translation = Engine::Math::SIMD::Set(tx, ty, tz, 1.0f);
 
-        Engine::Math::SIMD::Float4 row0 = r.reg;
-        Engine::Math::SIMD::Float4 row1 = u.reg;
-        Engine::Math::SIMD::Float4 row2 = negF;
-        Engine::Math::SIMD::Float4 row3 = Engine::Math::SIMD::Set(0.0f, 0.0f, 0.0f, 1.0f);
+        // 7. Setup rows for Hardware Transposition
+        Engine::Math::SIMD::Float4 row0 = r.reg;   // { Rx, Ry, Rz, 0 }
+        Engine::Math::SIMD::Float4 row1 = u.reg;   // { Ux, Uy, Uz, 0 }
+        Engine::Math::SIMD::Float4 row2 = negF;    // {-Fx,-Fy,-Fz, 0 }
+        Engine::Math::SIMD::Float4 row3 = Engine::Math::Constants::SIMD_MASK_W_ONE; // { 0,  0,  0,  1 } Instant Load
 
-        // Hardware Transpose
+        // Hardware Transpose flips the 3x3 rotation axes into Column-Major format instantly.
         Engine::Math::SIMD::Transpose4(row0, row1, row2, row3);
 
+        // 8. Store the columns, overwriting the transposed 4th column with our calculated translation.
         Matrix4x4_SIMD mat;
         mat.col[0] = row0;
         mat.col[1] = row1;
@@ -988,42 +1348,174 @@ struct alignas(64) Matrix4x4_SIMD {
         return mat;
     }
 
-    // Converts ECS TransformComponent vectors and quaternions into the 4x4 matrices required for GPU APIs (i.e., Vulkan, OpenGL, DirectX 12).
+    // ============================================================
+    // --- LARGE WORLD COORDINATES VIEW MATRIX (64-BIT DOUBLES) ---
+    // ============================================================
+    /*
+        - Rotation
+        - View matrix longer needs translation with camera-relative rendering, only handles rotation.
+        - No translation b/c the camera is never moved and stays bolted to the center of the universe at (0.0, 0.0, 0.0) making it camera-relative.
+
+          1. Before rendering, the engine takes every object in the game.
+          2. Subtracts the camera's 64-bit world position from the object's 64-bit world position.
+          3. Builds the object's ModelMatrix using that new relative position (i.e., camera-relative position). 
+          4. Because every object is dynamically shifted to be be drawn relative to the camera, the camera's ViewMatrix does not need to contain any translation data. 
+
+        - It only needs to handle rotations (i.e., where the player is looking).
+        - Inputs are Vector3DWorld (double), but the matrix is float.
+        - Is the Approaching Zero Overhead (AZDO) / Open-World camera view matrix.
+        - Used for massive open-world games that span 50,000 kilometers! Standard 32-bit floats will fail and cause models to warp and jitter.
+    */
+
+    // --- LWC CAMERA-RELATIVE RENDERING LOOK-AT ---
+    static FORCE_INLINE Matrix4x4_SIMD LookAtLWC_SIMD(const Vector3DWorld& eye, const Vector3DWorld& target, const SIMDVector3D& upVec) {
+        
+        // 1. Calculate the forward vector in 64-bit space to prevent floating-point jitter at massive distances
+        Vector3DWorld worldForward = target - eye;
+        
+        // 2. Cast down to 32-bit float for the math. 
+        // Because it's a directional vector (difference), the cast is perfectly safe!
+        SIMDVector3D f = worldForward.toFloatVector();
+        
+        // Use your fast SIMD dot product to normalize forward vector
+        float fLenSq = f.dot(f);
+        if (fLenSq > 1e-8f) {
+            f = f * (1.0f / std::sqrt(fLenSq));
+        }
+
+        // 3. Right Vector (X) - SIMD Cross Product
+        SIMDVector3D r = f.cross(upVec).asDirection();
+        float rLenSq = r.dot(r);
+        if (rLenSq > 1e-8f) {
+            r = r * (1.0f / std::sqrt(rLenSq));
+        }
+
+        // 4. Up Vector (Y) - SIMD Cross Product
+        SIMDVector3D u = r.cross(f).asDirection();
+
+        // 5. Negate Forward vector for Right-Handed coordinates systems
+        Engine::Math::SIMD::Float4 negF = Engine::Math::SIMD::Mul(f.reg, Engine::Math::SIMD::Set1(-1.0f));
+
+        // 6. Build Row vectors (Force W=0 for X,Y,Z rows, W=1 for Translation row)
+        Engine::Math::SIMD::Float4 row0 = r.reg;        // { Rx, Ry, Rz, 0 }
+        Engine::Math::SIMD::Float4 row1 = u.reg;        // { Ux, Uy, Uz, 0 }
+        Engine::Math::SIMD::Float4 row2 = negF;         // {-Fx,-Fy,-Fz, 0 }
+        Engine::Math::SIMD::Float4 row3 = Engine::Math::Constants::SIMD_MASK_W_ONE; // { 0,  0,  0,  1 } Instant Load
+
+        // 7. Hardware Transpose flips our rows into Column-Major format in-place!
+        Engine::Math::SIMD::Transpose4(row0, row1, row2, row3);
+
+        // 8. Store the transposed registers directly into the matrix columns.
+        Matrix4x4_SIMD mat;
+        mat.col[0] = row0;
+        mat.col[1] = row1;
+        mat.col[2] = row2;
+        
+        // 9. ZERO TRANSLATION!
+        // Because every object will be rendered relative to the camera, the camera is always at (0,0,0).
+        // Row 3 after transpose contains the translation data, we overwrite it with [0,0,0,1].
+        mat.col[3] = Engine::Math::SIMD::Set(0.0f, 0.0f, 0.0f, 1.0f);
+
+        return mat;
+    }
+
+    // ==================================
+    // --- MODEL MATRIX BUILDER (TRS) ---
+    // ==================================
+    /*
+        - M = Translation * Rotation * Scale 
+
+          1. Scale the object first (so you don't accidentally scale the translation distance).
+          2. Rotate the object second (so it rotates around its own local center).
+          3. Translate (move) the object last, putting in its final position in the world.
+
+        - Formula for placing an object in a 3D world.
+        - Converts ECS TransformComponent (SIMDVector3D and SIMDQuaternion) into the Matrix4x4_SIMD format that the GPU demands (i.e., Vulkan, OpenGL, DirectX 12).
+        - When a 3D artist models a character or a tree in Blender or Maya, they usually model it centered eactly at the grid origin (0, 0, 0).
+        - The raw vertex inside the (.obj) and (.gltf) file reflects those exact coordinates.
+        - Without this function, every 3D mesh you load will spawn directly at the origin (0, 0, 0) at a default scale of 1.0.
+        - If you send those raw vertices directly to the GPU without multiplying them by a ModelMatrix (TRS), the GPU will draw the mesh exactly where it was modeled (0, 0, 0) in the game world, facing its default direction, at exactly 1.0 scale.
+    */
+
+    // TRS Matrix physically moves the mesh from its local space into the vast game world.
     static FORCE_INLINE Matrix4x4_SIMD TRS(const SIMDVector3D& translation, const SIMDQuaternion& rotation, const SIMDVector3D& scale) {
+        using namespace Engine::Math::SIMD;
         Matrix4x4_SIMD mat;
 
-        // 1. Convert Quaternion to a 3x3 Rotation Matrix
-        float x2 = rotation.x() + rotation.x(), y2 = rotation.y() + rotation.y(), z2 = rotation.z() + rotation.z();
-        float xx = rotation.x() * x2, xy = rotation.x() * y2, xz = rotation.x() * z2;
-        float yy = rotation.y() * y2, yz = rotation.y() * z2, zz = rotation.z() * z2;
-        float wx = rotation.w() * x2, wy = rotation.w() * y2, wz = rotation.w() * z2;
+        Float4 q = rotation.reg;
 
-        // 2. Apply Scale directly to the rotation columns
-        float sx = scale.x();
-        float sy = scale.y();
-        float sz = scale.z();
+        // 1. Broadcast the quaternion components: [X,X,X,X], [Y,Y,Y,Y], [Z,Z,Z,Z], [W,W,W,W]
+        Float4 qx = BroadcastX(q);
+        Float4 qy = BroadcastY(q);
+        Float4 qz = BroadcastZ(q);
+        Float4 qw = BroadcastW(q);
 
-        // The arguments are now in standard (X, Y, Z, W) order!
-        mat.col[0] = Engine::Math::SIMD::Set((1.0f - (yy + zz)) * sx, (xy + wz) * sx, (xz - wy) * sx, 0.0f);
-        mat.col[1] = Engine::Math::SIMD::Set((xy - wz) * sy, (1.0f - (xx + zz)) * sy, (yz + wx) * sy, 0.0f);
-        mat.col[2] = Engine::Math::SIMD::Set((xz + wy) * sz, (yz - wx) * sz, (1.0f - (xx + yy)) * sz, 0.0f);
+        // 2. Pre-calculate the doubled components: 2x, 2y, 2z
+        Float4 two = Set1(2.0f);
+        Float4 qx2 = Mul(qx, Engine::Math::Constants::SIMD_TWO);
+        Float4 qy2 = Mul(qy, Engine::Math::Constants::SIMD_TWO);
+        Float4 qz2 = Mul(qz, Engine::Math::Constants::SIMD_TWO);
 
-        // 3. Inject Translation into the 4th Column (Ensure W = 1.0f)
-        Engine::Math::SIMD::Float4 wOne = Engine::Math::SIMD::Set(0.0f, 0.0f, 0.0f, 1.0f);
-        mat.col[3] = Engine::Math::SIMD::BlendMaskW(translation.reg, wOne);
+        // 3. Calculate squared terms: 2x^2, 2y^2, 2z^2
+        Float4 xx2 = Mul(qx, qx2);
+        Float4 yy2 = Mul(qy, qy2);
+        Float4 zz2 = Mul(qz, qz2);
+
+        // 4. Calculate mixed terms
+        Float4 xy2 = Mul(qx, qy2);
+        Float4 xz2 = Mul(qx, qz2);
+        Float4 yz2 = Mul(qy, qz2);
+        Float4 wx2 = Mul(qw, qx2);
+        Float4 wy2 = Mul(qw, qy2);
+        Float4 wz2 = Mul(qw, qz2);
+
+        // 5. Build the rotation columns (Notice the specific mapping for OpenGL column-major)
+        // Col 0: [1 - 2y^2 - 2z^2, 2xy + 2wz, 2xz - 2wy, 0.0]
+        Float4 col0 = Engine::Math::Constants::SIMD_ONE; // Instant Load
+        col0 = Sub(col0, yy2);
+        col0 = Sub(col0, zz2);
+        col0 = InsertY(col0, ExtractX(Add(xy2, wz2))); // We use Insert to build the column
+        col0 = InsertZ(col0, ExtractX(Sub(xz2, wy2)));
+        col0 = InsertW(col0, 0.0f);
+
+        // Col 1: [2xy - 2wz, 1 - 2x^2 - 2z^2, 2yz + 2wx, 0.0]
+        Float4 col1 = Sub(xy2, wz2);                   // X lane holds the target value
+        col1 = InsertY(col1, ExtractX(Sub(Sub(Set1(1.0f), xx2), zz2))); 
+        col1 = InsertZ(col1, ExtractX(Add(yz2, wx2)));
+        col1 = InsertW(col1, 0.0f);
+
+        // Col 2: [2xz + 2wy, 2yz - 2wx, 1 - 2x^2 - 2y^2, 0.0]
+        Float4 col2 = Add(xz2, wy2);
+        col2 = InsertY(col2, ExtractX(Sub(yz2, wx2)));
+        col2 = InsertZ(col2, ExtractX(Sub(Sub(Set1(1.0f), xx2), yy2)));
+        col2 = InsertW(col2, 0.0f);
+
+        // 6. Apply Scale directly to the rotation columns
+        Float4 scaleReg = scale.reg;
+        mat.col[0] = Mul(col0, BroadcastX(scaleReg));
+        mat.col[1] = Mul(col1, BroadcastY(scaleReg));
+        mat.col[2] = Mul(col2, BroadcastZ(scaleReg));
+
+        // 7. Inject Translation into the 4th Column (Ensure W = 1.0f)
+        mat.col[3] = BlendMaskW(translation.reg, Engine::Math::Constants::SIMD_MASK_W_ONE);
 
         return mat;
     }
 };
 
-// --- SIMD MATRIX OPERATORS ---
+// --- SIMD MATRIX VECTOR MULTIPLICATION  (M = M1 * V1) ---
+// Multiplies a SIMD Vector against a SIMD Matrix
 FORCE_INLINE SIMDVector3D operator*(const Matrix4x4_SIMD& mat, const SIMDVector3D& v) {
-    Engine::Math::SIMD::Float4 vx = Engine::Math::SIMD::Set1(v.x());
-    Engine::Math::SIMD::Float4 vy = Engine::Math::SIMD::Set1(v.y());
-    Engine::Math::SIMD::Float4 vz = Engine::Math::SIMD::Set1(v.z());
-    Engine::Math::SIMD::Float4 vw = Engine::Math::SIMD::Set1(v.w());
+    // 1. Broadcast components (X, Y, Z, W) directly from register to register.
+    Engine::Math::SIMD::Float4 vx = Engine::Math::SIMD::BroadcastX(v.reg);   // {x, x, x, x}
+    Engine::Math::SIMD::Float4 vy = Engine::Math::SIMD::BroadcastY(v.reg);   // {y, y, y, y}
+    Engine::Math::SIMD::Float4 vz = Engine::Math::SIMD::BroadcastZ(v.reg);   // {z, z, z, z}
+    Engine::Math::SIMD::Float4 vw = Engine::Math::SIMD::BroadcastW(v.reg);   // {w, w, w, w}
 
+    // 2. Multiply each broadcasted component by its corresponding matrix column
     Engine::Math::SIMD::Float4 res = Engine::Math::SIMD::Mul(vx, mat.col[0]);
+
+    // 3. Fused Multiply-Add the rest of the columns [res = (vy * col1) + res]
     res = Engine::Math::SIMD::FMAdd(vy, mat.col[1], res);
     res = Engine::Math::SIMD::FMAdd(vz, mat.col[2], res);
     res = Engine::Math::SIMD::FMAdd(vw, mat.col[3], res);
@@ -1031,13 +1523,18 @@ FORCE_INLINE SIMDVector3D operator*(const Matrix4x4_SIMD& mat, const SIMDVector3
     return SIMDVector3D(res);
 }
 
+// --- SIMD MATRIX MULTIPLICATION (M = M1 * M2) ---
+// Multiplies two SIMD matrices.
 FORCE_INLINE Matrix4x4_SIMD operator*(const Matrix4x4_SIMD& a, const Matrix4x4_SIMD& b) {
     Matrix4x4_SIMD res;
+
+    // For each column in "b", broadcast its X, Y, Z, W components and multiply them against the corresponding columns of "a".
     for (int i = 0; i < 4; ++i) {
-        Engine::Math::SIMD::Float4 vx = Engine::Math::SIMD::Set1(Engine::Math::SIMD::ExtractX(b.col[i]));
-        Engine::Math::SIMD::Float4 vy = Engine::Math::SIMD::Set1(Engine::Math::SIMD::ExtractY(b.col[i]));
-        Engine::Math::SIMD::Float4 vz = Engine::Math::SIMD::Set1(Engine::Math::SIMD::ExtractZ(b.col[i]));
-        Engine::Math::SIMD::Float4 vw = Engine::Math::SIMD::Set1(Engine::Math::SIMD::ExtractW(b.col[i]));
+        // Data never leaves the SIMD registers
+        Engine::Math::SIMD::Float4 vx = Engine::Math::SIMD::BroadcastX(b.col[i]);
+        Engine::Math::SIMD::Float4 vy = Engine::Math::SIMD::BroadcastY(b.col[i]);
+        Engine::Math::SIMD::Float4 vz = Engine::Math::SIMD::BroadcastZ(b.col[i]);
+        Engine::Math::SIMD::Float4 vw = Engine::Math::SIMD::BroadcastW(b.col[i]);
 
         Engine::Math::SIMD::Float4 col = Engine::Math::SIMD::Mul(vx, a.col[0]);
         col = Engine::Math::SIMD::FMAdd(vy, a.col[1], col);
@@ -1053,17 +1550,21 @@ FORCE_INLINE Matrix4x4_SIMD operator*(const Matrix4x4_SIMD& a, const Matrix4x4_S
 // LARGE WORLD COORDINATES (LWC)
 // ==================================================================================
 struct Vector3DWorld {
+    // 3 (64-bit) dedicated scalar values.
     double x, y, z;
 
     constexpr Vector3DWorld(double x = 0.0, double y = 0.0, double z = 0.0) : x(x), y(y), z(z) {}
 
+    // Standard addition for moving objects in the world.
     FORCE_INLINE constexpr Vector3DWorld operator+(const Vector3DWorld& other) const { return Vector3DWorld(x + other.x, y + other.y, z + other.z); }
+
+    // It returns the difference between two massive world coordinates (subtraction is the most important operator in LWC).
     FORCE_INLINE constexpr Vector3DWorld operator-(const Vector3DWorld& other) const { return Vector3DWorld(x - other.x, y - other.y, z - other.z); }
 
     // --- THE LWC BRIDGE ---
     // Safely casts a 64-bit world difference down to your ultra-fast 32-bit SIMD vector.
-    // By returning a Vector3D (your SIMD wrapper), the downstream math instantly utilizes AVX/NEON.
     FORCE_INLINE Vector3D toFloatVector() const {
+        // By returning a Vector3D (SIMD wrapper), the downstream math instantly utilizes AVX/NEON.
         return Vector3D(static_cast<float>(x), static_cast<float>(y), static_cast<float>(z));
     }
 };
@@ -1096,33 +1597,27 @@ struct alignas(32) AABBMath {
     // --- WORLD SPACE TRANSFORMATION ---
     // Transforms a local AABB (3D Mesh Local Space centered around (0, 0, 0)) into World Space (Frustum) using the entity's Model Matrix
     FORCE_INLINE AABBMath Transform(const Matrix4x4_SIMD& m) const {
-        // The most efficient way to transform an AABB is to multiply its center and extents
+        using namespace Engine::Math::SIMD;
+
+        // 1. Calculate Center and Extents (most efficient way to transform an AABB)
         SIMDVector3D center = (maxBounds + minBounds) * 0.5f;
         SIMDVector3D extents = (maxBounds - minBounds) * 0.5f;
 
-        // Transform the center normally (Matrix * Vector applies rotation and translation)
+        // 2. Transform the center normally (Matrix * Vector applies rotation and translation)
         SIMDVector3D newCenter = m * center;
 
-        // To transform extents, we must multiply by the ABSOLUTE values of the rotation matrix
-        // (Strip the sign bit from columns 0, 1, and 2)
-        using namespace Engine::Math::SIMD;
+        // Absolute Matrix columns (Strip the sign bit from columns 0, 1, and 2)
+        // 3. To transform extents, we must multiply by the ABSOLUTE values of the rotation matrix to get the absolute value of the columns. 
+        Float4 absCol0 = Abs(m.col[0]);
+        Float4 absCol1 = Abs(m.col[1]);
+        Float4 absCol2 = Abs(m.col[2]);
 
-        // Cross-platform ABS mask: Clear the sign bit (the 32nd bit) of each float.
-        #ifdef MATH_ISA_ARM
-            Float4 absMask = vreinterpretq_f32_u32(vdupq_n_u32(0x7FFFFFFF)); // Bitwise mask to clear the sign bit (vreinterpretq_f32_u32(Set1_u32(0x7FFFFFFF)))
-        #else
-            Float4 absMask = _mm_castsi128_ps(_mm_set1_epi32(0x7FFFFFFF));  // Bitwise mask to clear the sign bit
-        #endif
-        
+        // 4. Transform Extents (using the absolute columns and broadcasted extents)
+        Float4 ex = BroadcastX(extents.reg);
+        Float4 ey = BroadcastY(extents.reg);
+        Float4 ez = BroadcastZ(extents.reg);
 
-        Float4 absCol0 = BitwiseAnd(m.col[0], absMask);
-        Float4 absCol1 = BitwiseAnd(m.col[1], absMask);
-        Float4 absCol2 = BitwiseAnd(m.col[2], absMask);
-
-        Float4 ex = Set1(extents.x());
-        Float4 ey = Set1(extents.y());
-        Float4 ez = Set1(extents.z());
-
+        // 5. Transform Extents (using the absolute columns)
         Float4 newExtents = Mul(ex, absCol0);
         newExtents = FMAdd(ey, absCol1, newExtents);
         newExtents = FMAdd(ez, absCol2, newExtents);
@@ -1159,7 +1654,7 @@ struct Matrix4 {
     // Creates a Perspective Projection Matrix
     static Matrix4 Perspective(float fovY_degrees, float aspect, float nearZ, float farZ) {
         Matrix4 mat;
-        float fovY_rad = fovY_degrees * (3.14159265359f / 180.0f);
+        float fovY_rad = fovY_degrees * Engine::Math::Constants::DEG_TO_RAD;
         float tanHalfFovY = std::tan(fovY_rad / 2.0f);
 
         mat.m[0] = 1.0f / (aspect * tanHalfFovY);
