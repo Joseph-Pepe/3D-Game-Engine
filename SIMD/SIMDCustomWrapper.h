@@ -2017,6 +2017,14 @@ namespace Engine::ISAArch {
 
         static constexpr int size() { return Traits::size; }
 
+        // =======================================
+        // --- ARGUMENT DEPENDENT LOOKUP (ADL) ---
+        // =======================================
+        /*
+            - from_native is a wrapper that wraps the raw silicon register (e.g., _m256) into an object purely for the function calls.
+            - Allows the compiler to find the hidden friend functions (e.g., reduce).
+        */
+
         // --- HARDWARE INTEROP ---
         typename Traits::register_type native_handle() const { return m_data; }
         static simd from_native(typename Traits::register_type raw) { return simd(raw); }
