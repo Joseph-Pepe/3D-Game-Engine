@@ -972,6 +972,29 @@ public:
 };
 
 // ==================================================================================
+// LARGE WORLD COORDINATES (LWC)
+// ==================================================================================
+struct Vector3DWorld {
+    // 3 (64-bit) dedicated scalar values.
+    double x, y, z;
+
+    constexpr Vector3DWorld(double x = 0.0, double y = 0.0, double z = 0.0) : x(x), y(y), z(z) {}
+
+    // Standard addition for moving objects in the world.
+    FORCE_INLINE constexpr Vector3DWorld operator+(const Vector3DWorld& other) const { return Vector3DWorld(x + other.x, y + other.y, z + other.z); }
+
+    // It returns the difference between two massive world coordinates (subtraction is the most important operator in LWC).
+    FORCE_INLINE constexpr Vector3DWorld operator-(const Vector3DWorld& other) const { return Vector3DWorld(x - other.x, y - other.y, z - other.z); }
+
+    // --- THE LWC BRIDGE ---
+    // Safely casts a 64-bit world difference down to your ultra-fast 32-bit SIMD vector.
+    FORCE_INLINE Vector3D toFloatVector() const {
+        // By returning a Vector3D (SIMD wrapper), the downstream math instantly utilizes AVX/NEON.
+        return Vector3D(static_cast<float>(x), static_cast<float>(y), static_cast<float>(z));
+    }
+};
+
+// ==================================================================================
 // 128-BIT SIMD ACCELERATED VECTORS (CROSS-PLATFORM: SSE, ARM)
 // ==================================================================================
 /* 
@@ -1940,29 +1963,6 @@ FORCE_INLINE Matrix4x4_SIMD operator*(const Matrix4x4_SIMD& a, const Matrix4x4_S
     }
     return res;
 }
-
-// ==================================================================================
-// LARGE WORLD COORDINATES (LWC)
-// ==================================================================================
-struct Vector3DWorld {
-    // 3 (64-bit) dedicated scalar values.
-    double x, y, z;
-
-    constexpr Vector3DWorld(double x = 0.0, double y = 0.0, double z = 0.0) : x(x), y(y), z(z) {}
-
-    // Standard addition for moving objects in the world.
-    FORCE_INLINE constexpr Vector3DWorld operator+(const Vector3DWorld& other) const { return Vector3DWorld(x + other.x, y + other.y, z + other.z); }
-
-    // It returns the difference between two massive world coordinates (subtraction is the most important operator in LWC).
-    FORCE_INLINE constexpr Vector3DWorld operator-(const Vector3DWorld& other) const { return Vector3DWorld(x - other.x, y - other.y, z - other.z); }
-
-    // --- THE LWC BRIDGE ---
-    // Safely casts a 64-bit world difference down to your ultra-fast 32-bit SIMD vector.
-    FORCE_INLINE Vector3D toFloatVector() const {
-        // By returning a Vector3D (SIMD wrapper), the downstream math instantly utilizes AVX/NEON.
-        return Vector3D(static_cast<float>(x), static_cast<float>(y), static_cast<float>(z));
-    }
-};
 
 // ==================================================================================
 // AXIS-ALIGNED BOUNDING BOX (AABB)
