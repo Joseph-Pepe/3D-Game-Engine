@@ -798,12 +798,12 @@ namespace Engine::Math::SIMD {
         Float4 x2 = Mul(x, x); // x^2
 
         // Numerator Polynomial: 1.0 + x^2 * (C1 + x^2 * C2)
-        Float4 num = FMAdd(x2, TAN_C2, TAN_C1); // C2 * x^2 + C1
-        num = FMAdd(num, x2, TAN_C0);           // num * x^2 + 1.0
+        Float4 num = FMAdd(x2, Engine::Math::Constants::TAN_C2, Engine::Math::Constants::TAN_C1); // C2 * x^2 + C1
+        num = FMAdd(num, x2, Engine::Math::Constants::TAN_C0);           // num * x^2 + 1.0
 
         // Denominator Polynomial: 1.0 + x^2 * (C4 + x^2 * C5)
-        Float4 den = FMAdd(x2, TAN_C5, TAN_C4); // C5 * x^2 + C4
-        den = FMAdd(den, x2, TAN_C3);           // den * x^2 + 1.0
+        Float4 den = FMAdd(x2, Engine::Math::Constants::TAN_C5, Engine::Math::Constants::TAN_C4); // C5 * x^2 + C4
+        den = FMAdd(den, x2, Engine::Math::Constants::TAN_C3);           // den * x^2 + 1.0
 
         // 3. Perform cross-platform hardware reciprocal (1 / den) to avoid slow CPU division
         // ARM NEON Fast Reciprocal Approximation, Newton-Raphson refinement step
@@ -833,10 +833,10 @@ namespace Engine::Math::SIMD {
         Float4 x2 = Mul(x, x); // x^2
 
         // 2. Execute Horner's Method purely between existing SIMD registers
-        Float4 res = FMAdd(x2, SIN_C9, SIN_C7); // C9  * x^2 + C7
-        res = FMAdd(res, x2, SIN_C5);           // res * x^2 + C5
-        res = FMAdd(res, x2, SIN_C3);           // res * x^2 + C3
-        res = FMAdd(res, x2, SIN_1);            // res * x^2 + 1.0                      
+        Float4 res = FMAdd(x2, Engine::Math::Constants::SIN_C9, Engine::Math::Constants::SIN_C7); // C9  * x^2 + C7
+        res = FMAdd(res, x2, Engine::Math::Constants::SIN_C5);           // res * x^2 + C5
+        res = FMAdd(res, x2, Engine::Math::Constants::SIN_C3);           // res * x^2 + C3
+        res = FMAdd(res, x2, Engine::Math::Constants::SIN_1);            // res * x^2 + 1.0                      
 
         return Mul(res, x); // Final multiplication by x
     }
@@ -853,17 +853,17 @@ namespace Engine::Math::SIMD {
         Float4 absX = Abs(x);
 
         // Horner's Method: C0 + x * (C1 + x * (C2 + x * C3))
-        Float4 res = FMAdd(absX, ACOS_C3, ACOS_C2);  // C3  * x + C2
-        res = FMAdd(res, absX, ACOS_C1);             // res * x + C1
-        res = FMAdd(res, absX, ACOS_C0);             // res * x + C0 (Pi/2)
+        Float4 res = FMAdd(absX, Engine::Math::Constants::ACOS_C3, Engine::Math::Constants::ACOS_C2);  // C3  * x + C2
+        res = FMAdd(res, absX, Engine::Math::Constants::ACOS_C1);             // res * x + C1
+        res = FMAdd(res, absX, Engine::Math::Constants::ACOS_C0);             // res * x + C0 (Pi/2)
 
         // 3. Sqrt and blend [res = (res * sqrt(1.0 - absX))]
-        Float4 oneMinusX = Sub(ACOS_1, absX);
+        Float4 oneMinusX = Sub(Engine::Math::Constants::ACOS_1, absX);
         Float4 sqrtOneMinusX = Sqrt(oneMinusX);
         res = Mul(res, sqrtOneMinusX);
 
         // If x is negative, the result is Pi - res
-        Float4 resNeg = Sub(ACOS_PI, res);
+        Float4 resNeg = Sub(Engine::Math::Constants::ACOS_PI, res);
 
         // Blend based on original sign of x, if x < 0.0, use (Pi - res), else use res
         Float4 cmpLtZero = CmpLt(x, Zero());
@@ -877,10 +877,10 @@ namespace Engine::Math::SIMD {
         Float4 x2 = Mul(x, x); // x^2
 
         // Horner's Method: 1 + x^2 * (C2 + x^2 * (C4 + x^2 * (C6 + x^2 * C8)))
-        Float4 res = FMAdd(x2, COS_C8, COS_C6); // C8  * x^2 + C6
-        res = FMAdd(res, x2, COS_C4);           // res * x^2 + C4
-        res = FMAdd(res, x2, COS_C2);           // res * x^2 + C2
-        res = FMAdd(res, x2, COS_1);            // res * x^2 + 1.0                      
+        Float4 res = FMAdd(x2, Engine::Math::Constants::COS_C8, Engine::Math::Constants::COS_C6); // C8  * x^2 + C6
+        res = FMAdd(res, x2, Engine::Math::Constants::COS_C4);           // res * x^2 + C4
+        res = FMAdd(res, x2, Engine::Math::Constants::COS_C2);           // res * x^2 + C2
+        res = FMAdd(res, x2, Engine::Math::Constants::COS_1);            // res * x^2 + 1.0                      
 
         return res;
     }
