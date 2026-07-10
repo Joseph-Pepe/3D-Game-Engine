@@ -1372,7 +1372,7 @@ struct alignas(16) SIMDQuaternion {
         SIMDVector3D qVec(Engine::Math::SIMD::BlendMaskW(reg, Engine::Math::SIMD::Zero()));
 
         // 2. Broadcast the Real (w) component natively within the registers!
-        Float4 wReg = BroadcastW(reg);
+        Engine::Math::SIMD::Float4 wReg = Engine::Math::SIMD::BroadcastW(reg);
         
         // 3. V' = V + 2w(Q_xyz x V) + 2(Q_xyz x (Q_xyz x V))
         SIMDVector3D t = qVec.cross(v) * 2.0f;
