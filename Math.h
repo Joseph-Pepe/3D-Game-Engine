@@ -1007,6 +1007,7 @@ public:
     FORCE_INLINE void setW(float val) { reg = Engine::Math::SIMD::InsertW(reg, val); }
 
     // --- HARDWARE GETTERS ---
+    // Disabled implicit conversion to prevent automatic casting SIMDVector3D to Vector3D, so we must explicitly extract scalars to ensure the programmer is 100% aware of when data is leaving the fast lanes (VU, SIMD register) and entering the slow lanes (FPU, Scalar register).
     FORCE_INLINE float x() const { return Engine::Math::SIMD::ExtractX(reg); } 
     FORCE_INLINE float y() const { return Engine::Math::SIMD::ExtractY(reg); } // Y requires a 1-cycle shuffle to move to lowest 32 bits before extraction.
     FORCE_INLINE float z() const { return Engine::Math::SIMD::ExtractZ(reg); } // Z requires a 2-cycle shuffle to move to lowest 32 bits before extraction.
@@ -2119,28 +2120,31 @@ struct Matrix4 {
     // View Matrix: No longer needs translation with camera-relative rendering, only handles rotation.
     // Notice the inputs are Vector3DWorld (double), but the matrix is float.
     static Matrix4 LookAtLWC(const Vector3DWorld& eye, const Vector3DWorld& target, const Vector3D& upVec) {
-        
         // 1. Calculate the forward vector in 64-bit space to prevent jitter at massive distances
         Vector3DWorld worldForward = target - eye;
         
-        // 2. Cast down to 32-bit float for the math. 
-        // Because it's a directional vector (difference), the cast is perfectly safe!
-        Vector3D f = worldForward.toFloatVector();
+        // 2. Fetch the hardware SIMD vector from our bridge
+        SIMDVector3D simdF = worldForward.toFloatVector();
         
-        // Use your fast SIMD dot product to normalize
+        // 3. Extract it safely back into a scalar Vector3D for this matrix math! 
+        Vector3D f(simdF.x(), simdF.y(), simdF.z());
+        
+        // Use your fast scalar dot product to normalize
         float fLenSq = f.dot(f);
         if (fLenSq > 1e-8f) {
-            f *= (1.0f / std::sqrt(fLenSq));
+            // Replaced std::sqrt with FastSqrt!
+            f *= (1.0f / Engine::Math::Functions::FastSqrt(fLenSq)); 
         }
 
-        // 3. Right Vector (X)
+        // 4. Right Vector (X)
         Vector3D r = f.cross(upVec);
         float rLenSq = r.dot(r);
         if (rLenSq > 1e-8f) {
-            r *= (1.0f / std::sqrt(rLenSq));
+            // Replaced std::sqrt with FastSqrt!
+            r *= (1.0f / Engine::Math::Functions::FastSqrt(rLenSq)); 
         }
 
-        // 4. Up Vector (Y)
+        // 5. Up Vector (Y)
         Vector3D u = r.cross(f);
 
         // 5. Build Column-Major Matrix
