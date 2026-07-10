@@ -290,7 +290,7 @@ public:
 
         // 1. Vector pointing FROM Player TO Camera
         SIMDVector3D rayDirection = desiredPosition - aimPoint;
-        float desiredDistance = std::sqrt(rayDirection.dot(rayDirection));
+        float desiredDistance = rayDirection.length(); // Uses FastSqrt under the hood
 
 
         if (desiredDistance > 1e-4f) {
@@ -444,8 +444,7 @@ public:
         // We must normalize the direction vector if its length exceeds 1.0.
         float squaredLength = moveDirection.dot(moveDirection);
         if (squaredLength > 1.0f) {
-            float invLen = 1.0f / std::sqrt(squaredLength);
-            moveDirection = moveDirection * invLen;
+            moveDirection.Normalize(); // Uses Fast ReciprocalSqrt under the hood
         }
 
         // 5. Apply Velocity
@@ -596,15 +595,14 @@ public:
         // 3. Compute Smooth Spline Position
         Vector3D splinePos = CatmullRom(controlPoints[i0], controlPoints[i1], controlPoints[i2], controlPoints[i3], localT);
         
-        // Instantly load the 16-byte aligned stack data into a SIMD SIMDVector3D
-        // .asPoint() ensures W = 1.0f for spatial translation
-        camera.Position = SIMDVector3D(_mm_load_ps(splinePos.data)).asPoint(); 
+        // (Safe scalar-to-SIMD conversion):
+        camera.Position = SIMDVector3D(splinePos.x, splinePos.y, splinePos.z, 1.0f);
 
         // 4. Overwrite Component Direction via Spline Target
         Vector3D splineTarget = Lerp(lookAtTargets[i1], lookAtTargets[i2], localT);
         
-        // Load target directly into a SIMD register
-        SIMDVector3D targetVec(_mm_load_ps(splineTarget.data));
+        // (Safe scalar-to-SIMD conversion):
+        SIMDVector3D targetVec(splineTarget.x, splineTarget.y, splineTarget.z, 0.0f);
         
         // Calculate the new directional vector purely on the silicon
         SIMDVector3D newFront = targetVec - camera.Position;
@@ -897,7 +895,7 @@ public:
 
         float lengthSq = lookDirection.dot(lookDirection);
         if (lengthSq > 1e-6f) {
-            lookDirection = lookDirection * (1.0f / std::sqrt(lengthSq)); // Safe Normalize
+            lookDirection.Normalize(); // Safe Normalize
             
             // Re-use your ultra-fast, trig-free direction to quaternion solver
             SIMDQuaternion targetOrientation = SIMDQuaternion::FromDirection(lookDirection);
@@ -982,8 +980,11 @@ public:
         SIMDVector3D worldDirection = (camForward * input.MoveAxisY) + (camRight * input.MoveAxisX);
 
         // Clamp vector magnitude to 1.0f to prevent diagonal acceleration exploits
-        float mag = std::sqrt((worldDirection.x() * worldDirection.x()) + (worldDirection.z() * worldDirection.z()));
-        if (mag > 1.0f) {
+        float magSq = (worldDirection.x() * worldDirection.x()) + (worldDirection.z() * worldDirection.z());
+
+        // If squared magnitude is greater than 1.0, then the actual length is greater than 1.0 (i.e., becomes true when player pushes two diagonal keys down simultaneously).
+        if (magSq > 1.0f) {
+            float mag = Engine::Math::Functions::FastSqrt(magSq); // Compute fast scalar sqrt safely
             worldDirection = worldDirection * (1.0f / mag);
         }
 
