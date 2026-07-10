@@ -1062,21 +1062,16 @@ public:
     }
 
     FORCE_INLINE void Normalize() {
-        // 1. PURE SIMD DOT PRODUCT: Calculates dot product and broadcasts it to all 4 lanes immediately!
-        // No scalar extraction. Data stays in the XMM / NEON register.
-        Engine::Math::SIMD::Float4 dotReg = Engine::Math::SIMD::Set1(Engine::Math::SIMD::Dot3(reg, reg));
-
-        // 2. EXTRACT FOR BRANCHING ONLY
-        // We still need a scalar just to check the 'if' condition safely.
-        float dotScalar = Engine::Math::SIMD::ExtractX(dotReg); 
-
+        // 1. Calculate scalar dot product for the branch check
+        float dotScalar = Engine::Math::SIMD::Dot3(reg, reg);
+        
         if (dotScalar > 1e-8f) {
+            // 2. Broadcast the scalar into SIMD lanes for the hardware reciprocal
+            Engine::Math::SIMD::Float4 dotReg = Engine::Math::SIMD::Set1(dotScalar);
             // 3. HARDWARE RECIPROCAL SQRT (1/sqrt)
-            Float4 invLenReg = Engine::Math::SIMD::ReciprocalSqrt(dotReg);
-
+            Engine::Math::SIMD::Float4 invLenReg = Engine::Math::SIMD::ReciprocalSqrt(dotReg);
             // 4. DIRECT SIMD MULTIPLICATION
-            // We multiply our internal register directly by the inverse length register.
-            reg = Engine::Math::SIMD::Mul(reg, invLenReg); 
+            reg = Engine::Math::SIMD::Mul(reg, invLenReg);
         }
     }
 
