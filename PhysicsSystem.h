@@ -1557,9 +1557,9 @@ public:
                     // }
 
                     // X and Y are ALWAYS needed
-                    // Instantly collapse the AVX2 accumulator registers using pure silicon math
-                    scalarForceX += Engine::ISAArch::reduce(accX);
-                    scalarForceY += Engine::ISAArch::reduce(accY);
+                    // Bridge the raw __m256 register into the C++26 wrapper to trigger the hardware reduction to instantly collapse the AVX2 accumulator registers using pure silicon math
+                    scalarForceX += reduce(Engine::ISAArch::WideFloat::from_native(accX));
+                    scalarForceY += reduce(Engine::ISAArch::WideFloat::from_native(accY));
 
                     // Apply the final accumulated push force directly to Particle i's velocity
                     r_vX[i] += scalarForceX;
@@ -1573,7 +1573,7 @@ public:
                         // for (int k = 0; k < 8; ++k) {
                         //     scalarForceZ += tempZ[k];
                         // }
-                        scalarForceZ += Engine::ISAArch::reduce(accZ);
+                        scalarForceZ += reduce(Engine::ISAArch::WideFloat::from_native(accZ));
                         r_vZ[i] += scalarForceZ;
                     }
                 }
