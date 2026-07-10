@@ -1,6 +1,5 @@
 #pragma once
 #include "Math.h" 
-#include "Math/SSE-128/MathSSE128.h"
 #include <span>
 #include <vector>
 #include <cstdint>
@@ -1643,5 +1642,3 @@ public:
         }
     };
 */
-
-
