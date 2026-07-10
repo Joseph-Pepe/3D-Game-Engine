@@ -13,6 +13,7 @@
 #include "JobSystem.h" // For parallel dispatch and thread IDs
 #include "Math.h"      // For Morton codes and vector math
 #include "SIMD/AVX-256/SIMDVectorAVX256.h"
+#include "SIMD/SIMDCustomWrapper.h"
 #include "Hardware.h"  // For AVX availability checks
 #include "EngineSettings.h"
 #include "MortonCode.h"
@@ -231,15 +232,15 @@ public:
                 return static_cast<float>(state) * 2.3283064365386963e-10f;
             };
 
-            // OPTIMIZATION: The Rotation Matrix
+            // OPTIMIZATION: The Rotation Matrix sealed off from standard library safety checks
             float deltaTheta = 0.001f;
-            float cos_d = std::cos(deltaTheta);
-            float sin_d = std::sin(deltaTheta);
+            float cos_d, sin_d;
+            Engine::Math::Functions::FastSinCos(deltaTheta, sin_d, cos_d);
 
             // Calculate the exact starting angle for this specific thread's chunk ONLY
             float startAngle = (float)(startIdx + localStart) * deltaTheta;
-            float current_c = std::cos(startAngle);
-            float current_s = std::sin(startAngle);
+            float current_c, current_s;
+            Engine::Math::Functions::FastSinCos(startAngle, current_s, current_c);
 
             // OPTIMIZATION: Traded ~250 clock cycles of trigonometry and division for ~10 clock cycles of pure multiplication.
             for(size_t i = localStart; i < localEnd; ++i) {
