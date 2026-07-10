@@ -33,10 +33,10 @@
 */
 
 #if defined(__aarch64__) || defined(_M_ARM64)
-    #include <arm_neon.h>
+    #include <arm_neon.h>      // ARM NEON (64-bit), SVE (128-bit)
     #define MATH_ISA_ARM       // Apple Silicon (M-series), Mobile (iPhone, Android) (ARM64)
 #else
-    #include <immintrin.h>
+    #include <immintrin.h>     // AVX2 (256-bit), SSE (128-bit), MMX (64-bit).
     #define MATH_ISA_X86       // Intel/AMD (PS5, Xbox, PC) (x86_x64)
 #endif
 
@@ -1182,7 +1182,7 @@ public:
 */
 
 // ==================================================================================
-// SIMD QUATERNION (CROSS-PLATFORM)
+// SIMD QUATERNION (128-bit) (CROSS-PLATFORM)
 // ==================================================================================
 struct alignas(16) SIMDQuaternion {
     Engine::Math::SIMD::Float4 reg;
@@ -1469,7 +1469,7 @@ struct alignas(16) SIMDQuaternion {
 };
 
 // ==================================================================================
-// MATRICES & INTERPOLATION (AVOID SCALAR-TO-SIMD TRANSITION PENALTY)
+// LOAD-HIT-STORE PENALTY (SIMD -> SCALAR -> SIMD)  
 // ==================================================================================
 /*
     - Modern CPUs have distinct execution units and register files.
@@ -1510,60 +1510,66 @@ struct alignas(16) SIMDQuaternion {
     - Scalar pipeline is a narrow lane designed to handle single, 32-bit floats.
     - Memory controller is a pathway that moves data to and from L1/L2 caches and RAM.
     - Load-Hit-Store penalties occur when code forces the CPU to move data between the SIMD pipeline and Scalar pipeline (SIMD -> Scalar -> SIMD).
-*/
 
-/*
-    // Storing data in an array of floats inside a struct that is meant to be used for SIMD is an anti-pattern (i.e., Load-Hit-Store penalty).
-    class Vector3DStack {
-    public:
-        alignas(16) float data[4]; 
+      class Vector3DStack {
+        public:
+            // Storing data in an array of floats inside a struct that is meant to be used for SIMD is an anti-pattern (i.e., Load-Hit-Store penalty).
+            alignas(16) float data[4]; 
 
-        // Constructor: Default initializes to {0, 0, 0, 0}
-        Vector3DStack(float x = 0.0f, float y = 0.0f, float z = 0.0f) : data{x, y, z, 0.0f} {}
+            // Constructor: Default initializes to {0, 0, 0, 0}
+            Vector3DStack(float x = 0.0f, float y = 0.0f, float z = 0.0f) : data{x, y, z, 0.0f} {}
 
-        // Addition: C = A + B (Load-Hit-Store penalty)
-        FORCE_INLINE Vector3DStack operator+(const Vector3DStack& other) const {
-            Vector3DStack result;
-            
-            __m128 v1 = _mm_load_ps(this->data);
-            __m128 v2 = _mm_load_ps(other.data);
-            _mm_store_ps(result.data, _mm_add_ps(v1, v2));
+            // Addition: C = A + B (Load-Hit-Store penalty)
+            FORCE_INLINE Vector3DStack operator+(const Vector3DStack& other) const {
+                Vector3DStack result;
+                
+                __m128 v1 = _mm_load_ps(this->data);
+                __m128 v2 = _mm_load_ps(other.data);
+                _mm_store_ps(result.data, _mm_add_ps(v1, v2));
 
-            return result;
-        }
+                return result;
+            }
 
-        // Cross Product: v = <(y1 * z2) - (z1 * y2), (z1 * x2) - (x1 * z2), (x1 * y2) - (y1 * x2)> (Load-Hit-Store penalty)
-        FORCE_INLINE Vector3DStack cross(const Vector3DStack& other) const {
-            Vector3DStack result;
-            
-            // 1. Loads 8 separate floats (x, y, z, w) from memory (or scalar registers).
-            __m128 a = _mm_load_ps(this->data);
-            __m128 b = _mm_load_ps(other.data);
+            // In-place Scalar Multiplication: A *= scalar
+            FORCE_INLINE void operator*=(float scalar) {
+                __m128 v1 = _mm_load_ps(this->data);
+                __m128 s = _mm_set1_ps(scalar);
+                _mm_store_ps(this->data, _mm_mul_ps(v1, s)); // Store directly back into itself
+            }
 
-            // 2. Pack them into into 4 (128-bit) SIMD registers (i.e., slow)
-            __m128 tmp0 = _mm_shuffle_ps(a, a, _MM_SHUFFLE(3, 0, 2, 1));
-            __m128 tmp1 = _mm_shuffle_ps(b, b, _MM_SHUFFLE(3, 1, 0, 2));
-            __m128 tmp2 = _mm_shuffle_ps(a, a, _MM_SHUFFLE(3, 1, 0, 2));
-            __m128 tmp3 = _mm_shuffle_ps(b, b, _MM_SHUFFLE(3, 0, 2, 1));
+            // Cross Product: v = <(y1 * z2) - (z1 * y2), (z1 * x2) - (x1 * z2), (x1 * y2) - (y1 * x2)> (Load-Hit-Store Penalty)
+            FORCE_INLINE Vector3DStack cross(const Vector3DStack& other) const {
+                Vector3DStack result;
+                
+                // 1. Memory Load: Reads 16-bytes (4 floats) from stack memory into a 128-bit SIMD register (i.e., pack them into into 4 (128-bit) SIMD registers (Slow, ~4-5 cycles)).
+                __m128 a = _mm_load_ps(this->data); // 4 floats (128-bit SIMD register), memory read from L1 cache directly into the XMM vector registers.
+                __m128 b = _mm_load_ps(other.data); // 4 floats (128-bit SIMD register), memory read from L1 cache directly into the XMM vector registers.
 
-            // 3. Perform the SIMD math.
-            __m128 res = _mm_sub_ps(_mm_mul_ps(tmp0, tmp1), _mm_mul_ps(tmp2, tmp3));
+                // 2. Rearrange: Swizzles the lanes (x, y, z, w) inside the registers to prepare for the cross product (i.e., register-to-register hardware manipulation (Very fast, ~1 cycle)).
+                __m128 tmp0 = _mm_shuffle_ps(a, a, _MM_SHUFFLE(3, 0, 2, 1));
+                __m128 tmp1 = _mm_shuffle_ps(b, b, _MM_SHUFFLE(3, 1, 0, 2));
+                __m128 tmp2 = _mm_shuffle_ps(a, a, _MM_SHUFFLE(3, 1, 0, 2));
+                __m128 tmp3 = _mm_shuffle_ps(b, b, _MM_SHUFFLE(3, 0, 2, 1));
 
-            // 4. Unpack (or extract) the resultant floats back out of the SIMD registers and store it into scalar variables (i.e., slow).
-            _mm_store_ps(result.data, res);
-            
-            return result;
-        }
+                // 3. Perform the SIMD math (i.e., parallel multiplication (~3-4 cycles), parallel subtraction).
+                __m128 res = _mm_sub_ps(_mm_mul_ps(tmp0, tmp1), _mm_mul_ps(tmp2, tmp3));
 
-        // Utility to easily print the vector
-        void print() const {
-            std::println("[{}, {}, {}, {}]", data[0], data[1], data[2], data[3]);
-        }
+                // 4. Memory Store: Dumps the entire 128-bit register back to stack memory (i.e., triggers load-hit-store stall because caller of this function will try to read this memory as a scalar).
+                _mm_store_ps(result.data, res);
+                
+                // 5. When caller tries to access result.data[0] it causes a CPU pipeline stall (Very slow, ~10-12 cycles per infraction) b/c we have to wait for that 16-byte block to finish writing to memory before we can read the scalar float back out forcing it to flush the pipeline.
+                return result;
+            }
+
+            // Utility to easily print the vector
+            void print() const {
+                std::println("[{}, {}, {}, {}]", data[0], data[1], data[2], data[3]);
+            }
     };
 */
 
 // ==================================================================================
-// SIMD 4x4 MATRIX (CROSS-PLATFORM)
+// SIMD 4x4 MATRIX & INTERPOLATION  (CROSS-PLATFORM) 
 // ==================================================================================
 /* 
     - A SIMD 4x4 matrix struct should not contain a raw array of 16 floats because every operation would require _mm_load_ps to fetch from memory and _mm_store_ps to save the result (i.e., Load-Hit-Store penalty).
