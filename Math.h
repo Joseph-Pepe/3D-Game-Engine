@@ -442,7 +442,7 @@ namespace Engine::Math::SIMD {
         // --- SIMD PACKER (SET) ---
         // =========================
         /*  
-            - Takes 4 distinct, separate values (or scalars) and packs them together into a single 128-bit register (or vector). 
+            - Takes 4 distinct, separate values (or scalars) and packs them together into a single 128-bit wide vector register. 
             - e.g., used when constructing positions, quaternions, or matrices where every lane stores a different piece of data.
             - Memory layout in the hardware register:
 
@@ -456,7 +456,7 @@ namespace Engine::Math::SIMD {
         // --- SIMD BROADCASTER (SET1) ---
         // ===============================
         /*  
-            - Takes a single scalar value and copies (or broadcasts) it across all four lanes of the register simultaneously.
+            - Takes a single scalar value and copies (or broadcasts) it across all four lanes of the 128-bit wide vector register simultaneously.
             - Forces CPU to broadcast (or clone) the FPU scalar across the 128-bit vector register natively, avoiding memory entirely
             - e.g., used when you need to perform uniform math on an entire vector (i.e., scalar multiplication, uniform offsets, and FMA constants).
             - Memory layout in the hardware register:
@@ -565,7 +565,7 @@ namespace Engine::Math::SIMD {
             // 1. Multiply the vectors 
             __m128 mul = _mm_mul_ps(a, b);
 
-            // 2. Fast Horizontal Sum
+            // 2. Fast Horizontal Sum all 4 lanes
             __m128 shuf = _mm_movehl_ps(mul, mul); 
             mul = _mm_add_ps(mul, shuf);           
             shuf = _mm_shuffle_ps(mul, mul, _MM_SHUFFLE(1, 1, 1, 1)); 
@@ -1520,6 +1520,17 @@ struct alignas(16) SIMDQuaternion {
 
         // Constructor: Default initializes to {0, 0, 0, 0}
         Vector3DStack(float x = 0.0f, float y = 0.0f, float z = 0.0f) : data{x, y, z, 0.0f} {}
+
+        // Addition: C = A + B (Load-Hit-Store penalty)
+        FORCE_INLINE Vector3DStack operator+(const Vector3DStack& other) const {
+            Vector3DStack result;
+            
+            __m128 v1 = _mm_load_ps(this->data);
+            __m128 v2 = _mm_load_ps(other.data);
+            _mm_store_ps(result.data, _mm_add_ps(v1, v2));
+
+            return result;
+        }
 
         // Cross Product: v = <(y1 * z2) - (z1 * y2), (z1 * x2) - (x1 * z2), (x1 * y2) - (y1 * x2)> (Load-Hit-Store penalty)
         FORCE_INLINE Vector3DStack cross(const Vector3DStack& other) const {
