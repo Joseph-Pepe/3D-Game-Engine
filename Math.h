@@ -618,7 +618,7 @@ namespace Engine::Math::SIMD {
 
         // Shortest Path: Flip the sign bit of all 4 floats instantly using XOR (-x, -y, -z, -w) to represent the same 3D orientation in space, but sit on opposite poles of the 4D hypersphere's surface.
         FORCE_INLINE Float4 Negate(Float4 v) { 
-            return _mm_xor_ps(v, _mm_set1_ps(Engine::Math::Constants::SIMD_NEG_ZERO)); // Instant XOR, no runtime broadcast
+            return _mm_xor_ps(v, Engine::Math::Constants::SIMD_NEG_ZERO); // Instant XOR, zero transition
         }
 
         // Q1 = this (a, b, c, d) | Q2 = rhs (x, y, z, w)
@@ -1265,7 +1265,7 @@ struct alignas(16) SIMDQuaternion {
             // We flip Q2 to force the camera to take the shortest physical rotation path.
             cosOmega = -cosOmega;
 
-            // Enforce shortest path by flipping ALL signs (X, Y, Z, W)
+            // Enforce shortest path by flipping ALL signs (X, Y, Z, W) to represent the same 3D orientation in space, but sit on opposite poles of the 4D hypersphere's surface.
             q2Reg = Engine::Math::SIMD::Negate(q2Reg);                  // SSE: q2Reg = _mm_xor_ps(q2Reg, _mm_set1_ps(-0.0f));
         }
 
