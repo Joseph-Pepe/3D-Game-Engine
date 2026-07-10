@@ -437,8 +437,34 @@ namespace Engine::Math::SIMD {
         using Float4 = __m128;
 
         FORCE_INLINE Float4 Zero() { return _mm_setzero_ps(); }
-        FORCE_INLINE Float4 Set(float x, float y, float z, float w) { return _mm_set_ps(w, z, y, x); } // Pack all three required angles into a single 128-bit register. Note: _mm_set_ps takes arguments in reverse order (w, z, y, x). 
-        FORCE_INLINE Float4 Set1(float v) { return _mm_set1_ps(v); } // Broadcasts scalar to all 4 slots        
+
+        // =========================
+        // --- SIMD PACKER (SET) ---
+        // =========================
+        /*  
+            - Takes 4 distinct, separate values (or scalars) and packs them together into a single 128-bit register (or vector). 
+            - e.g., used when constructing positions, quaternions, or matrices where every lane stores a different piece of data.
+            - Memory layout in the hardware register:
+
+              [ 1.5f | 2.0f | 3.5f | 1.0f ]
+                (X)    (Y)    (Z)    (W)
+        */ 
+        
+        FORCE_INLINE Float4 Set(float x, float y, float z, float w) { return _mm_set_ps(w, z, y, x); } // Note: _mm_set_ps takes arguments in reverse order (w, z, y, x). 
+
+        // ===============================
+        // --- SIMD BROADCASTER (SET1) ---
+        // ===============================
+        /*  
+            - Takes a single scalar value and copies (or broadcasts) it across all four lanes of the register simultaneously.
+            - Forces CPU to broadcast (or clone) the FPU scalar across the 128-bit vector register natively, avoiding memory entirely
+            - e.g., used when you need to perform uniform math on an entire vector (i.e., scalar multiplication, uniform offsets, and FMA constants).
+            - Memory layout in the hardware register:
+
+              [ 5.0f | 5.0f | 5.0f | 5.0f ]
+                (X)    (Y)    (Z)    (W)
+        */ 
+        FORCE_INLINE Float4 Set1(float v) { return _mm_set1_ps(v); } // Broadcasts scalar to all 4 slots.       
         
         // ==============================
         // --- MATHEMATICAL OPERATORS ---
@@ -501,14 +527,23 @@ namespace Engine::Math::SIMD {
         // DOT PRODUCT (MANUAL HORIZONTAL REDUCTION)
         // ===========================================
         /*
-            - Operates on separate execution ports and can overlap these manual instructions.
-            - Separate the mathematical operations and run them back to back manually to have the CPU interleave the operation pipelines to result in a much higher throughput.
+            - _mm_dp_ps(reg, other.reg, 0xFF) is a trap for performance because it tries to do too many things in one shot.
+            - It bundles 3 operations into one instruction.
+
+              1. Four float multiplications.
+              2. Multiple horizontal additions.
+              3. Apply a bitwise mask (0xFF).
+
+            - Bypass the _mm_dp_ps hardware trap by writing these instructions separately (i.e., fast manual reduction).
+            - Operates on separate execution ports and can overlap (i.e., interleave) these manual instructions.
+            - Separate the mathematical operations and run them back to back manually to have the CPU interleave the operation pipelines to result in a much higher throughput (+2x performance boost).
             - FMA/shuffle reduction will yield significant performance boost in heavy vector math operations (i.e., dot product).
-            - Bypass the _mm_dp_ps hardware trap using fast manual reduction.
             
-              [_mm_mul_ps] ~4 cycles
-              [_mm_movehl_ps, _mm_shuffle_ps] ~1 cycle
-              [_mm_add_ps, _mm_add_ss] ~3-4 cycles
+              [_mm_mul_ps]      ~4 cycles
+              [_mm_movehl_ps]   ~1 cycle
+              [_mm_shuffle_ps]  ~1 cycle
+              [_mm_add_ps]      ~3-4 cycles
+              [_mm_add_ss]      ~3-4 cycles
         */
 
         FORCE_INLINE float Dot3(Float4 a, Float4 b) { 
@@ -595,9 +630,9 @@ namespace Engine::Math::SIMD {
             __m128 z1 = _mm_shuffle_ps(q1, q1, _MM_SHUFFLE(2, 2, 2, 2));
 
             // Shuffle Q2 for the specific Hamilton cross-terms
-            __m128 tmp0 = _mm_shuffle_ps(q2, q2, _MM_SHUFFLE(3, 2, 1, 0));
-            __m128 tmp1 = _mm_shuffle_ps(q2, q2, _MM_SHUFFLE(2, 3, 0, 1));
-            __m128 tmp2 = _mm_shuffle_ps(q2, q2, _MM_SHUFFLE(1, 0, 3, 2));
+            __m128 tmp0 = _mm_shuffle_ps(q2, q2, _MM_SHUFFLE(3, 2, 1, 0));  // w, z, y, x
+            __m128 tmp1 = _mm_shuffle_ps(q2, q2, _MM_SHUFFLE(2, 3, 0, 1));  // z, w, x, y
+            __m128 tmp2 = _mm_shuffle_ps(q2, q2, _MM_SHUFFLE(1, 0, 3, 2));  // y, x, w, z
 
             // FMA (Fused Multiply-Add/Sub) sequence to resolve the complex numbers
             __m128 res = _mm_mul_ps(w1, q2);
@@ -1004,10 +1039,55 @@ public:
         return SIMDVector3D(Engine::Math::SIMD::FMAdd(diff, tReg, a.reg));
     }
 
+    // ==========================================
+    // --- STANDARD MATHEMATICAL OPERATORS ---
+    // ==========================================
+
     // --- MATHEMATICAL OPERATORS ---
     FORCE_INLINE SIMDVector3D operator+(const SIMDVector3D& other) const { return SIMDVector3D(Engine::Math::SIMD::Add(reg, other.reg)); } // Addition: result = this + other
     FORCE_INLINE SIMDVector3D operator-(const SIMDVector3D& other) const { return SIMDVector3D(Engine::Math::SIMD::Sub(reg, other.reg)); } // Subtraction: result = this - other
-    FORCE_INLINE SIMDVector3D operator*(float scalar) const { return SIMDVector3D(Engine::Math::SIMD::Mul(reg, Engine::Math::SIMD::Set1(scalar))); } // Scales the current vector in place
+    FORCE_INLINE SIMDVector3D operator*(const SIMDVector3D& other) const { return SIMDVector3D(Engine::Math::SIMD::Mul(reg, other.reg)); } // Vector Multiplication (Component-wise / Hadamard Product): result = this * other, useful for scaling a vector by a non-uniform scale (e.g., scaling an object's X axis by 2, but its Y axis by 5).                          
+    FORCE_INLINE SIMDVector3D operator*(float scalar) const { return SIMDVector3D(Engine::Math::SIMD::Mul(reg, Engine::Math::SIMD::Set1(scalar))); } // Scalar Multiplication: returns a brand new scaled copy of the vector.
+
+    // ==========================================
+    // --- IN-PLACE ASSIGNMENT OPERATORS ---
+    // ==========================================
+    
+    // Adds another vector to this vector in place
+    FORCE_INLINE SIMDVector3D& operator+=(const SIMDVector3D& other) {
+        reg = Engine::Math::SIMD::Add(reg, other.reg);
+        return *this;
+    }
+
+    // Subtracts another vector from this vector in place
+    FORCE_INLINE SIMDVector3D& operator-=(const SIMDVector3D& other) {
+        reg = Engine::Math::SIMD::Sub(reg, other.reg);
+        return *this;
+    }
+
+    // Multiplies another vector component-wise in place
+    FORCE_INLINE SIMDVector3D& operator*=(const SIMDVector3D& other) { 
+        reg = Engine::Math::SIMD::Mul(reg, other.reg); 
+        return *this;
+    }
+
+    // Adds a uniform scalar to all components in place
+    FORCE_INLINE SIMDVector3D& operator+=(float scalar) {
+        reg = Engine::Math::SIMD::Add(reg, Engine::Math::SIMD::Set1(scalar));
+        return *this;
+    }
+
+    // Subtracts a uniform scalar from all components in place
+    FORCE_INLINE SIMDVector3D& operator-=(float scalar) {
+        reg = Engine::Math::SIMD::Sub(reg, Engine::Math::SIMD::Set1(scalar));
+        return *this;
+    }
+
+    // Scales all components by a uniform scalar in place
+    FORCE_INLINE SIMDVector3D& operator*=(float scalar) { 
+        reg = Engine::Math::SIMD::Mul(reg, Engine::Math::SIMD::Set1(scalar)); 
+        return *this;
+    }
     
     // --- DOT & CROSS PRODUCT ---
 
@@ -1107,7 +1187,7 @@ public:
 struct alignas(16) SIMDQuaternion {
     Engine::Math::SIMD::Float4 reg;
 
-    FORCE_INLINE SIMDQuaternion() : reg(Engine::Math::SIMD::Set(0.0f, 0.0f, 0.0f, 1.0f)) {} // Identity {0,0,0,1}
+    FORCE_INLINE SIMDQuaternion() : reg(Engine::Math::SIMD::Set(0.0f, 0.0f, 0.0f, 1.0f)) {} // SSE: _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f)
     FORCE_INLINE SIMDQuaternion(Engine::Math::SIMD::Float4 m) : reg(m) {}
     FORCE_INLINE SIMDQuaternion(float _x, float _y, float _z, float _w) : reg(Engine::Math::SIMD::Set(_x, _y, _z, _w)) {}
 
@@ -1121,10 +1201,11 @@ struct alignas(16) SIMDQuaternion {
     FORCE_INLINE void setZ(float val) { reg = Engine::Math::SIMD::InsertZ(reg, val); }
     FORCE_INLINE void setW(float val) { reg = Engine::Math::SIMD::InsertW(reg, val); }
 
-    FORCE_INLINE float x() const { return Engine::Math::SIMD::ExtractX(reg); }
-    FORCE_INLINE float y() const { return Engine::Math::SIMD::ExtractY(reg); }
-    FORCE_INLINE float z() const { return Engine::Math::SIMD::ExtractZ(reg); }
-    FORCE_INLINE float w() const { return Engine::Math::SIMD::ExtractW(reg); }
+    // --- HARDWARE GETTERS ---
+    FORCE_INLINE float x() const { return Engine::Math::SIMD::ExtractX(reg); }  // SSE: _mm_cvtss_f32(reg)
+    FORCE_INLINE float y() const { return Engine::Math::SIMD::ExtractY(reg); }  // SSE: _mm_cvtss_f32(_mm_shuffle_ps(reg, reg, _MM_SHUFFLE(1, 1, 1, 1)))
+    FORCE_INLINE float z() const { return Engine::Math::SIMD::ExtractZ(reg); }  // SSE: _mm_cvtss_f32(_mm_shuffle_ps(reg, reg, _MM_SHUFFLE(2, 2, 2, 2)))
+    FORCE_INLINE float w() const { return Engine::Math::SIMD::ExtractW(reg); }  // SSE: _mm_cvtss_f32(_mm_shuffle_ps(reg, reg, _MM_SHUFFLE(3, 3, 3, 3)))
 
     // --- DIRECTIONAL VECTOR ACCESSORS ---
     FORCE_INLINE SIMDVector3D GetForwardVector() const { return RotateVector(SIMDVector3D(0.0f, 0.0f, -1.0f, 0.0f)); } // Returns the normalized forward vector (assuming -Z is forward)
@@ -1185,7 +1266,7 @@ struct alignas(16) SIMDQuaternion {
             cosOmega = -cosOmega;
 
             // Enforce shortest path by flipping ALL signs (X, Y, Z, W)
-            q2Reg = Engine::Math::SIMD::Negate(q2Reg); 
+            q2Reg = Engine::Math::SIMD::Negate(q2Reg);                  // SSE: q2Reg = _mm_xor_ps(q2Reg, _mm_set1_ps(-0.0f));
         }
 
         // 2. GIMBAL / PRECISION FALLBACK: If the quaternions are nearly identical (angle is basically 0), division by sin(Omega) will cause a NaN explosion. Fallback to N-Lerp.
@@ -1193,10 +1274,8 @@ struct alignas(16) SIMDQuaternion {
             // Linear Interpolation (res = q1*(1-t) + q2*t)
             Engine::Math::SIMD::Float4 tReg = Engine::Math::SIMD::Set1(t);
             Engine::Math::SIMD::Float4 oneMinusT = Engine::Math::SIMD::Sub(Engine::Math::SIMD::Set1(1.0f), tReg);
-            SIMDQuaternion result(Engine::Math::SIMD::Add(
-                Engine::Math::SIMD::Mul(q1.reg, oneMinusT),
-                Engine::Math::SIMD::Mul(q2Reg, tReg)
-            ));
+            SIMDQuaternion result(Engine::Math::SIMD::Add(Engine::Math::SIMD::Mul(q1.reg, oneMinusT), Engine::Math::SIMD::Mul(q2Reg, tReg)));
+            
             // 3. Normalize to snap it back to the rotation sphere
             result.Normalize();
             return result;
@@ -1498,10 +1577,10 @@ struct alignas(64) Matrix4x4_SIMD {
         Matrix4x4_SIMD mat;
 
         // Creates an Identity Matrix entirely inside the registers.
-        mat.col[0] = Engine::Math::SIMD::Set(1.0f, 0.0f, 0.0f, 0.0f);  // { 1, 0, 0, 0 }
-        mat.col[1] = Engine::Math::SIMD::Set(0.0f, 1.0f, 0.0f, 0.0f);  // { 0, 1, 0, 0 }
-        mat.col[2] = Engine::Math::SIMD::Set(0.0f, 0.0f, 1.0f, 0.0f);  // { 0, 0, 1, 0 }
-        mat.col[3] = Engine::Math::SIMD::Set(0.0f, 0.0f, 0.0f, 1.0f);  // { 0, 0, 0, 1 }
+        mat.col[0] = Engine::Math::SIMD::Set(1.0f, 0.0f, 0.0f, 0.0f);  // { 1, 0, 0, 0 }  SSE: mat.col[0] = _mm_set_ps(0.0f, 0.0f, 0.0f, 1.0f); 
+        mat.col[1] = Engine::Math::SIMD::Set(0.0f, 1.0f, 0.0f, 0.0f);  // { 0, 1, 0, 0 }  SSE: mat.col[1] = _mm_set_ps(0.0f, 0.0f, 1.0f, 0.0f); 
+        mat.col[2] = Engine::Math::SIMD::Set(0.0f, 0.0f, 1.0f, 0.0f);  // { 0, 0, 1, 0 }  SSE: mat.col[2] = _mm_set_ps(0.0f, 1.0f, 0.0f, 0.0f); 
+        mat.col[3] = Engine::Math::SIMD::Set(0.0f, 0.0f, 0.0f, 1.0f);  // { 0, 0, 0, 1 }  SSE: mat.col[3] = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f); 
         return mat;
     }
 
@@ -1804,43 +1883,41 @@ struct alignas(64) Matrix4x4_SIMD {
     }
 };
 
-// --- SIMD MATRIX VECTOR MULTIPLICATION  (M = M1 * V1) ---
-// Multiplies a SIMD Vector against a SIMD Matrix
+// --- SIMD MATRIX VECTOR MULTIPLICATION  (Vector = Matrix1 * Vector1) --- Multiplies a Vector against a Matrix
 FORCE_INLINE SIMDVector3D operator*(const Matrix4x4_SIMD& mat, const SIMDVector3D& v) {
     // 1. Broadcast components (X, Y, Z, W) directly from register to register.
-    Engine::Math::SIMD::Float4 vx = Engine::Math::SIMD::BroadcastX(v.reg);   // {x, x, x, x}
-    Engine::Math::SIMD::Float4 vy = Engine::Math::SIMD::BroadcastY(v.reg);   // {y, y, y, y}
-    Engine::Math::SIMD::Float4 vz = Engine::Math::SIMD::BroadcastZ(v.reg);   // {z, z, z, z}
-    Engine::Math::SIMD::Float4 vw = Engine::Math::SIMD::BroadcastW(v.reg);   // {w, w, w, w}
+    Engine::Math::SIMD::Float4 vx = Engine::Math::SIMD::BroadcastX(v.reg);   // {x, x, x, x}  SSE: __m128 vx = _mm_shuffle_ps(v.reg, v.reg, _MM_SHUFFLE(0, 0, 0, 0)); 
+    Engine::Math::SIMD::Float4 vy = Engine::Math::SIMD::BroadcastY(v.reg);   // {y, y, y, y}  SSE: __m128 vy = _mm_shuffle_ps(v.reg, v.reg, _MM_SHUFFLE(1, 1, 1, 1)); 
+    Engine::Math::SIMD::Float4 vz = Engine::Math::SIMD::BroadcastZ(v.reg);   // {z, z, z, z}  SSE: __m128 vz = _mm_shuffle_ps(v.reg, v.reg, _MM_SHUFFLE(2, 2, 2, 2)); 
+    Engine::Math::SIMD::Float4 vw = Engine::Math::SIMD::BroadcastW(v.reg);   // {w, w, w, w}  SSE: __m128 vw = _mm_shuffle_ps(v.reg, v.reg, _MM_SHUFFLE(3, 3, 3, 3)); 
 
     // 2. Multiply each broadcasted component by its corresponding matrix column
-    Engine::Math::SIMD::Float4 res = Engine::Math::SIMD::Mul(vx, mat.col[0]);
+    Engine::Math::SIMD::Float4 res = Engine::Math::SIMD::Mul(vx, mat.col[0]);              // SSE: __m128 res = _mm_mul_ps(vx, mat.col[0]);
 
     // 3. Fused Multiply-Add the rest of the columns [res = (vy * col1) + res]
-    res = Engine::Math::SIMD::FMAdd(vy, mat.col[1], res);
-    res = Engine::Math::SIMD::FMAdd(vz, mat.col[2], res);
-    res = Engine::Math::SIMD::FMAdd(vw, mat.col[3], res);
+    res = Engine::Math::SIMD::FMAdd(vy, mat.col[1], res);  // SSE: res = _mm_fmadd_ps(vy, mat.col[1], res);  
+    res = Engine::Math::SIMD::FMAdd(vz, mat.col[2], res);  // SSE: res = _mm_fmadd_ps(vz, mat.col[2], res);
+    res = Engine::Math::SIMD::FMAdd(vw, mat.col[3], res);  // SSE: res = _mm_fmadd_ps(vw, mat.col[3], res);
 
     return SIMDVector3D(res);
 }
 
-// --- SIMD MATRIX MULTIPLICATION (M = M1 * M2) ---
-// Multiplies two SIMD matrices.
+// --- SIMD MATRIX MULTIPLICATION (Matrix = Matrix1 * Matrix2) --- Multiplies a Matrix against a Matrix
 FORCE_INLINE Matrix4x4_SIMD operator*(const Matrix4x4_SIMD& a, const Matrix4x4_SIMD& b) {
     Matrix4x4_SIMD res;
 
     // For each column in "b", broadcast its X, Y, Z, W components and multiply them against the corresponding columns of "a".
     for (int i = 0; i < 4; ++i) {
         // Data never leaves the SIMD registers
-        Engine::Math::SIMD::Float4 vx = Engine::Math::SIMD::BroadcastX(b.col[i]);
-        Engine::Math::SIMD::Float4 vy = Engine::Math::SIMD::BroadcastY(b.col[i]);
-        Engine::Math::SIMD::Float4 vz = Engine::Math::SIMD::BroadcastZ(b.col[i]);
-        Engine::Math::SIMD::Float4 vw = Engine::Math::SIMD::BroadcastW(b.col[i]);
+        Engine::Math::SIMD::Float4 vx = Engine::Math::SIMD::BroadcastX(b.col[i]);   // SSE: __m128 vx = _mm_shuffle_ps(b.col[i], b.col[i], _MM_SHUFFLE(0, 0, 0, 0));
+        Engine::Math::SIMD::Float4 vy = Engine::Math::SIMD::BroadcastY(b.col[i]);   // SSE: __m128 vy = _mm_shuffle_ps(b.col[i], b.col[i], _MM_SHUFFLE(1, 1, 1, 1));
+        Engine::Math::SIMD::Float4 vz = Engine::Math::SIMD::BroadcastZ(b.col[i]);   // SSE: __m128 vz = _mm_shuffle_ps(b.col[i], b.col[i], _MM_SHUFFLE(2, 2, 2, 2));
+        Engine::Math::SIMD::Float4 vw = Engine::Math::SIMD::BroadcastW(b.col[i]);   // SSE: __m128 vw = _mm_shuffle_ps(b.col[i], b.col[i], _MM_SHUFFLE(3, 3, 3, 3));
 
-        Engine::Math::SIMD::Float4 col = Engine::Math::SIMD::Mul(vx, a.col[0]);
-        col = Engine::Math::SIMD::FMAdd(vy, a.col[1], col);
-        col = Engine::Math::SIMD::FMAdd(vz, a.col[2], col);
-        col = Engine::Math::SIMD::FMAdd(vw, a.col[3], col);
+        Engine::Math::SIMD::Float4 col = Engine::Math::SIMD::Mul(vx, a.col[0]);     // SSE: __m128 col = _mm_mul_ps(vx, a.col[0]);
+        col = Engine::Math::SIMD::FMAdd(vy, a.col[1], col);   // SSE: col = _mm_fmadd_ps(vy, a.col[1], col);
+        col = Engine::Math::SIMD::FMAdd(vz, a.col[2], col);   // SSE: col = _mm_fmadd_ps(vz, a.col[2], col);
+        col = Engine::Math::SIMD::FMAdd(vw, a.col[3], col);   // SSE: col = _mm_fmadd_ps(vw, a.col[3], col);
         
         res.col[i] = col;
     }
