@@ -1167,6 +1167,9 @@ public:
 // ==================================================================================
 // LARGE WORLD COORDINATES (LWC)
 // ==================================================================================
+/*
+    - The toFloatVector() is the bridge between Large World Coordinates (64-bit) and Camera/Rendering Matrices (32-bit).
+*/
 struct Vector3DWorld {
     // 3 (64-bit) dedicated scalar values.
     double x, y, z;
@@ -1180,16 +1183,9 @@ struct Vector3DWorld {
     FORCE_INLINE constexpr Vector3DWorld operator-(const Vector3DWorld& other) const { return Vector3DWorld(x - other.x, y - other.y, z - other.z); }
 
     // --- THE LWC BRIDGE ---
-    // Safely casts a 64-bit world difference down to your ultra-fast 32-bit SIMD vector.
-    FORCE_INLINE Vector3D toFloatVector() const {
-        // By returning a Vector3D (SIMD wrapper), the downstream math instantly utilizes AVX/NEON.
-        return Vector3D(static_cast<float>(x), static_cast<float>(y), static_cast<float>(z));
-    }
-
-    // --- THE LWC BRIDGE ---
     // Safely casts 64-bit world differences down to your ultra-fast 32-bit hardware registers
     FORCE_INLINE SIMDVector3D toFloatVector() const {
-        // Appending 0.0f to the W lane explicitly marks this difference as a directional vector!
+        // Appending 0.0f to the W lane explicitly marks this difference as a directional vector! By returning a SIMDVector3D (SIMD wrapper), the downstream math instantly utilizes AVX/NEON.
         return SIMDVector3D(static_cast<float>(x), static_cast<float>(y), static_cast<float>(z), 0.0f);
     }
 };
