@@ -7,7 +7,6 @@
 
 #include <numbers> // C++20/26 Standardized Math Constants
 
-#include "Math/SSE-128/MathSSE128.h"
 #include "Math.h"
 #include "BVHGrid.h"
 #include "GPURHI.h"
@@ -141,7 +140,7 @@ struct CameraInputAxes {
 // It only knows its physical properties and how to build its matrices using optimized SIMD functions.
 struct alignas(16) CameraComponent {
     SIMDVector3D Position;       // 16 bytes
-    Quaternion Orientation;  // 16 bytes (Identity by default)
+    SIMDQuaternion Orientation;  // 16 bytes (Identity by default)
 
     float FOV = 90.0f;
     float AspectRatio = 16.0f / 9.0f;
@@ -151,14 +150,14 @@ struct alignas(16) CameraComponent {
     // Default initialization
     CameraComponent(SIMDVector3D startPos = SIMDVector3D(0.0f, 0.0f, 0.0f)) {
         Position = startPos;
-        Orientation = Quaternion(); // {0,0,0,1}
+        Orientation = SIMDQuaternion(); // {0,0,0,1}
     }
 
     // --- PURE SIMD QUATERNION TO VIEW MATRIX (100% SIMD Matrix Generation) ---
     // Calculating the conjugated rotation and translation directly into columns without branching or extracting to an intermediate transform struct.
     Matrix4x4_SIMD GetViewMatrix() const {
         // 1. To get a View Matrix, we need the INVERSE of the camera's rotation.
-        Quaternion invQ = Orientation.Conjugate();
+        SIMDQuaternion invQ = Orientation.Conjugate();
 
         // 2. Precompute Fused terms for the Rotation Matrix
         float x2 = invQ.x() + invQ.x(), y2 = invQ.y() + invQ.y(), z2 = invQ.z() + invQ.z();
@@ -188,7 +187,7 @@ struct alignas(16) CameraComponent {
     }
 
     void PrintTelemetry() const {
-        // Dynamically calculate the Forward vector from the Quaternion
+        // Dynamically calculate the Forward vector from the SIMDQuaternion
         SIMDVector3D localForward(0.0f, 0.0f, -1.0f, 0.0f);
         SIMDVector3D currentFront = Orientation.RotateVector(localForward);
         
@@ -254,7 +253,7 @@ public:
     // Evaluates the Spring Arm and directly mutates the CameraComponent
     void Update(
         const SIMDVector3D& playerPosition, 
-        const Quaternion& playerRotation, // Where the player is aiming
+        const SIMDQuaternion& playerRotation, // Where the player is aiming
         SpringArmComponent& arm, 
         CameraComponent& camera, 
         const SceneTLAS& physicsScene, 
@@ -428,7 +427,7 @@ public:
         SIMDVector3D localUp(0.0f, 1.0f, 0.0f, 0.0f);
         SIMDVector3D localForward(0.0f, 0.0f, -1.0f, 0.0f);
 
-        // 2. Rotate the base axes by the camera's current Quaternion
+        // 2. Rotate the base axes by the camera's current SIMDQuaternion
         SIMDVector3D camRight   = camera.Orientation.RotateVector(localRight);
         SIMDVector3D camUp      = camera.Orientation.RotateVector(localUp);
         SIMDVector3D camForward = camera.Orientation.RotateVector(localForward);
@@ -460,11 +459,11 @@ public:
 
         // 1. Create Delta Quaternions from the mouse input
         // Pitch rotates around the LOCAL X Axis (1,0,0)
-        Quaternion pitchDelta = Quaternion::AngleAxis(pitchAngle, SIMDVector3D(1.0f, 0.0f, 0.0f, 0.0f));
+        SIMDQuaternion pitchDelta = SIMDQuaternion::AngleAxis(pitchAngle, SIMDVector3D(1.0f, 0.0f, 0.0f, 0.0f));
         
         // Yaw rotates around the GLOBAL Y Axis (0,1,0) to prevent the camera from "rolling" diagonally 
         // If you want a Spaceship/Flight Sim camera, change this to Local Y!
-        Quaternion yawDelta = Quaternion::AngleAxis(yawAngle, SIMDVector3D(0.0f, 1.0f, 0.0f, 0.0f));
+        SIMDQuaternion yawDelta = SIMDQuaternion::AngleAxis(yawAngle, SIMDVector3D(0.0f, 1.0f, 0.0f, 0.0f));
 
         // 2. Combine the Rotations via Hamilton Product
         // Order matters! Global Yaw pre-multiplies, Local Pitch post-multiplies.
@@ -616,7 +615,7 @@ public:
             newFront = newFront * (1.0f / std::sqrt(lenSq));
             
             // Instantly snap the camera's quaternion to look down the spline!
-            camera.Orientation = Quaternion::FromDirection(newFront);
+            camera.Orientation = SIMDQuaternion::FromDirection(newFront);
         }
     }
 };
@@ -901,10 +900,10 @@ public:
             lookDirection = lookDirection * (1.0f / std::sqrt(lengthSq)); // Safe Normalize
             
             // Re-use your ultra-fast, trig-free direction to quaternion solver
-            Quaternion targetOrientation = Quaternion::FromDirection(lookDirection);
+            SIMDQuaternion targetOrientation = SIMDQuaternion::FromDirection(lookDirection);
             
             // Soft blend the camera's rotational shift to match player movement cleanly
-            outCamera.Orientation = Quaternion::Slerp(outCamera.Orientation, targetOrientation, 1.0f - decayFactor);
+            outCamera.Orientation = SIMDQuaternion::Slerp(outCamera.Orientation, targetOrientation, 1.0f - decayFactor);
         }
 
         // Pass the cinematic zone lens configuration down to the camera state
@@ -1065,7 +1064,7 @@ public:
             // Apply standard frame-rate independent tracking lag smoothing
             float decayFactor = std::exp2(-m_BlendState.TargetZone.TrackingLag * deltaTime);
             outCamera.Position = targetEvaluatedState.Position + ((outCamera.Position - targetEvaluatedState.Position) * decayFactor);
-            outCamera.Orientation = Quaternion::Slerp(outCamera.Orientation, targetEvaluatedState.Orientation, 1.0f - decayFactor);
+            outCamera.Orientation = SIMDQuaternion::Slerp(outCamera.Orientation, targetEvaluatedState.Orientation, 1.0f - decayFactor);
             outCamera.FOV = targetEvaluatedState.FOV;
         } 
         else {
@@ -1079,7 +1078,7 @@ public:
             // Linear interpolate camera vectors across tracking zones
             float t = m_BlendState.BlendAlpha;
             outCamera.Position = SIMDVector3D::Lerp(sourceTrackResult.Position, targetTrackResult.Position, t);
-            outCamera.Orientation = Quaternion::Slerp(sourceTrackResult.Orientation, targetTrackResult.Orientation, t);
+            outCamera.Orientation = SIMDQuaternion::Slerp(sourceTrackResult.Orientation, targetTrackResult.Orientation, t);
             outCamera.FOV = sourceTrackResult.FOV + (targetTrackResult.FOV - sourceTrackResult.FOV) * t;
         }
     }
@@ -1114,7 +1113,7 @@ private:
         float lengthSq = lookDir.dot(lookDir);
         if (lengthSq > 1e-6f) {
             lookDir = lookDir * (1.0f / std::sqrt(lengthSq));
-            outState.Orientation = Quaternion::FromDirection(lookDir);
+            outState.Orientation = SIMDQuaternion::FromDirection(lookDir);
         }
     }
 
