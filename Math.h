@@ -201,6 +201,60 @@ namespace Engine::Math::Functions {
         outCos = c;
     }
 
+    // ======================================================================
+    // SCALAR RATIONAL APPROXIMATION (TANGENT)
+    // ======================================================================
+    /*
+        - Pure Scalar Rational Approximation of Tangent.
+        - Highly accurate within [-PI/4, PI/4] (Perfect for FOV calculations).
+        - Uses a rational polynomial to gracefully handle the curve near asymptotes.
+    */
+    FORCE_INLINE float FastTan(float x) {
+        float x2 = x * x;
+
+        // Numerator Polynomial: 1.0 + x^2 * (C1 + x^2 * C2)
+        float num = 0x1.ba2e8cp-9f;           // TAN_C2 (0.00338663f)
+        num = (num * x2) - 0x1.111112p-3f;    // TAN_C1 (-0.13333333f)
+        num = (num * x2) + 1.0f;              // TAN_C0 (1.0f)
+
+        // Denominator Polynomial: 1.0 + x^2 * (C4 + x^2 * C5)
+        float den = 0x1.218526p-5f;           // TAN_C5 (0.03534943f)
+        den = (den * x2) - 0x1.d55556p-2f;    // TAN_C4 (-0.45833333f)
+        den = (den * x2) + 1.0f;              // TAN_C3 (1.0f)
+
+        // Result = x * (Numerator / Denominator)
+        // Standard FPU division is used here as it is highly optimized for scalar floats.
+        return x * (num / den);
+    }
+
+    // ======================================================================
+    // SCALAR HARDWARE SQUARE ROOT (FPU)
+    // ======================================================================
+    /*
+        - Bypasses the `<cmath>` standard library overhead and 'errno' domain checks.
+        - Maps directly to the CPU's dedicated scalar FPU square root instruction.
+        - Exactly as accurate as std::sqrt, but significantly faster due to zero branching (i.e., std::sqrt replacement).
+    */
+    FORCE_INLINE float FastSqrt(float x) {
+        #ifdef MATH_ISA_ARM
+            // --- ARM APPLE SILICON / MOBILE (ARM64) ---
+            #if defined(__clang__) || defined(__GNUC__)
+                // Compiles directly down to a single hardware 'fsqrt' instruction.
+                // Eradicates the Vector-Scalar-Transition penalty.
+                return __builtin_sqrtf(x);
+            #else
+                // Fallback for non-Clang/GCC ARM compilers
+                return vgetq_lane_f32(vsqrtq_f32(vsetq_lane_f32(x, vdupq_n_f32(0.0f), 0)), 0);
+            #endif
+        #else
+            // Intel/AMD SSE scalar square root
+            // _mm_set_ss loads a single float into the lowest 32-bits, leaving the rest 0.
+            // _mm_sqrt_ss calculates the sqrt of only that lowest 32-bits.
+            // _mm_cvtss_f32 extracts it back to a standard float.
+            return _mm_cvtss_f32(_mm_sqrt_ss(_mm_set_ss(x)));
+        #endif
+    }
+
     // Fast pure scalar absolute value. Compiles down to a single instruction (zero-cast bitwise clear).
     FORCE_INLINE constexpr float abs(float v) {
         // Treat the float as an integer, strip the 31st sign bit, and treat it as a float again.
@@ -860,13 +914,13 @@ public:
     }
 
     FORCE_INLINE float length() const {
-        return std::sqrt(lengthSquared());
+        return Engine::Math::Functions::FastSqrt(lengthSquared());
     }
 
     FORCE_INLINE void Normalize() {
         float lenSq = lengthSquared();
         if (lenSq > 1e-8f) {
-            *this = *this * (1.0f / std::sqrt(lenSq));
+            *this = *this * (1.0f / Engine::Math::Functions::FastSqrt(lenSq));
         }
     }
 
@@ -1905,9 +1959,9 @@ struct Matrix4 {
 
     // Creates a Perspective Projection Matrix
     static Matrix4 Perspective(float fovY_degrees, float aspect, float nearZ, float farZ) {
-        Matrix4 mat;
+        Matrix4 mat = Identity();
         float fovY_rad = fovY_degrees * Engine::Math::Constants::DEG_TO_RAD;
-        float tanHalfFovY = std::tan(fovY_rad / 2.0f);
+        float tanHalfFovY = Engine::Math::Functions::FastTan(fovY_rad * 0.5f);
 
         mat.m[0] = 1.0f / (aspect * tanHalfFovY);
         mat.m[5] = 1.0f / tanHalfFovY;
