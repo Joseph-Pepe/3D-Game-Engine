@@ -1076,29 +1076,43 @@ namespace Engine::ISAArch {
                 }
 
                 // ===================================================
-                // HORIZONTAL REDUCTION SUM (REDUCTION TREE ALGORITHM)
+                // AVX2 HORIZONTAL SUM  (REDUCTION TREE ALGORITHM)
                 // ===================================================
                 /*
                     - Takes a large set of data (e.g., 8 floats) and reduces it down to a single scalar value by repeatedly applying a math operator.
                     - SIMD registers are wide (i.e., horizontal), so we apply this process across lanes (i.e., horizontal reduction).
                     - Reduces the 256-bit register down to a single float by adding these lanes together (i.e., horizontal sum).
                     - AVX2 doesn't have a single-instruction horizontal add across 256 bits, so we fold it into two parts repeatedly.
+
+                      Lanes:  [0]   [1]   [2]   [3]   [4]   [5]   [6]   [7]
+                                \   /       \   /       \   /       \   /
+                      Pairs:    [0+1]       [2+3]       [4+5]       [6+7]
+                                    \         /             \         /
+                      Quads:     [(0+1)+(2+3)]           [(4+5)+(6+7)]
+                                        \                     /
+                      Scalar:         [((0+1)+(2+3)) + ((4+5)+(6+7))]
+
+                    - Collapses an 8-wide AVX2 register into a single scalar float.
+                    - Significantly faster than extracting to a float[8] array and looping.
+                    - Uses hardware folding: 8 -> 4 -> 2 -> 1
                 */
                
                 // Folds an 8-wide __m256 register down to a single scalar float inside the silicon registers without touching memory.
                 static inline float reduce_add(register_type a) {
-                    // Step 1: Split the 256-bit register into two 128-bit registers and add them (i.e., fold 8-Wide(256-bit) into 2 separate 4-Wide(128-bit)).
-                    __m128 lo = _mm256_castps256_ps128(a);
-                    __m128 hi = _mm256_extractf128_ps(a, 1);
-                    lo = _mm_add_ps(lo, hi);
+                    // Step 1: Split the 256-bit register into two 128-bit registers (i.e., fold 8-Wide(256-bit) into 2 separate 4-Wide(128-bit)).
+                    __m128 vlow = _mm256_castps256_ps128(a);
+                    __m128 vhigh = _mm256_extractf128_ps(a, 1); 
+
+                    // Step 2: After extracting the high 128 bits, add them to the low 128 bits
+                    vlow = _mm_add_ps(vlow, vhigh); 
                     
-                    // Step 2: Collapse the remaining 4 floats down to 1 (i.e., fold 128-bit down to 64-bit, then down to 32-bit scalar).
-                    __m128 shuf = _mm_movehdup_ps(lo);
-                    __m128 sums = _mm_add_ps(lo, shuf);
+                    // Step 3: Collapse the remaining 4 floats down to 1 (i.e., fold 128-bit (4 floats) down to 64-bit (2 floats), then fold 64-bit (2 floats) into 32-bit (1 float) scalar).
+                    __m128 shuf = _mm_movehdup_ps(vlow);
+                    __m128 sums = _mm_add_ps(vlow, shuf);
                     shuf = _mm_movehl_ps(shuf, sums);
                     sums = _mm_add_ss(sums, shuf);
                     
-                    // 3. Extract the final single float
+                    // Step 4: Extract the final collapsed single scalar float safely
                     return _mm_cvtss_f32(sums);
                 }
 
