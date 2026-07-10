@@ -1677,10 +1677,10 @@ struct alignas(64) Matrix4x4_SIMD {
         float fovY_rad = fovY_degrees * Engine::Math::Constants::DEG_TO_RAD;
         
         // 1. Pack the scalar angle into a 128-bit register
-        Float4 halfFovReg = Engine::Math::SIMD::Set1(fovY_rad * 0.5f);
+        Engine::Math::SIMD::Float4 halfFovReg = Engine::Math::SIMD::Set1(fovY_rad * 0.5f);
         
         // 2. Evaluate using the SIMD Fast Tangent
-        Float4 tanReg = Engine::Math::SIMD::FastTan(halfFovReg);
+        Engine::Math::SIMD::Float4 tanReg = Engine::Math::SIMD::FastTan(halfFovReg);
         
         // 3. Extract the scalar result back out
         float tanHalfFovY = Engine::Math::SIMD::ExtractX(tanReg);
