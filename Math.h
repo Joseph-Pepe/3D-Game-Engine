@@ -156,29 +156,29 @@ namespace Engine::Math::Constants {
     // TRANSCENDENTAL POLYNOMIAL CONSTANTS (SCALAR)
     // ======================================================================
     // Sine
-    inline constexpr float S_SIN_C9 = 0x1.71de3ap-19f;
-    inline constexpr float S_SIN_C7 = -0x1.a01a02p-13f;
-    inline constexpr float S_SIN_C5 = 0x1.111112p-7f;
-    inline constexpr float S_SIN_C3 = -0x1.555556p-3f;
+    inline constexpr float S_SIN_C9 = 0x1.71de3ap-19f;    //  0.00000275573f   ( 1/9!)
+    inline constexpr float S_SIN_C7 = -0x1.a01a02p-13f;   // -0.00019841269f   (-1/7!)
+    inline constexpr float S_SIN_C5 = 0x1.111112p-7f;     //  0.00833333333f   ( 1/5!)
+    inline constexpr float S_SIN_C3 = -0x1.555556p-3f;    // -0.16666666667f   (-1/3!)
     
     // Cosine
-    inline constexpr float S_COS_C8 = 0x1.a01a02p-16f;
-    inline constexpr float S_COS_C6 = -0x1.6c16c2p-10f;
-    inline constexpr float S_COS_C4 = 0x1.555556p-5f;
-    inline constexpr float S_COS_C2 = -0x1.000000p-1f;
+    inline constexpr float S_COS_C8 = 0x1.a01a02p-16f;    //  0.00002480158f   ( 1/8!)
+    inline constexpr float S_COS_C6 = -0x1.6c16c2p-10f;   // -0.00138888888f   (-1/6!)
+    inline constexpr float S_COS_C4 = 0x1.555556p-5f;     //  0.04166666666f   ( 1/4!)
+    inline constexpr float S_COS_C2 = -0x1.000000p-1f;    // -0.5f             (-1/2!)
     
-    // Tangent
-    inline constexpr float S_TAN_C0 = 0x1.0p+0f;
-    inline constexpr float S_TAN_C1 = -0x1.111112p-3f;
-    inline constexpr float S_TAN_C2 = 0x1.ba2e8cp-9f;
-    inline constexpr float S_TAN_C3 = 0x1.0p+0f;
-    inline constexpr float S_TAN_C4 = -0x1.d55556p-2f;
-    inline constexpr float S_TAN_C5 = 0x1.218526p-5f;
+    // Tangent (Rational Approximation)
+    inline constexpr float S_TAN_C0 = 0x1.0p+0f;          //  1.0f
+    inline constexpr float S_TAN_C1 = -0x1.111112p-3f;    // -0.13333333f
+    inline constexpr float S_TAN_C2 = 0x1.ba2e8cp-9f;     //  0.00338663f
+    inline constexpr float S_TAN_C3 = 0x1.0p+0f;          //  1.0f
+    inline constexpr float S_TAN_C4 = -0x1.d55556p-2f;    // -0.45833333f
+    inline constexpr float S_TAN_C5 = 0x1.218526p-5f;     //  0.03534943f
 
-    // Range Reduction
-    inline constexpr float S_INV_TWO_PI = 0x1.45f306p-3f;
-    inline constexpr float S_TWO_PI_A   = 0x1.921fb0p+2f;
-    inline constexpr float S_TWO_PI_B   = 0x1.4442d1p-20f;
+    // Cody-Waite Range Reduction (2 * PI)
+    inline constexpr float S_INV_TWO_PI = 0x1.45f306p-3f; //  0.15915494f      (1 / 2PI)
+    inline constexpr float S_TWO_PI_A   = 0x1.921fb0p+2f; //  6.28318501f      (High-precision chunk)
+    inline constexpr float S_TWO_PI_B   = 0x1.4442d1p-20f;//  2.96690463e-7f   (Low-precision tail)
 }
 
 // Scalar Domain (1D Scalar Math): strictly for operations that only operate on scalar floats.
