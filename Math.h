@@ -146,6 +146,11 @@ namespace Engine::Math::Constants {
     // PI Constants
     static const Float4 ACOS_C0 = SIMD_CONST(PI_HALF);         //  1.57079632679f
     static const Float4 ACOS_PI = SIMD_CONST(PI);              //  3.14159265359f
+
+    // Cody-Waite Range Reduction Constants (Pre-Broadcasted for SIMD FastSinCos)
+    static const Float4 INV_TWO_PI = SIMD_CONST(0x1.45f306p-3f);   // 1.0f / (2.0f * PI)
+    static const Float4 TWO_PI_HI   = SIMD_CONST(0x1.921fb0p+2f);  // High-precision chunk of (2 * PI)
+    static const Float4 TWO_PI_LO   = SIMD_CONST(0x1.4442d1p-20f); // Low-precision tail of (2 * PI)
 }
 
 // Scalar Domain (1D Scalar Math): strictly for operations that only operate on scalar floats.
@@ -934,27 +939,28 @@ namespace Engine::Math::SIMD {
     // ======================================================================
     // COMBINED SIMD TRANSCENDENTAL APPROXIMATION (SINE & COSINE)
     // ======================================================================
+    /*
+        - Evaluates both Sine and Cosine simultaneously across all lanes.
+        - Uses Cody-Waite range reduction to safely process massive coordinates.
+    */
     FORCE_INLINE std::pair<Float4, Float4> FastSinCos(Float4 x) {
         // 1. Range Reduction to [-PI, PI] across all 4 lanes
-        Float4 invTwoPi = Set1(0x1.45f306p-3f);
-        Float4 cycles = FastFloor(Add(Mul(x, invTwoPi), Set1(0.5f)));
+        Float4 cycles = FastFloor(Add(Mul(x, Engine::Math::Constants::INV_TWO_PI), Engine::Math::Constants::SIMD_HALF));
 
-        // Cody-Waite FMA subtraction
-        Float4 twoPiA = Set1(0x1.921fb0p+2f);
-        Float4 twoPiB = Set1(0x1.4442d1p-20f);
-        x = Sub(Sub(x, Mul(cycles, twoPiA)), Mul(cycles, twoPiB));
+        // Cody-Waite FMA subtraction: x = (x - (cycles * TWO_PI_A)) - (cycles * TWO_PI_B)
+        x = Sub(Sub(x, Mul(cycles, Engine::Math::Constants::TWO_PI_A)), Mul(cycles, Engine::Math::Constants::TWO_PI_B));
 
         // 2. Evaluate both Sine and Cosine simultaneously (Sharing x^2)
         Float4 x2 = Mul(x, x);
 
-        // Sine Evaluation
+        // Sine Evaluation (Horner's Method)
         Float4 s = FMAdd(x2, Engine::Math::Constants::SIN_C9, Engine::Math::Constants::SIN_C7);
         s = FMAdd(s, x2, Engine::Math::Constants::SIN_C5);
         s = FMAdd(s, x2, Engine::Math::Constants::SIN_C3);
         s = FMAdd(s, x2, Engine::Math::Constants::SIN_1);
         Float4 outSin = Mul(s, x);
 
-        // Cosine Evaluation
+        // Cosine Evaluation (Horner's Method)
         Float4 c = FMAdd(x2, Engine::Math::Constants::COS_C8, Engine::Math::Constants::COS_C6);
         c = FMAdd(c, x2, Engine::Math::Constants::COS_C4);
         c = FMAdd(c, x2, Engine::Math::Constants::COS_C2);
