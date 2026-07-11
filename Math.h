@@ -1137,9 +1137,14 @@ public:
     // --- AXIS INDEXING ---
     // Safely extracts X (0), Y (1), Z (2), or W (3) dynamically without breaking strict aliasing.
     FORCE_INLINE float operator[](int axis) const {
-        // We use std::bit_cast (C++20) to treat the register as a safe array entirely on the stack, allowing dynamic indexing without UB.
-        auto arr = std::bit_cast<std::array<float, 4>>(reg);
-        return arr[axis];
+        assert(axis >= 0 && axis <= 3 && "SIMDVector3D index out of bounds!");
+        switch (axis) {
+            case 0: return x();
+            case 1: return y();
+            case 2: return z();
+            case 3: return w();
+            default: return 0.0f; // Should never hit this due to assert
+        }
     }
 
     // --- SIMD LINEAR INTERPOLATION (V = a + t * (b - a)) ---
