@@ -1912,6 +1912,83 @@ namespace Engine::ISAArch {
                 static inline float32x4_t cast_to(register_type a) { static_assert(sizeof(Target) == 0, "SIMD Mismatch: Cannot cast 8x16-bit to 4x32-bit directly."); return vdupq_n_f32(0.0f); }
             };
         #endif // ENGINE_ARCH_NEON
+
+        // ========================================================
+        // --- SCALAR BACKEND (The Absolute Fallback) ---
+        // ========================================================
+        /*
+            - Used when vector hardware is unavailable or SIMD flag is disabled (ENGINE_ARCH_SCALAR).
+            - Ensures the exact same code will silently transition into standard scalar operations without compilation errors.
+        */
+        template <typename T> struct simd_traits<T, simd_abi::scalar> {
+            using register_type = T;
+            using mask_type     = bool;
+            static constexpr int size = 1;
+
+            static inline register_type broadcast(T v) { return v; }
+            static inline register_type load(const T* mem) { return *mem; }
+            static inline void store(T* mem, register_type v) { *mem = v; }
+
+            static inline register_type add(register_type a, register_type b) { return a + b; }
+            static inline register_type sub(register_type a, register_type b) { return a - b; }
+            static inline register_type mul(register_type a, register_type b) { return a * b; }
+            static inline register_type div(register_type a, register_type b) { return a / b; }
+
+            static inline register_type min(register_type a, register_type b) { return std::min(a, b); }
+            static inline register_type max(register_type a, register_type b) { return std::max(a, b); }
+
+            // Math
+            // static inline register_type rsqrt(register_type a) { return 1.0f / Engine::Math::Functions::FastSqrt(a); }
+            static inline register_type rcp(register_type a) { return 1.0f / a; }
+            // static inline register_type abs(register_type a) { return Engine::Math::Functions::abs(a); }
+            // static inline register_type floor(register_type a) { return Engine::Math::Functions::FastFloor(a); }
+            // static inline register_type ceil(register_type a) { return std::ceil(a); } // Standard ceil fallback
+            static inline register_type fmadd(register_type a, register_type b, register_type c) { return (a * b) + c; }
+            
+            // Relational
+            static inline mask_type cmp_gt(register_type a, register_type b) { return a > b; }
+            static inline mask_type cmp_lt(register_type a, register_type b) { return a < b; }
+            static inline mask_type cmp_eq(register_type a, register_type b) { return a == b; }
+
+            // Mask Logic
+            static inline mask_type mask_not(mask_type a) { return !a; }
+            static inline mask_type mask_and(mask_type a, mask_type b) { return a && b; }
+            static inline mask_type mask_or(mask_type a, mask_type b) { return a || b; }
+
+            // Bitwise (Integers only via SFINAE)
+            static inline register_type bit_xor(register_type a, register_type b) { return a ^ b; }
+            static inline register_type bit_or(register_type a, register_type b)  { return a | b; }
+            static inline register_type bit_and(register_type a, register_type b) { return a & b; }
+            
+            static inline register_type negate(register_type a) { return -a; }
+
+            // --- The Missing API Endpoints ---
+            
+            // Blend: Standard ternary operator
+            static inline register_type blend(mask_type mask, register_type true_v, register_type false_v) {
+                return mask ? true_v : false_v;
+            }
+
+            // Reduction: Scalar is already reduced
+            static inline T reduce_add(register_type a) { return a; }
+
+            // Gather: Direct array access using scalar index
+            static inline register_type gather(const T* base_addr, uint32_t index) {
+                return base_addr[index];
+            }
+
+            // Mask Evaluation
+            static inline bool mask_any(mask_type a) { return a; }
+            static inline bool mask_all(mask_type a) { return a; }
+
+            // Shuffle: Scalar has only one lane, return itself
+            template <int i0, int i1, int i2, int i3>
+            static inline register_type shuffle(register_type a) { return a; }
+
+            // Casting
+            template <typename Target>
+            static inline Target cast_to(register_type a) { return static_cast<Target>(a); }
+        };
     }
 
     // ==========================================
