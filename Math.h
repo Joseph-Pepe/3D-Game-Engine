@@ -151,6 +151,34 @@ namespace Engine::Math::Constants {
     static const Float4 INV_TWO_PI = SIMD_CONST(0x1.45f306p-3f);   // 1.0f / (2.0f * PI)
     static const Float4 TWO_PI_HI   = SIMD_CONST(0x1.921fb0p+2f);  // High-precision chunk of (2 * PI)
     static const Float4 TWO_PI_LO   = SIMD_CONST(0x1.4442d1p-20f); // Low-precision tail of (2 * PI)
+
+    // ======================================================================
+    // TRANSCENDENTAL POLYNOMIAL CONSTANTS (SCALAR)
+    // ======================================================================
+    // Sine
+    inline constexpr float S_SIN_C9 = 0x1.71de3ap-19f;
+    inline constexpr float S_SIN_C7 = -0x1.a01a02p-13f;
+    inline constexpr float S_SIN_C5 = 0x1.111112p-7f;
+    inline constexpr float S_SIN_C3 = -0x1.555556p-3f;
+    
+    // Cosine
+    inline constexpr float S_COS_C8 = 0x1.a01a02p-16f;
+    inline constexpr float S_COS_C6 = -0x1.6c16c2p-10f;
+    inline constexpr float S_COS_C4 = 0x1.555556p-5f;
+    inline constexpr float S_COS_C2 = -0x1.000000p-1f;
+    
+    // Tangent
+    inline constexpr float S_TAN_C0 = 0x1.0p+0f;
+    inline constexpr float S_TAN_C1 = -0x1.111112p-3f;
+    inline constexpr float S_TAN_C2 = 0x1.ba2e8cp-9f;
+    inline constexpr float S_TAN_C3 = 0x1.0p+0f;
+    inline constexpr float S_TAN_C4 = -0x1.d55556p-2f;
+    inline constexpr float S_TAN_C5 = 0x1.218526p-5f;
+
+    // Range Reduction
+    inline constexpr float S_INV_TWO_PI = 0x1.45f306p-3f;
+    inline constexpr float S_TWO_PI_A   = 0x1.921fb0p+2f;
+    inline constexpr float S_TWO_PI_B   = 0x1.4442d1p-20f;
 }
 
 // Scalar Domain (1D Scalar Math): strictly for operations that only operate on scalar floats.
@@ -214,22 +242,22 @@ namespace Engine::Math::Functions {
     // 1. Standalone Scalar Sine (9th-Order Horner's Method) that is valid strictly for angles between [-PI, PI] (e.g., calculating a bullet trajectory arc).
     FORCE_INLINE float FastSin(float x) {
         float x2 = x * x;
-        float s = 0x1.71de3ap-19f;             // SIN_C9
-        s = (s * x2) - 0x1.a01a02p-13f;        // SIN_C7
-        s = (s * x2) + 0x1.111112p-7f;         // SIN_C5
-        s = (s * x2) - 0x1.555556p-3f;         // SIN_C3
-        s = (s * x2) + 1.0f;                   // SIN_1
+        float s = Engine::Math::Constants::S_SIN_C9;
+        s = (s * x2) + Engine::Math::Constants::S_SIN_C7;
+        s = (s * x2) + Engine::Math::Constants::S_SIN_C5;
+        s = (s * x2) + Engine::Math::Constants::S_SIN_C3;
+        s = (s * x2) + 1.0f;
         return s * x;
     }
 
     // 2. Standalone Scalar Cosine (8th-Order Horner's Method) that is valid strictly for angles between [-PI, PI].
     FORCE_INLINE float FastCos(float x) {
         float x2 = x * x;
-        float c = 0x1.a01a02p-16f;             // COS_C8
-        c = (c * x2) - 0x1.6c16c2p-10f;        // COS_C6
-        c = (c * x2) + 0x1.555556p-5f;         // COS_C4
-        c = (c * x2) - 0.5f;                   // COS_C2
-        c = (c * x2) + 1.0f;                   // COS_1
+        float c = Engine::Math::Constants::S_COS_C8;
+        c = (c * x2) + Engine::Math::Constants::S_COS_C6;
+        c = (c * x2) + Engine::Math::Constants::S_COS_C4;
+        c = (c * x2) + Engine::Math::Constants::S_COS_C2;
+        c = (c * x2) + 1.0f;
         return c;
     }
 
@@ -246,27 +274,27 @@ namespace Engine::Math::Functions {
     // 3. 
     FORCE_INLINE std::pair<float, float> FastSinCos(float x) {
         // 1. Range Reduction to [-3.14 radians, 3.14 radians], wraps massive angles (e.g., x = 200.0f [200^8 = 2.56 x 10^18]) safely back to the -3.14 to 3.14 valid polynomial window to prevent NaN.
-        float cycles = FastFloor((x * 0x1.45f306p-3f) + 0.5f); // 0x1.45f306p-3f = 1.0f / (2.0f * PI)
+        float cycles = FastFloor((x * Engine::Math::Constants::S_INV_TWO_PI) + 0.5f); // 0x1.45f306p-3f = 1.0f / (2.0f * PI)
 
         // Cody-Waite 2-part FMA subtraction preserves mantissa precision for massive coordinates
         // 0x1.921fb0p+2f is the high-precision chunk of (2 * PI). 0x1.4442d1p-20f is the low-precision tail of (2 * PI).
-        x = (x - (cycles * 0x1.921fb0p+2f)) - (cycles * 0x1.4442d1p-20f);
+        x = (x - (cycles * Engine::Math::Constants::S_TWO_PI_A)) - (cycles * Engine::Math::Constants::S_TWO_PI_B);
 
         // 2. Evaluates both Sine and Cosine simultaneously to share the x^2 multiplication to save CPU cycles.
         float x2 = x * x;
 
-        float s = 0x1.71de3ap-19f;             // SIN_C9
-        s = (s * x2) - 0x1.a01a02p-13f;        // SIN_C7
-        s = (s * x2) + 0x1.111112p-7f;         // SIN_C5
-        s = (s * x2) - 0x1.555556p-3f;         // SIN_C3
-        s = (s * x2) + 1.0f;                   // SIN_1
+        float s = Engine::Math::Constants::S_SIN_C9;
+        s = (s * x2) + Engine::Math::Constants::S_SIN_C7;
+        s = (s * x2) + Engine::Math::Constants::S_SIN_C5;
+        s = (s * x2) + Engine::Math::Constants::S_SIN_C3;
+        s = (s * x2) + 1.0f;
         float outSin = s * x;
 
-        float c = 0x1.a01a02p-16f;             // COS_C8
-        c = (c * x2) - 0x1.6c16c2p-10f;        // COS_C6
-        c = (c * x2) + 0x1.555556p-5f;         // COS_C4
-        c = (c * x2) - 0.5f;                   // COS_C2
-        c = (c * x2) + 1.0f;                   // COS_1
+        float c = Engine::Math::Constants::S_COS_C8;
+        c = (c * x2) + Engine::Math::Constants::S_COS_C6;
+        c = (c * x2) + Engine::Math::Constants::S_COS_C4;
+        c = (c * x2) + Engine::Math::Constants::S_COS_C2;
+        c = (c * x2) + 1.0f;
         float outCos = c;
 
         // C++17: structured binding (i.e., tuple) constructs and packs the variables exactly where they are declared.
@@ -285,14 +313,14 @@ namespace Engine::Math::Functions {
         float x2 = x * x;
 
         // Numerator Polynomial: 1.0 + x^2 * (C1 + x^2 * C2)
-        float num = 0x1.ba2e8cp-9f;           // TAN_C2 (0.00338663f)
-        num = (num * x2) - 0x1.111112p-3f;    // TAN_C1 (-0.13333333f)
-        num = (num * x2) + 1.0f;              // TAN_C0 (1.0f)
+        float num = Engine::Math::Constants::S_TAN_C2;   
+        num = (num * x2) + Engine::Math::Constants::S_TAN_C1;   
+        num = (num * x2) + Engine::Math::Constants::S_TAN_C0;             
 
         // Denominator Polynomial: 1.0 + x^2 * (C4 + x^2 * C5)
-        float den = 0x1.218526p-5f;           // TAN_C5 (0.03534943f)
-        den = (den * x2) - 0x1.d55556p-2f;    // TAN_C4 (-0.45833333f)
-        den = (den * x2) + 1.0f;              // TAN_C3 (1.0f)
+        float den = Engine::Math::Constants::S_TAN_C5; 
+        den = (den * x2) + Engine::Math::Constants::S_TAN_C4;
+        den = (den * x2) + Engine::Math::Constants::S_TAN_C3;
 
         // Result = x * (Numerator / Denominator)
         // Standard FPU division is used here as it is highly optimized for scalar floats.
