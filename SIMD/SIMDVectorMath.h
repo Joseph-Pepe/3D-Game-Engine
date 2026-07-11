@@ -1012,20 +1012,20 @@ namespace Engine::Physics {
                 // 1. Calculate the scalar offset and strictly cast it to uint32_t
                 uint32_t batchOffset = static_cast<uint32_t>(batchJ * NATIVE_BATCH_SIZE);
 
-                // 3. Prevent double-resolving and self-resolving! Calculate the absolute index of every particle in Batch J
-                // Broadcast the scalar into a SIMD batch
+                // 3. Prevent double-resolving and self-resolving! 
                 NativeUIntBatch absoluteJ = NativeUIntBatch(batchOffset) + laneIndices;
-                
-                // Only apply physics if the neighbor's index is strictly greater than i
-                auto validCollisionMask = spatialMask && (absoluteJ > static_cast<uint32_t>(i));
-                // auto validCollisionMask = spatialMask && (absoluteJ > i).cast_to<float>();
 
-                // --- 2. BREAKING PERFECT OVERLAP SYMMETRY ---
+                // Returns a simd_mask<uint32_t>
+                auto forwardScanMask = (absoluteJ > static_cast<uint32_t>(i));
+                
+                // 3. COMBINE MASKS SAFELY: We MUST cast the integer mask to a float mask so the C++26 frontend knows how to route it to the silicon!
+                auto validCollisionMask = spatialMask && forwardScanMask.cast_to<float>();
+
+                // --- BREAKING PERFECT OVERLAP SYMMETRY ---
                 // Detect particles that are occupying the exact same space.
                 auto perfectOverlapMask = validCollisionMask && (distSq < epsilon);
 
-                // Artificially nudge overlapping particles along the X-axis by 0.1mm (1e-4f). 
-                // This gives the physics solver a non-zero vector to calculate a push direction.
+                // Artificially nudge overlapping particles along the X-axis by 0.1mm (1e-4f). This gives the physics solver a non-zero vector to calculate a push direction.
                 Engine::ISAArch::where(perfectOverlapMask, dx) = 1e-4f;
                 Engine::ISAArch::where(perfectOverlapMask, distSq) = 1e-8f; // (1e-4f)^2
 
