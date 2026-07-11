@@ -771,16 +771,17 @@ namespace Engine::Physics {
 
         // Pre-allocate memory to avoid heap fragmentation
         void Initialize(size_t maxParticles) {
-            // Divide by the hardware's native batch size, rounding up.
-            size_t batchCount = (maxParticles + NATIVE_BATCH_SIZE - 1) / NATIVE_BATCH_SIZE;
+            // ALWAYS pad to the nearest hardware boundary! Pads arrays to nearest batch multiple to prevent cache straddling and bounds check violations.
+            size_t paddedParticles = (maxParticles + NATIVE_BATCH_SIZE - 1) & ~(NATIVE_BATCH_SIZE - 1);
+            size_t batchCount = paddedParticles / NATIVE_BATCH_SIZE; 
 
             // Use the uninitialized resize backdoor to guarantee zero-overhead allocation
             positions.resize_uninitialized(batchCount);
             velocities.resize_uninitialized(batchCount);
             
-            // Keys are scalar, so we allocate exactly maxParticles
-            sortKeys.resize_uninitialized(maxParticles);
-            sortKeysBuffer.resize_uninitialized(maxParticles);
+            // Keys are scalar, so we allocate the padded count, not the raw count!
+            sortKeys.resize_uninitialized(paddedParticles);
+            sortKeysBuffer.resize_uninitialized(paddedParticles);
         }
     };
 
@@ -948,18 +949,16 @@ namespace Engine::Physics {
         for (uint32_t i = 0; i < NATIVE_BATCH_SIZE; ++i) {
             indices[i] = i;
         }
-
-        // NativeUIntBatch batch;
-        // batch.copy_from(indices, std::element_aligned);
-        // return batch;
         
-        // Native pointer constructor
-        return NativeUIntBatch(indices);
+        // C++20 explicit alignment promise triggers the fastest aligned hardware load
+        auto* aligned_ptr = std::assume_aligned<NATIVE_SIMD_BATCH_ALIGN>(indices);
+        return NativeUIntBatch(aligned_ptr);
     }
 
     // --- 5. LINEAR COLLISION SCAN ---
     // Extracts a single "reference particle", broadcasts it across a full 128/256/512-bit register, and tests it against entire batches of its neighbors simultaneously.
-    FORCE_INLINE void ResolveCollisions(std::span<SIMDVector3D> positions, 
+    FORCE_INLINE void ResolveCollisions(std::span<const SIMDVector3D> positions, 
+                                        std::span<SIMDVector3D> velocities, 
                                         size_t activeCount, 
                                         float particleRadius) {
         
@@ -1033,39 +1032,46 @@ namespace Engine::Physics {
                 // Safely overwrite non-colliding lanes to diameterSq (penetration becomes 0.0f)
                 Engine::ISAArch::where(!validCollisionMask, distSq) = diameterSq;
 
-                // Math: penetration = diameter - sqrt(distSq), actualDist can never be zero
+                // Math: actualDist can never be zero because of perfectOverlapMask
                 NativeFloatSIMDBatch actualDist = sqrt(distSq);
                 NativeFloatSIMDBatch penetration = diameter - actualDist;
 
-                // Math: pushFactor = (penetration * 0.5f) / actualDist
-                // We push each particle 50% of the way out of the collision.
-                NativeFloatSIMDBatch pushFactor = (penetration * 0.5f) / actualDist;
+                // We need the inverse distance to normalize the directional vector (dx, dy, dz)! Use hardware reciprocal for speed: 1.0f / actualDist
+                NativeFloatSIMDBatch invDist = rcp(actualDist);
 
-                // Calculate the exact positional offset
-                NativeFloatSIMDBatch pushX = dx * pushFactor;
-                NativeFloatSIMDBatch pushY = dy * pushFactor;
-                NativeFloatSIMDBatch pushZ = dz * pushFactor;
+                // The physical repulsive force
+                NativeFloatSIMDBatch impulseFactor = penetration * 50.0f; // Tune this multiplier!
+
+                // Combine the normalization and impulse scaling into one multiplier
+                NativeFloatSIMDBatch combinedScale = impulseFactor * invDist;
+
+                // Calculate the exact push vector (Normalized direction * Impulse)
+                NativeFloatSIMDBatch impulseX = dx * combinedScale;
+                NativeFloatSIMDBatch impulseY = dy * combinedScale;
+                NativeFloatSIMDBatch impulseZ = dz * combinedScale;
+
+                // SECURITY CLEAR: Ensure non-colliding lanes are strictly 0.0f before reduction! This prevents NaN infections if a non-colliding lane accidentally divided by zero earlier.
+                Engine::ISAArch::where(!validCollisionMask, impulseX) = 0.0f;
+                Engine::ISAArch::where(!validCollisionMask, impulseY) = 0.0f;
+                Engine::ISAArch::where(!validCollisionMask, impulseZ) = 0.0f;
 
                 // --- APPLY FORCES (NEWTON'S THIRD LAW) ---
 
-                // 1. Push Batch J away (Masked addition to prevent moving non-colliding lanes)
-                Engine::ISAArch::where(validCollisionMask, positions[batchJ].x) += pushX;
-                Engine::ISAArch::where(validCollisionMask, positions[batchJ].y) += pushY;
-                Engine::ISAArch::where(validCollisionMask, positions[batchJ].z) += pushZ;
+                // 1. Apply velocity impulse to Batch J (Pushing it away)
+                Engine::ISAArch::where(validCollisionMask, velocities[batchJ].x) += impulseX;
+                Engine::ISAArch::where(validCollisionMask, velocities[batchJ].y) += impulseY;
+                Engine::ISAArch::where(validCollisionMask, velocities[batchJ].z) += impulseZ;
 
-                // 2. Accumulate the opposite push for our Reference Particle
-                // We use the portable reduction (summing up the valid lanes)
-                // automatically ignores the lanes where validCollisionMask was false
-                // because pushX/Y/Z are exactly 0.0f in those lanes due to our penetration math.
-                moveX -= reduce(pushX);
-                moveY -= reduce(pushY);
-                moveZ -= reduce(pushZ);
+                // 2. Accumulate the opposite velocity impulse for the Reference Particle
+                moveX -= reduce(impulseX);
+                moveY -= reduce(impulseY);
+                moveZ -= reduce(impulseZ);
             }
 
-            // 4. Finally, apply the accumulated movement to the Reference Particle
-            positions[batchI].x[laneI] += moveX;
-            positions[batchI].y[laneI] += moveY;
-            positions[batchI].z[laneI] += moveZ;
+            // 3. Apply the accumulated velocity impulse to the Reference Particle
+            velocities[batchI].x[laneI] += moveX;
+            velocities[batchI].y[laneI] += moveY;
+            velocities[batchI].z[laneI] += moveZ;
         }
     }
 
@@ -1113,7 +1119,7 @@ namespace Engine::Physics {
         std::copy(tempVel.begin(), tempVel.end(), memory.velocities.begin());
 
         // 8. Resolve collisions
-        ResolveCollisions(posSpan, memory.activeParticleCount, 2.0f);
+        ResolveCollisions(posSpan, velSpan, memory.activeParticleCount, 2.0f);
 
         // t_PhysicsTransientArena.SetOffset(m_savedOffset) is automatically called.
         // The memory used by tempPos and tempVel is instantly "freed" in zero clock cycles.
