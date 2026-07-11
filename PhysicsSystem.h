@@ -238,7 +238,7 @@ public:
 
             // Calculate the exact starting angle for this specific thread's chunk ONLY
             float startAngle = (float)(startIdx + localStart) * deltaTheta;
-            auto [current_s, current_c] = Engine::Math::Functions::FastSinCos(startAngle); // unpack tuple into local variables.
+            auto [current_sin, current_cos] = Engine::Math::Functions::FastSinCos(startAngle); // unpack tuple into local variables.
 
             // OPTIMIZATION: Traded ~250 clock cycles of trigonometry and division for ~10 clock cycles of pure multiplication.
             for(size_t i = localStart; i < localEnd; ++i) {
@@ -250,22 +250,22 @@ public:
                 float r = 200.0f + randomOffset;
 
                 // 1. Apply the current rotation directly
-                r_pX[globalIdx] = current_c * r;
-                r_pY[globalIdx] = current_s * r;
+                r_pX[globalIdx] = current_cos * r;
+                r_pY[globalIdx] = current_sin * r;
                 r_pZ[globalIdx] = 0.0f; 
 
                 // Tangential velocity is just the perpendicular vector (-y, x)
-                r_vX[globalIdx] = -current_s * speed; 
-                r_vY[globalIdx] =  current_c * speed;
+                r_vX[globalIdx] = -current_sin * speed; 
+                r_vY[globalIdx] =  current_cos * speed;
                 r_vZ[globalIdx] = 0.0f;
 
                 // 2. Rotate the direction vector for the NEXT particle
                 // (This replaces ~200 cycles of std::cos/sin with just 6 cycles of ALU math)
-                float next_c = (current_c * cos_d) - (current_s * sin_d);
-                float next_s = (current_s * cos_d) + (current_c * sin_d);
+                float next_cos = (current_cos * cos_d) - (current_sin * sin_d);
+                float next_sin = (current_sin * cos_d) + (current_cos * sin_d);
                 
-                current_c = next_c;
-                current_s = next_s;
+                current_cos = next_cos;
+                current_sin = next_sin;
 
                 // 3. Prevent Floating Point Drift
                 // Over thousands of matrix multiplications, float precision degrades.
@@ -273,11 +273,11 @@ public:
                 // Bitwise AND (& 255) is an infinitely fast modulo check.
                 if ((i & 255) == 0) {
                     // Fast hardware approximation of 1.0 / sqrt(x)
-                    float magSq = current_c * current_c + current_s * current_s;
+                    float magSq = current_cos * current_cos + current_sin * current_sin;
                     float invMag = _mm_cvtss_f32(_mm_rsqrt_ss(_mm_set_ss(magSq)));
                     
-                    current_c *= invMag;
-                    current_s *= invMag;
+                    current_cos *= invMag;
+                    current_sin *= invMag;
                 }
             }
         });
