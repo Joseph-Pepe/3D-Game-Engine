@@ -234,13 +234,11 @@ public:
 
             // OPTIMIZATION: The Rotation Matrix sealed off from standard library safety checks
             float deltaTheta = 0.001f;
-            float cos_d, sin_d;
-            Engine::Math::Functions::FastSinCos(deltaTheta, sin_d, cos_d);
+            auto [sin_d, cos_d] = Engine::Math::Functions::FastSinCos(deltaTheta); // unpack tuple into local variables.
 
             // Calculate the exact starting angle for this specific thread's chunk ONLY
             float startAngle = (float)(startIdx + localStart) * deltaTheta;
-            float current_c, current_s;
-            Engine::Math::Functions::FastSinCos(startAngle, current_s, current_c);
+            auto [current_s, current_c] = Engine::Math::Functions::FastSinCos(startAngle); // unpack tuple into local variables.
 
             // OPTIMIZATION: Traded ~250 clock cycles of trigonometry and division for ~10 clock cycles of pure multiplication.
             for(size_t i = localStart; i < localEnd; ++i) {
