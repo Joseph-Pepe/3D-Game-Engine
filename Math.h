@@ -1979,61 +1979,24 @@ struct alignas(64) Matrix4x4_SIMD {
         using namespace Engine::Math::SIMD;
         Matrix4x4_SIMD mat;
 
-        Float4 q = rotation.reg;
+        // 1. Calculate the rotation axes natively using SIMD
+        // The columns of a rotation matrix are simply the basis vectors (X, Y, Z) rotated by the quaternion.
+        SIMDVector3D right   = rotation.RotateVector(SIMDVector3D(1.0f, 0.0f, 0.0f, 0.0f));
+        SIMDVector3D up      = rotation.RotateVector(SIMDVector3D(0.0f, 1.0f, 0.0f, 0.0f));
+        SIMDVector3D forward = rotation.RotateVector(SIMDVector3D(0.0f, 0.0f, 1.0f, 0.0f));
 
-        // 1. Broadcast the quaternion components: [X,X,X,X], [Y,Y,Y,Y], [Z,Z,Z,Z], [W,W,W,W]
-        Float4 qx = BroadcastX(q);
-        Float4 qy = BroadcastY(q);
-        Float4 qz = BroadcastZ(q);
-        Float4 qw = BroadcastW(q);
+        // 2. Apply Scale directly (Zero scalar extraction!)
+        // Broadcast the X, Y, and Z lanes of the scale vector across 3 separate registers [X,X,X,X], [Y,Y,Y,Y], [Z,Z,Z,Z]
+        Float4 scaleX = BroadcastX(scale.reg); // Vector ALU: Clones X across all four lanes of a new register [scale.x, scale.x, scale.x, scale.x]
+        Float4 scaleY = BroadcastY(scale.reg); // Vector ALU: Clones Y across all four lanes of a new register [scale.y, scale.y, scale.y, scale.y]
+        Float4 scaleZ = BroadcastZ(scale.reg); // Vector ALU: Clones Z across all four lanes of a new register [scale.z, scale.z, scale.z, scale.z]
 
-        // 2. Pre-calculate the doubled components: 2x, 2y, 2z
-        Float4 two = Set1(2.0f);
-        Float4 qx2 = Mul(qx, Engine::Math::Constants::SIMD_TWO);
-        Float4 qy2 = Mul(qy, Engine::Math::Constants::SIMD_TWO);
-        Float4 qz2 = Mul(qz, Engine::Math::Constants::SIMD_TWO);
+        // Multiply the rotated columns by their respective broadcasted scale
+        mat.col[0] = Mul(right.reg, scaleX);   // Vector ALU: [(Rx * scale.x), (Ry * scale.x), (Rz * scale.x), (Rw * scale.x)] in a single cycle.
+        mat.col[1] = Mul(up.reg,    scaleY);   // Vector ALU: [(Rx * scale.y), (Ry * scale.y), (Rz * scale.y), (Rw * scale.y)] in a single cycle.
+        mat.col[2] = Mul(forward.reg, scaleZ); // Vector ALU: [(Rx * scale.z), (Ry * scale.z), (Rz * scale.z), (Rw * scale.z)] in a single cycle.
 
-        // 3. Calculate squared terms: 2x^2, 2y^2, 2z^2
-        Float4 xx2 = Mul(qx, qx2);
-        Float4 yy2 = Mul(qy, qy2);
-        Float4 zz2 = Mul(qz, qz2);
-
-        // 4. Calculate mixed terms
-        Float4 xy2 = Mul(qx, qy2);
-        Float4 xz2 = Mul(qx, qz2);
-        Float4 yz2 = Mul(qy, qz2);
-        Float4 wx2 = Mul(qw, qx2);
-        Float4 wy2 = Mul(qw, qy2);
-        Float4 wz2 = Mul(qw, qz2);
-
-        // 5. Build the rotation columns (Notice the specific mapping for OpenGL column-major)
-        // Col 0: [1 - 2y^2 - 2z^2, 2xy + 2wz, 2xz - 2wy, 0.0]
-        Float4 col0 = Engine::Math::Constants::SIMD_ONE; // Instant Load
-        col0 = Sub(col0, yy2);
-        col0 = Sub(col0, zz2);
-        col0 = InsertY(col0, ExtractX(Add(xy2, wz2))); // We use Insert to build the column
-        col0 = InsertZ(col0, ExtractX(Sub(xz2, wy2)));
-        col0 = InsertW(col0, 0.0f);
-
-        // Col 1: [2xy - 2wz, 1 - 2x^2 - 2z^2, 2yz + 2wx, 0.0]
-        Float4 col1 = Sub(xy2, wz2);                   // X lane holds the target value
-        col1 = InsertY(col1, ExtractX(Sub(Sub(Set1(1.0f), xx2), zz2))); 
-        col1 = InsertZ(col1, ExtractX(Add(yz2, wx2)));
-        col1 = InsertW(col1, 0.0f);
-
-        // Col 2: [2xz + 2wy, 2yz - 2wx, 1 - 2x^2 - 2y^2, 0.0]
-        Float4 col2 = Add(xz2, wy2);
-        col2 = InsertY(col2, ExtractX(Sub(yz2, wx2)));
-        col2 = InsertZ(col2, ExtractX(Sub(Sub(Set1(1.0f), xx2), yy2)));
-        col2 = InsertW(col2, 0.0f);
-
-        // 6. Apply Scale directly to the rotation columns
-        Float4 scaleReg = scale.reg;
-        mat.col[0] = Mul(col0, BroadcastX(scaleReg));
-        mat.col[1] = Mul(col1, BroadcastY(scaleReg));
-        mat.col[2] = Mul(col2, BroadcastZ(scaleReg));
-
-        // 7. Inject Translation into the 4th Column (Ensure W = 1.0f)
+        // 3. Inject Translation into the 4th Column (Ensure W = 1.0f)
         mat.col[3] = BlendMaskW(translation.reg, Engine::Math::Constants::SIMD_MASK_W_ONE);
 
         return mat;
