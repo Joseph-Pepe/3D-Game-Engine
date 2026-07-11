@@ -11,36 +11,44 @@
     #endif
 #endif
 
+// ===============================================
+// CRYPTOGRAPHIC RANDOM NUMBER GENERATOR & MAPPING
+// ===============================================
+/*
+    - XorShift32 has statistical flaws, low-dimensional equidistribution errors.
+    - For things like procedural generation, terrain noise, or monte carlo raytracing it will eventually produce visible banding or artifacting.
+
+    // Executes in ~1-2 clock cycles entirely inside the ALU registers.
+    FORCE_INLINE uint32_t XorShift32(uint32_t& state) {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        return state;
+    }
+
+    - 
+    - It is just as fast and mathematically superior to XorShift32.
+    - constexpr allows these functions to procedurally generate terrain seeds or noise maps at compile-time, saving runtime CPU cycles.
+    - Every modern CPU (Intel, AMD, ARM) has dedicated, single-cycle hardware execution ports for bitwise shifts (<<, >>) and XOR (^) operations.
+*/
+
 // Prevents global namespace pollution to prevent compiler errors.
 namespace Engine::Math {
-
-    // ===============================================
-    // CRYPTOGRAPHIC RANDOM NUMBER GENERATOR & MAPPING
-    // ===============================================
+    // ===================================
+    // --- FAST STATELESS PRNG (PCG32) ---
+    // ===================================
     /*
-        - XorShift32 has statistical flaws, low-dimensional equidistribution errors.
-        - For things like procedural generation, terrain noise, or monte carlo raytracing it will eventually produce visible banding or artifacting.
-
-        // --- FAST STATELESS PRNG ---
-        // Executes in ~1-2 clock cycles entirely inside the ALU registers.
-        FORCE_INLINE uint32_t XorShift32(uint32_t& state) {
-            state ^= state << 13;
-            state ^= state >> 17;
-            state ^= state << 5;
-            return state;
-        }
-
-        - PCG32 (Permuted Congruential Generator) uses an LCG (Linear Congruential Generator), but applies a bitwise output permutation to destroy the predictability.
-        - It is just as fast and mathematically superior to XorShift32.
-        - constexpr allows these functions to procedurally generate terrain seeds or noise maps at compile-time, saving runtime CPU cycles.
+        - PCG32 (Permuted Congruential Generator) is an algorithm used for procedural generation.
+        - std::rand() and std::mt19937 are not strictly guaranteed to produce the exact same sequence of numbers across different compilers and standard library implementations.
+        - Instead we use a PCG multiplier (6364136223846793005ULL), which guarantees that if you seed the engine with (12345) on an Xbox, it will generate the exact same procedural map as a PC or PS5.
+        - This is mandatory for cross-play multiplayer.
     */
 
-    // --- FAST STATELESS PRNG (PCG32) ---
     // Requires a 64-bit state, returns a perfectly distributed 32-bit random number.
     [[nodiscard]] FORCE_INLINE constexpr uint32_t PCG32(uint64_t& state) {
         uint64_t oldState = state;
         
-        // 1. Advance internal state (Multiplier and Increment are PCG standards)
+        // 1. Advance internal state (Multiplier and Increment are PCG standards). 
         state = oldState * 6364136223846793005ULL + 1ULL;
         
         // 2. Calculate output function (XSH RR - Xorshift High bits, Random Rotate)
@@ -48,18 +56,18 @@ namespace Engine::Math {
         uint32_t rot = static_cast<uint32_t>(oldState >> 59u);
         
         // 3. Bitwise rotation 
-        return (xorshifted >> rot) | (xorshifted << ((-rot) & 31));
+        return (xorshifted >> rot) | (xorshifted << ((~rot + 1u) & 31u));
     }
 
     // --- DIVISION-LESS RANGE MAPPING ---
-    // Maps a random 32-bit integer to [0, range) using multiplication instead of modulo.
+    // Maps a random 32-bit integer to [0, range) using multiplication instead of modulo (%) to get a random number in a specific range (i.e., results in a 64-bit number that is bit shifted).
     [[nodiscard]] FORCE_INLINE constexpr uint32_t MapToRange(uint32_t randomVal, uint32_t range) {
-        // Extremely fast: Replaces a 15-cycle modulo operation with a 2-cycle multiply-shift.
-        return static_cast<uint32_t>((static_cast<uint64_t>(randomVal) * static_cast<uint64_t>(range)) >> 32);
+        // Replaces: rand() % max (~20 cycles) division operation with a 2-cycle integer FMA.
+        return static_cast<uint32_t>((static_cast<uint64_t>(randomVal) * static_cast<uint64_t>(range)) >> 32); 
     }
 
     // --- FAST IEEE-754 FLOAT MAPPING [0.0, 1.0) ---
-    // Takes a raw 32-bit random integer and constructs a float directly in the silicon.
+    // Takes a raw 32-bit random integer and constructs a float directly in the silicon (~2 clock cycles).
     // Bypasses slow division (e.g., randomVal / MAX_UINT).
     [[nodiscard]] FORCE_INLINE constexpr float RandomFloat(uint32_t randomVal) noexcept {
         // 1. Take the top 23 bits of the random number (Mantissa precision for float32)
