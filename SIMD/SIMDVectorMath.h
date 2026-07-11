@@ -640,22 +640,22 @@ namespace Engine::Physics {
     // Let the compiler dynamically pick 4-wide (NEON), 8-wide (AVX2), or 16-wide (AVX-512) integers
     using NativeUIntBatch = Engine::ISAArch::simd<uint32_t, Engine::ISAArch::simd_abi::native<uint32_t>>; // (or) its implicit equivalent "Engine::ISAArch::WideUInt32", both mean [NativeUIntBatch =  WideUInt32]
 
-    // --- PORTABLE MORTON CODE VECTORIZATION (CROSS-PLATFORM) ---
+    // --- PORTABLE MORTON CODE INTEGER VECTORIZATION (CROSS-PLATFORM) ---
     FORCE_INLINE NativeUIntBatch expandBits_SIMD(NativeUIntBatch v) {
-        // The compiler automatically translates these bitwise operators into vector instructions (e.g., _mm256_slli_epi32 and _mm256_and_si256 on Intel)!
-        v = (v | (v << 16)) & 0x030000FF;
-        v = (v | (v <<  8)) & 0x0300F00F;
-        v = (v | (v <<  4)) & 0x030C30C3;
-        v = (v | (v <<  2)) & 0x09249249;
-        return v;
+        // The compiler automatically translates these bitwise operators into vector instructions (e.g., _mm256_slli_epi32 and _mm256_and_si256 on Intel)! Apply the bits to (4-16) integers simultaneously.
+        v = (v | (v << 16)) & 0x030000FF;   // AVX2: v = _mm256_and_si256(_mm256_or_si256(v, _mm256_slli_epi32(v, 16)), _mm256_set1_epi32(0x030000FF));
+        v = (v | (v <<  8)) & 0x0300F00F;   // AVX2: v = _mm256_and_si256(_mm256_or_si256(v, _mm256_slli_epi32(v,  8)), _mm256_set1_epi32(0x0300F00F));
+        v = (v | (v <<  4)) & 0x030C30C3;   // AVX2: v = _mm256_and_si256(_mm256_or_si256(v, _mm256_slli_epi32(v,  4)), _mm256_set1_epi32(0x030C30C3));
+        v = (v | (v <<  2)) & 0x09249249;   // AVX2: v = _mm256_and_si256(_mm256_or_si256(v, _mm256_slli_epi32(v,  2)), _mm256_set1_epi32(0x09249249));
+        return v;                           // AVX2: return v;
     }
-
+    // --- VECTORIZE THE BITS AND CALCULATE THE MORTON CODES FOR (4-16) PARTICLES (BULK DATA PROCESSING) ---
     FORCE_INLINE NativeUIntBatch getMortonCode_SIMD(const NativeUIntBatch& x, const NativeUIntBatch& y, const NativeUIntBatch& z) {
-        NativeUIntBatch ex = expandBits_SIMD(x);
-        NativeUIntBatch ey = expandBits_SIMD(y) << 1;
-        NativeUIntBatch ez = expandBits_SIMD(z) << 2;
+        NativeUIntBatch ex = expandBits_SIMD(x);        // AVX2: __m256i ex = expandBits_SIMD(x);
+        NativeUIntBatch ey = expandBits_SIMD(y) << 1;   // AVX2: __m256i ey = _mm256_slli_epi32(expandBits_AVX2(y), 1);
+        NativeUIntBatch ez = expandBits_SIMD(z) << 2;   // AVX2: __m256i ez = _mm256_slli_epi32(expandBits_AVX2(z), 2);
 
-        return ex | ey | ez;
+        return ex | ey | ez;                            // AVX2: return _mm256_or_si256(_mm256_or_si256(ex, ey), ez); // Combine X, Y, and Z
     }
 
     // ==================================================================================
@@ -1018,7 +1018,7 @@ namespace Engine::Physics {
                 auto forwardScanMask = (absoluteJ > static_cast<uint32_t>(i));
                 
                 // 3. COMBINE MASKS SAFELY: We MUST cast the integer mask to a float mask so the C++26 frontend knows how to route it to the silicon!
-                auto validCollisionMask = spatialMask && forwardScanMask.cast_to<float>();
+                auto validCollisionMask = spatialMask && forwardScanMask.template cast_to<float>();
 
                 // --- BREAKING PERFECT OVERLAP SYMMETRY ---
                 // Detect particles that are occupying the exact same space.
