@@ -1539,8 +1539,6 @@ struct alignas(16) SIMDQuaternion {
     // --- EULER TO QUATERNION (SIMD) ---
     // Converts human-readable Euler Angles [Pitch (X), Yaw (Y), Roll (Z) in degrees] into quaternions.
     static FORCE_INLINE SIMDQuaternion FromEuler(float pitch, float yaw, float roll) {
-        using namespace Engine::Math::SIMD;
-
         float p = pitch * Engine::Math::Constants::DEG_TO_RAD * 0.5f;
         float y = yaw   * Engine::Math::Constants::DEG_TO_RAD * 0.5f;
         float r = roll  * Engine::Math::Constants::DEG_TO_RAD * 0.5f;
@@ -1554,16 +1552,16 @@ struct alignas(16) SIMDQuaternion {
         // Float4 cosines = FastCos(angles);
 
         // 2. Evaluate all 3 Sines and 3 Cosines simultaneously. Shares the hardware squaring (x^2) and range reduction across all axes (<40 cycles total)!
-        auto [sines, cosines] = FastSinCos(angles);
+        auto [sines, cosines] = Engine::Math::SIMD::FastSinCos(angles);
 
         // 3. Extract the evaluated results
-        float sp = ExtractX(sines);
-        float sy = ExtractY(sines);
-        float sr = ExtractZ(sines);
+        float sp = Engine::Math::SIMD::ExtractX(sines);
+        float sy = Engine::Math::SIMD::ExtractY(sines);
+        float sr = Engine::Math::SIMD::ExtractZ(sines);
 
-        float cp = ExtractX(cosines);
-        float cy = ExtractY(cosines);
-        float cr = ExtractZ(cosines);
+        float cp = Engine::Math::SIMD::ExtractX(cosines);
+        float cy = Engine::Math::SIMD::ExtractY(cosines);
+        float cr = Engine::Math::SIMD::ExtractZ(cosines);
 
         // 4. Scalar Assembly
         // The compiler will pipeline these standard FPU multiplications perfectly.
