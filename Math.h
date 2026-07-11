@@ -271,7 +271,6 @@ namespace Engine::Math::Functions {
         - Valid strictly for angles between [-PI: -3.14 radians, PI: 3.14 radians].
     */
 
-    // 3. 
     FORCE_INLINE std::pair<float, float> FastSinCos(float x) {
         // 1. Range Reduction to [-3.14 radians, 3.14 radians], wraps massive angles (e.g., x = 200.0f [200^8 = 2.56 x 10^18]) safely back to the -3.14 to 3.14 valid polynomial window to prevent NaN.
         float cycles = FastFloor((x * Engine::Math::Constants::S_INV_TWO_PI) + 0.5f); // 0x1.45f306p-3f = 1.0f / (2.0f * PI)
@@ -975,8 +974,8 @@ namespace Engine::Math::SIMD {
         // 1. Range Reduction to [-PI, PI] across all 4 lanes
         Float4 cycles = FastFloor(Add(Mul(x, Engine::Math::Constants::INV_TWO_PI), Engine::Math::Constants::SIMD_HALF));
 
-        // Cody-Waite FMA subtraction: x = (x - (cycles * TWO_PI_A)) - (cycles * TWO_PI_B)
-        x = Sub(Sub(x, Mul(cycles, Engine::Math::Constants::TWO_PI_A)), Mul(cycles, Engine::Math::Constants::TWO_PI_B));
+        // Cody-Waite FMA subtraction: x = (x - (cycles * TWO_PI_HI)) - (cycles * TWO_PI_LO)
+        x = Sub(Sub(x, Mul(cycles, Engine::Math::Constants::TWO_PI_HI)), Mul(cycles, Engine::Math::Constants::TWO_PI_LO));
 
         // 2. Evaluate both Sine and Cosine simultaneously (Sharing x^2)
         Float4 x2 = Mul(x, x);
