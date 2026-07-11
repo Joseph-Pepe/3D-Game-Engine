@@ -2165,6 +2165,7 @@ namespace Engine::ISAArch {
             - Sine and Cosine are needed.
         */
         
+        // Note: This implementation is suppose to be in the backend, not the front end.
         friend inline simd sin(const simd& x) requires std::is_floating_point_v<T> {
             // 1. Core Constants
             const simd INV_TWO_PI(0.159154943f);
@@ -2223,6 +2224,15 @@ namespace Engine::ISAArch {
         friend inline simd cos(const simd& x) requires std::is_floating_point_v<T> {
             const simd HALF_PI(1.570796326f);
             return sin(x + HALF_PI);
+        }
+
+        // --- TRANSCENDENTALS (TANGENT & ARCCOSINE) ---
+        friend inline simd tan(const simd& x) requires std::is_floating_point_v<T> {
+            return simd(Traits::FastTan(x.m_data));
+        }
+
+        friend inline simd acos(const simd& x) requires std::is_floating_point_v<T> {
+            return simd(Traits::FastACos(x.m_data));
         }
 
         // --- C++26 OPERATORS (HIDDEN FRIENDS) ---
