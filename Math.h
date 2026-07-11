@@ -9,6 +9,7 @@
 #include <span>
 #include <algorithm>   // Required for std::min, std::copy, std::swap
 #include <bit>         // Required for std::bit_cast
+#include <utility>     // Required for std::pair
 
 // --- COMPILER MACROS ---
 #ifndef FORCE_INLINE
@@ -178,27 +179,39 @@ namespace Engine::Math::Functions {
     // ==============================================
     /*
         - Euler conversions usually need both Sine & Cosine of the same angle.
+        - FastSinCos: use ONLY when BOTH values are needed for the same angle (e.g., Euler conversions, rotation matrix).
         - Calculating them in one function is significantly faster than calling two separate functions because x^2 only needs to be calculated once.
-        - Valid strictly for angles between [-PI, PI].
+        - Valid strictly for angles between [-PI: -3.14 radians, PI: 3.14 radians].
     */
 
-    // 3. Use ONLY when BOTH values are needed for the same angle (e.g., Euler conversions, rotation matrix).
-    FORCE_INLINE void FastSinCos(float x, float& outSin, float& outCos) {
-        // Evaluates both Sine and Cosine simultaneously to share the x^2 multiplication to save CPU cycles.
+    // 3. 
+    FORCE_INLINE std::pair<float, float> FastSinCos(float x) {
+        // 1. Range Reduction to [-3.14 radians, 3.14 radians], wraps massive angles (e.g., x = 200.0f [200^8 = 2.56 x 10^18]) safely back to the -3.14 to 3.14 valid polynomial window to prevent NaN.
+        float cycles = std::floor((x * 0x1.45f306p-3f) + 0.5f); // 0x1.45f306p-3f = 1.0f / (2.0f * PI)
+
+        // Cody-Waite 2-part FMA subtraction preserves mantissa precision for massive coordinates
+        // 0x1.921fb0p+2f is the high-precision chunk of (2 * PI). 0x1.4442d1p-20f is the low-precision tail of (2 * PI).
+        x = (x - (cycles * 0x1.921fb0p+2f)) - (cycles * 0x1.4442d1p-20f);
+
+        // 2. Evaluates both Sine and Cosine simultaneously to share the x^2 multiplication to save CPU cycles.
         float x2 = x * x;
+
         float s = 0x1.71de3ap-19f;             // SIN_C9
         s = (s * x2) - 0x1.a01a02p-13f;        // SIN_C7
         s = (s * x2) + 0x1.111112p-7f;         // SIN_C5
         s = (s * x2) - 0x1.555556p-3f;         // SIN_C3
         s = (s * x2) + 1.0f;                   // SIN_1
-        outSin = s * x;
+        float outSin = s * x;
 
         float c = 0x1.a01a02p-16f;             // COS_C8
         c = (c * x2) - 0x1.6c16c2p-10f;        // COS_C6
         c = (c * x2) + 0x1.555556p-5f;         // COS_C4
         c = (c * x2) - 0.5f;                   // COS_C2
         c = (c * x2) + 1.0f;                   // COS_1
-        outCos = c;
+        float outCos = c;
+
+        // C++17: structured binding (i.e., tuple) constructs and packs the variables exactly where they are declared.
+        return {outSin, outCos};
     }
 
     // ======================================================================
@@ -1352,19 +1365,16 @@ struct alignas(16) SIMDQuaternion {
         using namespace Engine::Math::SIMD;
 
         float halfAngleRad = angleDegrees * Engine::Math::Constants::DEG_TO_RAD * 0.5f;
-
-        // Variables to hold our evaluated trig results
-        float s, c;
         
         // Replaces std::sin and std::cos (~100 cycles) with a single batched polynomial approximation (~15 cycles).
-        Engine::Math::Functions::FastSinCos(halfAngleRad, s, c);
+        auto [sin_d, cos_d] = Engine::Math::Functions::FastSinCos(halfAngleRad);
 
         // 2. Multiply the normalized axis by sin(half_angle)
-        Float4 sinVec = Set1(s);
+        Float4 sinVec = Set1(sin_d);
         Float4 axisScaled = Mul(axis.reg, sinVec);
 
         // 3. Insert the Cosine value directly into the W lane! Skips the Blend instruction.
-        Float4 result = InsertW(axisScaled, c);
+        Float4 result = InsertW(axisScaled, cos_d);
         
         return SIMDQuaternion(result);
     }
@@ -1468,29 +1478,26 @@ struct alignas(16) SIMDQuaternion {
     // Converts human-readable Euler Angles [Pitch (X), Yaw (Y), Roll (Z) in degrees] into quaternions.
     static FORCE_INLINE SIMDQuaternion FromEulerScalar(float pitch, float yaw, float roll) {
         // 1. Convert to Half-Radians
-        float p = pitch * Engine::Math::Constants::DEG_TO_RAD * 0.5f;
-        float y = yaw   * Engine::Math::Constants::DEG_TO_RAD * 0.5f;
-        float r = roll  * Engine::Math::Constants::DEG_TO_RAD * 0.5f;
-
-        // Variables to hold our evaluated trig results
-        float sp, cp, sy, cy, sr, cr;
+        float pitch_rad = pitch * Engine::Math::Constants::DEG_TO_RAD * 0.5f;
+        float yaw_rad = yaw   * Engine::Math::Constants::DEG_TO_RAD * 0.5f;
+        float roll_rad = roll  * Engine::Math::Constants::DEG_TO_RAD * 0.5f;
 
         // 2. Custom Scalar FastSinCos (3 calls * (~12 clock cycles)) = ~36 clock cycles total!
-        Engine::Math::Functions::FastSinCos(p, sp, cp);
-        Engine::Math::Functions::FastSinCos(y, sy, cy);
-        Engine::Math::Functions::FastSinCos(r, sr, cr);
+        auto [sine_pitch, cos_pitch] = Engine::Math::Functions::FastSinCos(pitch_rad);
+        auto [sine_yaw, cos_yaw] = Engine::Math::Functions::FastSinCos(yaw_rad);
+        auto [sine_roll, cos_roll] = Engine::Math::Functions::FastSinCos(roll_rad);
 
         // 2. std::sin, std::cos (6 calls * (~50 clock cycles)) = ~300 clock cycles total
-        // float sp = std::sin(p); float cp = std::cos(p);
-        // float sy = std::sin(y); float cy = std::cos(y);
-        // float sr = std::sin(r); float cr = std::cos(r);
+        // float sin_pitch = std::sin(pitch_rad); float cos_pitch = std::cos(pitch_rad);
+        // float sin_yaw = std::sin(yaw_rad); float cos_yaw = std::cos(yaw_rad);
+        // float sin_roll = std::sin(roll_rad); float cos_roll = std::cos(roll_rad);
 
         // 3. Final Assembly
         return SIMDQuaternion(
-            sr * cp * cy - cr * sp * sy, // X
-            cr * sp * cy + sr * cp * sy, // Y
-            cr * cp * sy - sr * sp * cy, // Z
-            cr * cp * cy + sr * sp * sy  // W
+            sine_roll * cos_pitch  * cos_yaw  - cos_roll  * sine_pitch * sine_yaw, // X
+            cos_roll  * sine_pitch * cos_yaw  + sine_roll * cos_pitch  * sine_yaw, // Y
+            cos_roll  * cos_pitch  * sine_yaw - sine_roll * sine_pitch * cos_yaw,  // Z
+            cos_roll  * cos_pitch  * cos_yaw  + sine_roll * sine_pitch * sine_yaw  // W
         );
     }
 };
