@@ -148,8 +148,62 @@ namespace Engine::Math::Constants {
     static const Float4 ACOS_PI = SIMD_CONST(PI);              //  3.14159265359f
 }
 
-
+// Scalar Domain (1D Scalar Math): strictly for operations that only operate on scalar floats.
 namespace Engine::Math::Functions {   
+
+    // ======================================================================
+    // SCALAR HARDWARE SQUARE ROOT (FPU)
+    // ======================================================================
+    /*
+        - Bypasses the `<cmath>` standard library overhead and 'errno' domain checks.
+        - Maps directly to the CPU's dedicated scalar FPU square root instruction.
+        - Exactly as accurate as std::sqrt, but significantly faster due to zero branching (i.e., std::sqrt replacement).
+    */
+    FORCE_INLINE float FastSqrt(float x) {
+        #ifdef MATH_ISA_ARM
+            // --- ARM APPLE SILICON / MOBILE (ARM64) ---
+            #if defined(__clang__) || defined(__GNUC__)
+                // Compiles directly down to a single hardware 'fsqrt' instruction.
+                // Eradicates the Vector-Scalar-Transition penalty.
+                return __builtin_sqrtf(x);
+            #else
+                // Fallback for non-Clang/GCC ARM compilers
+                return vgetq_lane_f32(vsqrtq_f32(vsetq_lane_f32(x, vdupq_n_f32(0.0f), 0)), 0);
+            #endif
+        #else
+            // Intel/AMD SSE scalar square root
+            // _mm_set_ss loads a single float into the lowest 32-bits, leaving the rest 0.
+            // _mm_sqrt_ss calculates the sqrt of only that lowest 32-bits.
+            // _mm_cvtss_f32 extracts it back to a standard float.
+            return _mm_cvtss_f32(_mm_sqrt_ss(_mm_set_ss(x)));
+        #endif
+    }
+
+    // ======================================================================
+    // SCALAR HARDWARE FLOOR (FPU)
+    // ======================================================================
+    /*
+        - Bypasses the `<cmath>` standard library overhead and domain checks.
+        - Maps directly to the CPU's dedicated scalar FPU rounding instruction.
+        - Exactly as accurate as std::floor, but compiles down to a single instruction.
+    */
+    FORCE_INLINE float FastFloor(float x) {
+        #ifdef MATH_ISA_ARM
+            // --- ARM APPLE SILICON / MOBILE (ARM64) ---
+            #if defined(__clang__) || defined(__GNUC__)
+                // Compiles directly down to a single hardware 'frintm' instruction.
+                return __builtin_floorf(x);
+            #else
+                // Fallback for non-Clang/GCC ARM compilers (Round to Minus Infinity)
+                return vgetq_lane_f32(vrndmq_f32(vsetq_lane_f32(x, vdupq_n_f32(0.0f), 0)), 0);
+            #endif
+        #else
+            // --- INTEL / AMD PC (SSE4.1) ---
+            // _mm_floor_ss calculates the floor of the lowest 32-bits.
+            return _mm_cvtss_f32(_mm_floor_ss(_mm_set_ss(x), _mm_set_ss(x)));
+        #endif
+    }
+    
     // --- SCALAR TRANSCENDENTAL APPROXIMATIONS ) ---
 
     // 1. Standalone Scalar Sine (9th-Order Horner's Method) that is valid strictly for angles between [-PI, PI] (e.g., calculating a bullet trajectory arc).
@@ -187,7 +241,7 @@ namespace Engine::Math::Functions {
     // 3. 
     FORCE_INLINE std::pair<float, float> FastSinCos(float x) {
         // 1. Range Reduction to [-3.14 radians, 3.14 radians], wraps massive angles (e.g., x = 200.0f [200^8 = 2.56 x 10^18]) safely back to the -3.14 to 3.14 valid polynomial window to prevent NaN.
-        float cycles = std::floor((x * 0x1.45f306p-3f) + 0.5f); // 0x1.45f306p-3f = 1.0f / (2.0f * PI)
+        float cycles = FastFloor((x * 0x1.45f306p-3f) + 0.5f); // 0x1.45f306p-3f = 1.0f / (2.0f * PI)
 
         // Cody-Waite 2-part FMA subtraction preserves mantissa precision for massive coordinates
         // 0x1.921fb0p+2f is the high-precision chunk of (2 * PI). 0x1.4442d1p-20f is the low-precision tail of (2 * PI).
@@ -240,34 +294,6 @@ namespace Engine::Math::Functions {
         return x * (num / den);
     }
 
-    // ======================================================================
-    // SCALAR HARDWARE SQUARE ROOT (FPU)
-    // ======================================================================
-    /*
-        - Bypasses the `<cmath>` standard library overhead and 'errno' domain checks.
-        - Maps directly to the CPU's dedicated scalar FPU square root instruction.
-        - Exactly as accurate as std::sqrt, but significantly faster due to zero branching (i.e., std::sqrt replacement).
-    */
-    FORCE_INLINE float FastSqrt(float x) {
-        #ifdef MATH_ISA_ARM
-            // --- ARM APPLE SILICON / MOBILE (ARM64) ---
-            #if defined(__clang__) || defined(__GNUC__)
-                // Compiles directly down to a single hardware 'fsqrt' instruction.
-                // Eradicates the Vector-Scalar-Transition penalty.
-                return __builtin_sqrtf(x);
-            #else
-                // Fallback for non-Clang/GCC ARM compilers
-                return vgetq_lane_f32(vsqrtq_f32(vsetq_lane_f32(x, vdupq_n_f32(0.0f), 0)), 0);
-            #endif
-        #else
-            // Intel/AMD SSE scalar square root
-            // _mm_set_ss loads a single float into the lowest 32-bits, leaving the rest 0.
-            // _mm_sqrt_ss calculates the sqrt of only that lowest 32-bits.
-            // _mm_cvtss_f32 extracts it back to a standard float.
-            return _mm_cvtss_f32(_mm_sqrt_ss(_mm_set_ss(x)));
-        #endif
-    }
-
     // Fast pure scalar absolute value. Compiles down to a single instruction (zero-cast bitwise clear).
     FORCE_INLINE constexpr float abs(float v) {
         // Treat the float as an integer, strip the 31st sign bit, and treat it as a float again.
@@ -277,6 +303,7 @@ namespace Engine::Math::Functions {
     }
 }
 
+// Vector Domain (4D Vector Math): Strictly for operations that consume and return wide registers.
 namespace Engine::Math::SIMD {    
     // DYNAMIC DISPATCH: Wire the engine to the silicon's maximum limit
     #ifdef MATH_ISA_ARM
@@ -420,6 +447,9 @@ namespace Engine::Math::SIMD {
         // ARM NEON Absolute Value and Square Root
         FORCE_INLINE Float4 Abs(Float4 v) { return vabsq_f32(v); } // NEON has a dedicated absolute value instruction!
         FORCE_INLINE Float4 Sqrt(Float4 v) { return vsqrtq_f32(v); }
+
+        // --- SIMD HARDWARE FLOOR ---
+        FORCE_INLINE Float4 FastFloor(Float4 x) { return vrndmq_f32(x); } // ARM NEON Round to Minus Infinity
 
         // --- ARM Hardware Reciprocal (Estimate + Newton-Raphson Step) ---
         FORCE_INLINE Float4 Reciprocal(Float4 v) {
@@ -762,6 +792,9 @@ namespace Engine::Math::SIMD {
 
         FORCE_INLINE Float4 Sqrt(Float4 v) { return _mm_sqrt_ps(v); }
 
+        // --- SIMD HARDWARE FLOOR (FPU) --- 
+        FORCE_INLINE Float4 FastFloor(Float4 x) { return _mm_floor_ps(x); }
+
         // ==================================================================
         // HARDWARE RECIPROCAL (NEWTON-RAPHSON)
         // ==================================================================
@@ -896,6 +929,39 @@ namespace Engine::Math::SIMD {
         res = FMAdd(res, x2, Engine::Math::Constants::COS_1);            // res * x^2 + 1.0                      
 
         return res;
+    }
+
+    // ======================================================================
+    // COMBINED SIMD TRANSCENDENTAL APPROXIMATION (SINE & COSINE)
+    // ======================================================================
+    FORCE_INLINE std::pair<Float4, Float4> FastSinCos(Float4 x) {
+        // 1. Range Reduction to [-PI, PI] across all 4 lanes
+        Float4 invTwoPi = Set1(0x1.45f306p-3f);
+        Float4 cycles = FastFloor(Add(Mul(x, invTwoPi), Set1(0.5f)));
+
+        // Cody-Waite FMA subtraction
+        Float4 twoPiA = Set1(0x1.921fb0p+2f);
+        Float4 twoPiB = Set1(0x1.4442d1p-20f);
+        x = Sub(Sub(x, Mul(cycles, twoPiA)), Mul(cycles, twoPiB));
+
+        // 2. Evaluate both Sine and Cosine simultaneously (Sharing x^2)
+        Float4 x2 = Mul(x, x);
+
+        // Sine Evaluation
+        Float4 s = FMAdd(x2, Engine::Math::Constants::SIN_C9, Engine::Math::Constants::SIN_C7);
+        s = FMAdd(s, x2, Engine::Math::Constants::SIN_C5);
+        s = FMAdd(s, x2, Engine::Math::Constants::SIN_C3);
+        s = FMAdd(s, x2, Engine::Math::Constants::SIN_1);
+        Float4 outSin = Mul(s, x);
+
+        // Cosine Evaluation
+        Float4 c = FMAdd(x2, Engine::Math::Constants::COS_C8, Engine::Math::Constants::COS_C6);
+        c = FMAdd(c, x2, Engine::Math::Constants::COS_C4);
+        c = FMAdd(c, x2, Engine::Math::Constants::COS_C2);
+        c = FMAdd(c, x2, Engine::Math::Constants::COS_1);
+        Float4 outCos = c;
+
+        return {outSin, outCos};
     }
 } // namespace Engine::Math::SIMD
 
@@ -1450,10 +1516,12 @@ struct alignas(16) SIMDQuaternion {
         // Pack all three scalar angles into a single 128-bit register. (X=p, Y=y, Z=r, W=0)
         Float4 angles = Set(p, y, r, 0.0f);
 
-        // 2. Evaluate all 3 Sines and 3 Cosines simultaneously.
-        // This replaces 6 scalar standard library calls (~300 cycles) with 2 SIMD polynomial expansions (~40 cycles total).
-        Float4 sines   = FastSin(angles);
-        Float4 cosines = FastCos(angles);
+        // This replaces 6 scalar (std::sin, std::cos) standard library calls (~300 cycles) with 2 SIMD polynomial expansions (~40 cycles total).
+        // Float4 sines   = FastSin(angles);
+        // Float4 cosines = FastCos(angles);
+
+        // 2. Evaluate all 3 Sines and 3 Cosines simultaneously. Shares the hardware squaring (x^2) and range reduction across all axes (<40 cycles total)!
+        auto [sines, cosines] = FastSinCos(angles);
 
         // 3. Extract the evaluated results
         float sp = ExtractX(sines);
