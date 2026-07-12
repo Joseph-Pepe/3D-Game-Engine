@@ -2135,20 +2135,20 @@ namespace Engine::ISAArch {
         // --- MEMORY STORE ---
         void copy_to(T* mem) const { Traits::store(mem, m_data); }
 
-        friend inline simd min(const simd& a, const simd& b) { return simd(Traits::min(a.m_data, b.m_data)); }
-        friend inline simd max(const simd& a, const simd& b) { return simd(Traits::max(a.m_data, b.m_data)); }
+        friend inline simd min(const simd& a, const simd& b) { return simd::from_native(Traits::min(a.m_data, b.m_data)); }
+        friend inline simd max(const simd& a, const simd& b) { return simd::from_native(Traits::max(a.m_data, b.m_data)); }
         friend inline simd clamp(const simd& v, const simd& lo, const simd& hi) { return min(max(v, lo), hi); }
 
-        friend inline simd rsqrt(const simd& a) requires std::is_floating_point_v<T> { return simd(Traits::rsqrt(a.m_data)); }
-        friend inline simd rcp(const simd& a) requires std::is_floating_point_v<T> { return simd(Traits::rcp(a.m_data)); }
+        friend inline simd rsqrt(const simd& a) requires std::is_floating_point_v<T> { return simd::from_native(Traits::rsqrt(a.m_data)); }
+        friend inline simd rcp(const simd& a) requires std::is_floating_point_v<T> { return simd::from_native(Traits::rcp(a.m_data)); }
 
-        friend inline simd abs(const simd& a) requires std::is_floating_point_v<T> { return simd(Traits::abs(a.m_data)); }
-        friend inline simd floor(const simd& a) requires std::is_floating_point_v<T> { return simd(Traits::floor(a.m_data)); }
-        friend inline simd ceil(const simd& a) requires std::is_floating_point_v<T> { return simd(Traits::ceil(a.m_data)); }
+        friend inline simd abs(const simd& a) requires std::is_floating_point_v<T> { return simd::from_native(Traits::abs(a.m_data)); }
+        friend inline simd floor(const simd& a) requires std::is_floating_point_v<T> { return simd::from_native(Traits::floor(a.m_data)); }
+        friend inline simd ceil(const simd& a) requires std::is_floating_point_v<T> { return simd::from_native(Traits::ceil(a.m_data)); }
 
         // Float16 Memory Gateway
         static simd load_f16(const uint16_t* mem) requires std::is_floating_point_v<T> {
-            return simd(Traits::load_half(mem));
+            return simd::from_native(Traits::load_half(mem));
         }
         void store_f16(uint16_t* mem) const requires std::is_floating_point_v<T> {
             Traits::store_half(mem, m_data);
@@ -2157,11 +2157,11 @@ namespace Engine::ISAArch {
         // --- SATURATING ARITHMETIC (Clamps instead of wrapping) ---
         // Unlocked for 8-bit integers (Colors) and 16-bit integers (Audio)
         friend inline simd add_sat(const simd& a, const simd& b) requires (sizeof(T) == 1 || sizeof(T) == 2) {
-            return simd(Traits::add_sat(a.m_data, b.m_data));
+            return simd::from_native(Traits::add_sat(a.m_data, b.m_data));
         }
 
         friend inline simd sub_sat(const simd& a, const simd& b) requires (sizeof(T) == 1 || sizeof(T) == 2) {
-            return simd(Traits::sub_sat(a.m_data, b.m_data));
+            return simd::from_native(Traits::sub_sat(a.m_data, b.m_data));
         }
 
         // =======================================================================
@@ -2237,11 +2237,11 @@ namespace Engine::ISAArch {
 
         // --- TRANSCENDENTALS (TANGENT & ARCCOSINE) ---
         friend inline simd tan(const simd& x) requires std::is_floating_point_v<T> {
-            return simd(Traits::FastTan(x.m_data));
+            return simd::from_native(Traits::FastTan(x.m_data));
         }
 
         friend inline simd acos(const simd& x) requires std::is_floating_point_v<T> {
-            return simd(Traits::FastACos(x.m_data));
+            return simd::from_native(Traits::FastACos(x.m_data));
         }
 
         // --- C++26 OPERATORS (HIDDEN FRIENDS) ---
@@ -2260,20 +2260,20 @@ namespace Engine::ISAArch {
 
         // --- ARITHMETIC OPERATORS ---
         friend inline simd operator+(const simd& a, const simd& b) {
-            return simd(Traits::add(a.m_data, b.m_data));
+            return simd::from_native(Traits::add(a.m_data, b.m_data));
         }
 
         friend inline simd operator-(const simd& a, const simd& b) {
-            return simd(Traits::sub(a.m_data, b.m_data));
+            return simd::from_native(Traits::sub(a.m_data, b.m_data));
         }
 
         friend inline simd operator*(const simd& a, const simd& b) {
-            return simd(Traits::mul(a.m_data, b.m_data));
+            return simd::from_native(Traits::mul(a.m_data, b.m_data));
         }
 
         // Division explicitly restricted to floating point traits
         friend inline simd operator/(const simd& a, const simd& b) requires std::is_floating_point_v<T> {
-            return simd(Traits::div(a.m_data, b.m_data));
+            return simd::from_native(Traits::div(a.m_data, b.m_data));
         }
 
         inline simd& operator+=(const simd& rhs) { m_data = Traits::add(m_data, rhs.m_data); return *this; }
@@ -2299,19 +2299,19 @@ namespace Engine::ISAArch {
         // The C++26 proposal suggests letting `mask ? a : b` work natively, but 
         // functionally it requires a blend operation.
         static inline simd choose(const mask_type& mask, const simd& true_val, const simd& false_val) {
-            return simd(Traits::blend(mask.m_mask, true_val.m_data, false_val.m_data));
+            return simd::from_native(Traits::blend(mask.m_mask, true_val.m_data, false_val.m_data));
         }
 
         // --- MATH FUNCTIONS ---
 
         // Replicates: std::fma(a, b, c)
         friend inline simd fma(const simd& a, const simd& b, const simd& c) {
-            return simd(Traits::fmadd(a.m_data, b.m_data, c.m_data));
+            return simd::from_native(Traits::fmadd(a.m_data, b.m_data, c.m_data));
         }
 
         // Replicates: std::sqrt(a)
         friend inline simd sqrt(const simd& a) {
-            return simd(Traits::sqrt(a.m_data));
+            return simd::from_native(Traits::sqrt(a.m_data));
         }
 
         // C++26 Portable Horizontal Reduction (Hidden Friend)
@@ -2323,31 +2323,31 @@ namespace Engine::ISAArch {
 
         // --- UNARY OPERATORS ---
         friend inline simd operator-(const simd& a) {
-            return simd(Traits::negate(a.m_data));
+            return simd::from_native(Traits::negate(a.m_data));
         }
 
         // --- BITWISE MATH (floats for IEEE-754 manipulation) ---
         friend inline simd operator^(const simd& a, const simd& b) {
-            return simd(Traits::bit_xor(a.m_data, b.m_data));
+            return simd::from_native(Traits::bit_xor(a.m_data, b.m_data));
         }
 
         // UPDATE: Remove the 'requires std::is_integral_v' from AND and OR
         friend inline simd operator|(const simd& a, const simd& b) {
-            return simd(Traits::bit_or(a.m_data, b.m_data));
+            return simd::from_native(Traits::bit_or(a.m_data, b.m_data));
         }
 
         friend inline simd operator&(const simd& a, const simd& b) {
-            return simd(Traits::bit_and(a.m_data, b.m_data));
+            return simd::from_native(Traits::bit_and(a.m_data, b.m_data));
         }
 
         // C++20 (Concpets): Add 'requires std::is_integral_v<T>' to the bitwise hidden friends to restrict bitwise math exclusively to integer types.
         // KEEP the restriction on bit-shifts! Shifting a float destroys the exponent (ruins IEEE 754 layout).
         friend inline simd operator<<(const simd& a, T shift) requires std::is_integral_v<T> {
-            return simd(Traits::shift_l(a.m_data, static_cast<int>(shift)));
+            return simd::from_native(Traits::shift_l(a.m_data, static_cast<int>(shift)));
         } 
 
         friend inline simd operator>>(const simd& a, T shift) requires std::is_integral_v<T> {
-            return simd(Traits::shift_r(a.m_data, static_cast<int>(shift)));
+            return simd::from_native(Traits::shift_r(a.m_data, static_cast<int>(shift)));
         }
 
         // ============================================
@@ -2366,7 +2366,7 @@ namespace Engine::ISAArch {
                 "Swizzle indices must be 0, 1, 2, or 3");
 
             // Moves data horizontally across lanes (e.g., [x, y, z, w] to [y, x, w, z]) to perform matrix multiplication or dot products inside a single SIMD register.
-            return simd(Traits::template shuffle<i0, i1, i2, i3>(m_data));
+            return simd::from_native(Traits::template shuffle<i0, i1, i2, i3>(m_data));
         }
 
         // 2-Lane Swizzle (Required for double precision on SSE4.1 / NEON)
@@ -2374,7 +2374,7 @@ namespace Engine::ISAArch {
         inline simd swizzle() const requires (Traits::size == 2) {
             static_assert(i0 >= 0 && i0 < 2 && i1 >= 0 && i1 < 2, 
                 "Swizzle indices for 2-lane vectors must be 0 or 1");
-            return simd(Traits::template shuffle<i0, i1>(m_data));
+            return simd::from_native(Traits::template shuffle<i0, i1>(m_data));
         }
 
         // Common Engine Splats (Broadcast a single lane across the entire register)
