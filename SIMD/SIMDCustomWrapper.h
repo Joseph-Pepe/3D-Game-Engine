@@ -2017,9 +2017,11 @@ namespace Engine::ISAArch {
         simd_mask() = default;
 
         // Allows safe construction from raw hardware masks
-        static inline simd_mask from_native(typename Traits::mask_type mask) { 
-            return simd_mask(mask); 
-        }
+        static inline simd_mask from_native(typename Traits::mask_type mask) { return simd_mask(mask); }
+
+        // Public hardware accessor
+        FORCE_INLINE typename Traits::mask_type native() const { return m_mask; }
+        FORCE_INLINE typename Traits::mask_type native_handle() const { return m_mask; }
 
         // --- MIXED-TYPE MASK CASTING ---
         template <typename U>
@@ -2086,9 +2088,9 @@ namespace Engine::ISAArch {
         using Traits = detail::simd_traits<T, Abi>;
         typename Traits::register_type m_data;
 
-        // Internal constructor for operations to bypass memory
-        // explicit inline simd(typename Traits::register_type data) : m_data(data) {}
-
+        // An internal tag type to completely isolate raw registers from numbers (i.e., hides the raw hardare register constructor from the public API).
+        struct native_tag {};
+        explicit inline simd(typename Traits::register_type data, native_tag) : m_data(data) {}
     public:
         // C++26 Type Definitions
         using value_type = T;
@@ -2097,44 +2099,37 @@ namespace Engine::ISAArch {
 
         static constexpr int size() { return Traits::size; }
 
-        // =======================================
-        // --- ARGUMENT DEPENDENT LOOKUP (ADL) ---
-        // =======================================
+        // ===================================================================
+        // --- HARDWARE INTEROP FACTORY & ARGUMENT DEPENDENT LOOKUP (ADL) ---
+        // ===================================================================
         /*
-            - from_native is a wrapper that wraps the raw silicon register (e.g., _m256) into an object purely for the function calls.
+            - This from_native is a wrapper that wraps the raw silicon register (__m256, etc.) into an object purely for the function calls.
             - Allows the compiler to find the hidden friend functions (e.g., reduce).
         */
+        static inline simd from_native(typename Traits::register_type raw) { return simd(raw, native_tag{}); }
+        
+        // Public Accessors to prevent proxy layer access violations
+        FORCE_INLINE typename Traits::register_type native() const { return m_data; }
+        FORCE_INLINE typename Traits::register_type native_handle() const { return m_data; }
 
-        // --- HARDWARE INTEROP ---
-        typename Traits::register_type native_handle() const { return m_data; }
-        static simd from_native(typename Traits::register_type raw) { return simd(raw); }
+        // Explicit Typecast Gateway (Lets the class masquerade as an intrinsic register for mathematical expressions) without letting the compiler bypass the class wrappers properties.
+        [[nodiscard]] explicit FORCE_INLINE operator typename Traits::register_type() const { return m_data; }
 
-        // --- CONSTRUCTORS ---
-        // C++26 guarantees default simds are uninitialized, just like raw floats!
+        // --- PUBLIC CONSTRUCTORS ---
+
+        // 1. Default Constructor (initialized, just like raw floats)
         simd() = default; 
 
-        // 2. Hardware Register Wrap (Replaces the private constructor)
-        // We make this public, but protect it via SFINAE/Concepts so it doesn't collide with the broadcast constructor!
-        template <typename R = typename Traits::register_type>
-        explicit inline simd(R data) requires (!std::is_same_v<R, T>) : m_data(data) {}
-
-        // 2.5 Scalar Specific Register Wrap (Fixes the scalar collision)
-        explicit inline simd(T data) requires (std::is_same_v<typename Traits::register_type, T>) : m_data(data) {}
-        
-        // 3. Broadcast Constructor (e.g., WideFloat(5.0f))
-        // Protect this so it only accepts standard numbers, never hardware registers or pointers.
+        // 2. Universal Broadcast Constructor (e.g., WideFloat(5.0f)) is strictly implicit. Converts any number into a full vector path cleanly across all architectures.
         template <typename U> 
-        requires (std::is_arithmetic_v<U> && !std::is_same_v<U, typename Traits::register_type>)
-        explicit inline simd(U value) : m_data(Traits::broadcast(static_cast<T>(value))) {}
+        requires std::is_arithmetic_v<U>
+        inline simd(U value) : m_data(Traits::broadcast(static_cast<T>(value))) {}
         
-        // 4. Memory Load Constructor (e.g., WideFloat(&array[0]))
-        // C++26 Memory Load (P1928 allows implicit load from memory)
+        // 3. Memory Load Constructor for memory operations (e.g., WideFloat(&array[0])) is strictly explicit.
         explicit inline simd(const T* mem) : m_data(Traits::load(mem)) {}
 
-        // --- NON-CONTIGUOUS MEMORY LOAD (GATHER) ---
-        // C++26 Hardware Gather Constructor.
-        // Takes a base pointer and a SIMD batch of array indices.
-        explicit simd(const T* base_addr, const simd<uint32_t, Abi>& indices) 
+        // 4. Non-Contiguous Memory Load Constructor (Gather). Takes a base pointer and a SIMD batch of array indices.
+        explicit inline simd(const T* base_addr, const simd<uint32_t, Abi>& indices) 
             : m_data(Traits::gather(base_addr, indices.native_handle())) {}
 
         // --- MEMORY STORE ---
@@ -2347,12 +2342,12 @@ namespace Engine::ISAArch {
 
         // C++20 (Concpets): Add 'requires std::is_integral_v<T>' to the bitwise hidden friends to restrict bitwise math exclusively to integer types.
         // KEEP the restriction on bit-shifts! Shifting a float destroys the exponent (ruins IEEE 754 layout).
-        friend inline simd operator<<(const simd& a, int shift) requires std::is_integral_v<T> {
-            return simd(Traits::shift_l(a.m_data, shift));
-        }
+        friend inline simd operator<<(const simd& a, T shift) requires std::is_integral_v<T> {
+            return simd(Traits::shift_l(a.m_data, static_cast<int>(shift)));
+        } 
 
-        friend inline simd operator>>(const simd& a, int shift) requires std::is_integral_v<T> {
-            return simd(Traits::shift_r(a.m_data, shift));
+        friend inline simd operator>>(const simd& a, T shift) requires std::is_integral_v<T> {
+            return simd(Traits::shift_r(a.m_data, static_cast<int>(shift)));
         }
 
         // ============================================
