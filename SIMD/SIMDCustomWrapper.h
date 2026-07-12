@@ -2087,7 +2087,7 @@ namespace Engine::ISAArch {
         typename Traits::register_type m_data;
 
         // Internal constructor for operations to bypass memory
-        explicit inline simd(typename Traits::register_type data) : m_data(data) {}
+        // explicit inline simd(typename Traits::register_type data) : m_data(data) {}
 
     public:
         // C++26 Type Definitions
@@ -2112,13 +2112,24 @@ namespace Engine::ISAArch {
         // --- CONSTRUCTORS ---
         // C++26 guarantees default simds are uninitialized, just like raw floats!
         simd() = default; 
+
+        // 2. Hardware Register Wrap (Replaces the private constructor)
+        // We make this public, but protect it via SFINAE/Concepts so it doesn't collide with the broadcast constructor!
+        template <typename R = typename Traits::register_type>
+        explicit inline simd(R data) requires (!std::is_same_v<R, T>) : m_data(data) {}
+
+        // 2.5 Scalar Specific Register Wrap (Fixes the scalar collision)
+        explicit inline simd(T data) requires (std::is_same_v<typename Traits::register_type, T>) : m_data(data) {}
         
-        // Broadcast Constructor that can take an integer (0), cast i to a u32int_t, and broadcast it.
-        template <typename U> requires std::is_convertible_v<U, T>
-        simd(U value) : m_data(Traits::broadcast(static_cast<T>(value))) {}
+        // 3. Broadcast Constructor (e.g., WideFloat(5.0f))
+        // Protect this so it only accepts standard numbers, never hardware registers or pointers.
+        template <typename U> 
+        requires (std::is_arithmetic_v<U> && !std::is_same_v<U, typename Traits::register_type>)
+        explicit inline simd(U value) : m_data(Traits::broadcast(static_cast<T>(value))) {}
         
+        // 4. Memory Load Constructor (e.g., WideFloat(&array[0]))
         // C++26 Memory Load (P1928 allows implicit load from memory)
-        explicit simd(const T* mem) : m_data(Traits::load(mem)) {}
+        explicit inline simd(const T* mem) : m_data(Traits::load(mem)) {}
 
         // --- NON-CONTIGUOUS MEMORY LOAD (GATHER) ---
         // C++26 Hardware Gather Constructor.
