@@ -1,7 +1,6 @@
 #pragma once
 
 #include <print>
-#include <immintrin.h> // Required for _xgetbv() and universal SIMD support
 
 // --- COMPILER INTRINSICS FOR CPUID (x86_64 ONLY) ---
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
@@ -196,7 +195,6 @@ inline HardwareCapabilities g_Hardware = HardwareCapabilities::Detect();
     - Prevents "Illegal Instruction" crashes on legacy CPUs while maximizing performance on modern ones.
 */
 
-// Template Driven Dynamic Dispatch: Full-System Multi-Versioning via Static Polymorphism.
 namespace Engine::Physics {
     template <typename Abi>
     void UpdateParticlesTemplate(float* xs, float* ys, float* zs, size_t count, float deltaTime) {
@@ -211,6 +209,7 @@ namespace Engine::Physics {
     }
 }
 
+// Template Driven Dynamic Dispatch: Full-System Multi-Versioning via Static Polymorphism.
 namespace Engine::GameEngine {
     // 1. The Generic Templated Physics Kernel, parameterized by 'Abi' (Application Binary Interface). The compiler will generate 5 different hardware versions.
     template <typename Abi>
@@ -274,6 +273,9 @@ namespace Engine::GameEngine {
     }
 }
 
+// ==================================================================================
+// MAIN GAME BOOTSTRAPPER (main.cpp)
+// ==================================================================================
 
 /*
 void EngineTick(float deltaTime) {
@@ -282,4 +284,87 @@ void EngineTick(float deltaTime) {
     // Jump directly to the optimized machine code for the host hardware. Zero branching!
     Engine::GameEngine::ExecuteGameEngineBackend(xs, ys, zs, count, deltaTime);
 }
+
+// The absolute entry point from the Operating System that acts as an engine bootstrapper (i.e., wakes up the hardware, allocates memory arenas, boots the subsystems in a strictly controlled order, then hands control over to the game loop).
+int main(int argc, char** argv) {
+    
+    // =================================================================
+    // PHASE 1: SILICON & CORE WAKE-UP (Strictly Single-Threaded)
+    // =================================================================
+    
+    // 1. Output the telemetry you built so we have a log of the host machine
+    g_Hardware.PrintTelemetry();
+
+    // 2. Lock in the dynamic dispatch pointers! This MUST happen before any worker threads are spawned.
+    Engine::GameEngine::InitializeDynamicDispatch();
+
+    // 3. Boot the Global Memory Arenas! Grab large contiguous chunks of RAM from the OS upfront.
+    Engine::Memory::InitializeGlobalArenas();
+
+    // =================================================================
+    // PHASE 2: SUBSYSTEM BOOTSTRAPPING
+    // =================================================================
+    
+    // Wake up the worker threads (e.g., spawn 15 threads on a 16-core CPU). They will instantly go to sleep waiting for jobs.
+    std::println("[INIT] Booting Job System...");
+    g_JobSystem.Initialize(); 
+
+    // Boot Platform/OS specific layers
+    Engine::Window::Create("Trinity Engine", 1920, 1080);
+    Engine::Audio::Initialize();
+    
+    // Boot the GPU (Vulkan / DirectX 12)
+    Engine::Renderer::Initialize();
+
+    // =================================================================
+    // PHASE 3: MOUNT GAME DATA
+    // =================================================================
+    // Load the initial level, compile shaders, load textures into VRAM.
+    Engine::SceneManager::LoadScene("level_01.map");
+
+    // =================================================================
+    // PHASE 4: INFINITE GAME LOOP (The Heartbeat)
+    // =================================================================
+    Engine::Clock timer;
+
+    while (Engine::Window::ShouldClose() == false) {
+        float deltaTime = timer.GetDeltaTime();
+        timer.Reset();
+
+        // 1. Poll OS Events (Mouse, Keyboard, Window Resize)
+        Engine::Window::PollEvents();
+
+        // 2. Execute the dynamically routed Game Engine subsystems!
+        // This jumps directly to your AVX-512, AVX2, or SSE compiled templates.
+        Engine::GameEngine::ExecuteGameEngineBackend(
+            globalPosX, globalPosY, globalPosZ, 
+            activeEntityCount, 
+            deltaTime
+        );
+
+        // 3. Submit command buffers to the GPU
+        Engine::Renderer::RenderFrame();
+    }
+
+    // =================================================================
+    // PHASE 5: GRACEFULLY SHUTDOWN
+    // =================================================================
+    // The window was closed. Shut down threads, flush GPU queues, and release RAM.
+    g_JobSystem.Shutdown();
+    Engine::Renderer::Shutdown();
+    Engine::Memory::Shutdown();
+
+    return 0; // Hand control back to Windows/Linux OS
+}
+
+// Windows-specific entry point interception
+#ifdef _WIN32
+    #include <windows.h>
+    #include <stdlib.h> // Required for __argc and __argv
+
+    int APIENTRY WinMain(HINSTANCE hInst, HINSTANCE hInstPrev, PSTR cmdline, int cmdshow) {
+        // Windows specifically calls this. We just forward it to standard main.
+        return main(__argc, __argv); 
+    }
+#endif
 */
