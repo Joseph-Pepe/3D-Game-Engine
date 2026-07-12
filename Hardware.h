@@ -201,7 +201,7 @@ namespace Engine::GameEngine {
     template <typename Abi>
     void UpdateEngineSubsystems(float* xs, float* ys, float* zs, size_t count, float deltaTime, float gravityVal, float mouseX, float mouseY, bool isMouseDown) {
         // 1. Run Physics (It uses the ABI)
-        Engine::Physics::UpdateParticlesTemplate<Abi>(xs, ys, zs, count, deltaTime);
+        Engine::Physics::UpdateParticlesTemplate<Abi>(xs, ys, zs, count, deltaTime, gravityVal, mouseX, mouseY, isMouseDown);
 
         // 2. Run Audio Mixing (It uses the ABI)
         // Engine::Audio::MixTracks<Abi>(count);
