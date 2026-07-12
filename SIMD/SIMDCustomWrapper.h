@@ -327,7 +327,7 @@ namespace Engine::ISAArch {
                     return _mm512_i32gather_pd(_mm512_castsi512_si256(indices), base_addr, 8); 
                 }
 
-                static inline bool mask_any(mask_type a) { return a != 0; }
+                static inline bool mask_any(mask_type a) { return !_ktestz_mask16_blank(a, a); } // Generates a hardware 'KTEST' instruction. Checks if the mask is empty entirely inside the vector mask registers (without touching standard scalar comparison registers).
                 static inline bool mask_all(mask_type a) { return a == 0xFF; }
 
                 template <int i0, int i1, int i2, int i3, int i4, int i5, int i6, int i7>
@@ -1117,6 +1117,7 @@ namespace Engine::ISAArch {
                 }
 
                 static inline bool mask_any(mask_type a) { 
+                    // Extracts the most significant bit of each of the 8 float lanes and packs them into an 8-bit integer inside a general purpose scalar register in 1 clock cycle. 
                     return _mm256_movemask_ps(a) != 0; 
                 }
                 static inline bool mask_all(mask_type a) { 
@@ -1562,8 +1563,8 @@ namespace Engine::ISAArch {
                 }
 
                 static inline bool mask_any(mask_type a) { 
-                    // If the maximum value across the vector is > 0, at least one lane is true
-                    return vmaxvq_u32(a) > 0; 
+                    // Modern ARM64 vector lane addition instruction: Checks if any lanes in a 128-bit vector are active.
+                    return vaddvq_u32(a) != 0;
                 }
                 static inline bool mask_all(mask_type a) { 
                     // If the minimum value across the vector is > 0, all lanes are true
@@ -1668,7 +1669,9 @@ namespace Engine::ISAArch {
                     return res;
                 }
 
-                static inline bool mask_any(mask_type a) { return vmaxvq_u32(vreinterpretq_u32_u64(a)) > 0; }
+                static inline bool mask_any(mask_type a) {
+                    return vaddvq_u64(a) != 0;
+                }
                 static inline bool mask_all(mask_type a) { return vminvq_u32(vreinterpretq_u32_u64(a)) > 0; }
 
                 template <int i0, int i1>
