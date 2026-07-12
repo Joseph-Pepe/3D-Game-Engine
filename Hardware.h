@@ -215,14 +215,21 @@ namespace Engine::GameEngine {
 
     // 3. The active target backend function pointer initialized securely to a safe scalar fallback (allows the Engine to swap the backend based on the silicon at runtime).
     inline GameEngineBackendFn ExecuteGameEngineBackend = nullptr; // void (*ExecuteGameEngineBackend)(float*, float*, float*, size_t, float)
+
+    // The Benchmark Function Pointer Signature
+    using BenchmarkBackendFn = void(*)(float* xs, float* ys, float* zs, float* vx, float* vy, float* vz, size_t count, float deltaTime, float gravityVal, int64_t repeats);
+
+    // The Global Pointer
+    inline BenchmarkBackendFn ExecuteBenchmarkBackend = nullptr;
     
     // 4. The Dispatch Initializer called once during Engine Boot.
     void InitializeDynamicDispatch() {
         // Runs compile-time + runtime dynamic dispatch exactly once.
         #if defined(ENGINE_ARCH_AVX512)
             if (g_Hardware.hasAVX512F) {
-                // Route to the AVX-512 instantiation of our template!
+                // Route to the AVX-512 instantiation of our template! Enables us to execute the function in main () like this [Engine::GameEngine::ExecuteBenchmarkBackend(...)]
                 ExecuteGameEngineBackend = &UpdateEngineSubsystems<Engine::ISAArch::simd_abi::avx512>;
+                ExecuteBenchmarkBackend  = &Engine::Physics::BenchmarkParticlesTemplate<Engine::ISAArch::simd_abi::avx512>;
                 std::println("[ROUTING] AVX-512 Backend Selected.");
                 return;
             }
@@ -232,6 +239,7 @@ namespace Engine::GameEngine {
             if (g_Hardware.hasAVX2) {
                 // Route to the AVX2 instantiation of our template!
                 ExecuteGameEngineBackend = &UpdateEngineSubsystems<Engine::ISAArch::simd_abi::avx2>;
+                ExecuteBenchmarkBackend  = &Engine::Physics::BenchmarkParticlesTemplate<Engine::ISAArch::simd_abi::avx2>;
                 std::println("[ROUTING] AVX2 Backend Selected.");
                 return;
             }
@@ -241,6 +249,7 @@ namespace Engine::GameEngine {
             if (g_Hardware.hasNEON) {
                 // Route to the ARM NEON instantiation of our template!
                 ExecuteGameEngineBackend = &UpdateEngineSubsystems<Engine::ISAArch::simd_abi::neon>;
+                ExecuteBenchmarkBackend  = &Engine::Physics::BenchmarkParticlesTemplate<Engine::ISAArch::simd_abi::neon>;
                 std::println("[ROUTING] ARM NEON Backend Selected.");
                 return;
             }
@@ -249,12 +258,14 @@ namespace Engine::GameEngine {
         #if defined(ENGINE_ARCH_SSE41)
             // Route to the SSE4.1 instantiation of our template!
             ExecuteGameEngineBackend = &UpdateEngineSubsystems<Engine::ISAArch::simd_abi::sse41>;
+            ExecuteBenchmarkBackend  = &Engine::Physics::BenchmarkParticlesTemplate<Engine::ISAArch::simd_abi::sse41>;
             std::println("[ROUTING] SSE4.1 Legacy Backend Selected.");
             return;
         #endif
 
-        // Absolute  baseline fallback
+        // Absolute baseline fallback
         ExecuteGameEngineBackend = &UpdateEngineSubsystems<Engine::ISAArch::simd_abi::scalar>;
+        ExecuteBenchmarkBackend  = &Engine::Physics::BenchmarkParticlesTemplate<Engine::ISAArch::simd_abi::scalar>;
         std::println("[ROUTING] SCALAR Legacy Backend Selected.");
     }
 }
