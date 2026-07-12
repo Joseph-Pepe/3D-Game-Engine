@@ -2,6 +2,9 @@
 
 #include <print>
 
+#include "SIMD/SIMDCustomWrapper.h" 
+#include "ParticleSystem.h"
+
 // --- COMPILER INTRINSICS FOR CPUID (x86_64 ONLY) ---
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
     #include <immintrin.h> // Required for _xgetbv() and universal SIMD support
@@ -199,9 +202,9 @@ inline HardwareCapabilities g_Hardware = HardwareCapabilities::Detect();
 namespace Engine::GameEngine {
     // 1. The Generic Templated Physics Kernel, parameterized by 'Abi' (Application Binary Interface). The compiler will generate 5 different hardware versions.
     template <typename Abi>
-    void UpdateEngineSubsystems(float* xs, float* ys, float* zs, size_t count, float deltaTime, float gravityVal, float mouseX, float mouseY, bool isMouseDown) {
+    void UpdateEngineSubsystems(float* xs, float* ys, float* zs, float* vx, float* vy, float* vz, size_t count, float deltaTime, float gravityVal, float mouseX, float mouseY, bool isMouseDown) {
         // 1. Run Physics (It uses the ABI)
-        Engine::Physics::UpdateParticlesTemplate<Abi>(xs, ys, zs, count, deltaTime, gravityVal, mouseX, mouseY, isMouseDown);
+        Engine::Physics::template IntegrateParticlesTemplate<Abi>(xs, ys, zs, vx, vy, vz, count, deltaTime, gravityVal, mouseX, mouseY, isMouseDown);
 
         // 2. Run Audio Mixing (It uses the ABI)
         // Engine::Audio::MixTracks<Abi>(count);
