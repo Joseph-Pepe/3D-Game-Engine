@@ -195,20 +195,6 @@ inline HardwareCapabilities g_Hardware = HardwareCapabilities::Detect();
     - Prevents "Illegal Instruction" crashes on legacy CPUs while maximizing performance on modern ones.
 */
 
-namespace Engine::Physics {
-    template <typename Abi>
-    void UpdateParticlesTemplate(float* xs, float* ys, float* zs, size_t count, float deltaTime) {
-        // Dynamically instantiate the exact SIMD width for this ABI
-        using WideFloat = Engine::ISAArch::simd<float, Abi>;
-        constexpr size_t stride = WideFloat::size();
-
-        // Broadcast scalar to vector natively
-        WideFloat dtBatch(deltaTime);
-
-        // ... physics loop ...
-    }
-}
-
 // Template Driven Dynamic Dispatch: Full-System Multi-Versioning via Static Polymorphism.
 namespace Engine::GameEngine {
     // 1. The Generic Templated Physics Kernel, parameterized by 'Abi' (Application Binary Interface). The compiler will generate 5 different hardware versions.
@@ -367,4 +353,38 @@ int main(int argc, char** argv) {
         return main(__argc, __argv); 
     }
 #endif
+*/
+
+// ==================================================================================
+// PARTICLE SIMULATOR BOOTSTRAPPER (main.cpp)
+// ==================================================================================
+/*
+#include "ParticleSystem.h"
+#include "Hardware.h" // Your dynamic dispatcher
+
+int main() {
+    // 1. Boot Hardware & Job System
+    g_Hardware.PrintTelemetry();
+    Engine::GameEngine::InitializeDynamicDispatch();
+    
+    // 2. Initialize Game Data
+    Engine::GameEngine::ParticleSystem particles;
+    particles.Initialize(100000);
+    particles.SpawnParticles(0, 100000, 1.5f);
+
+    // 3. The Game Loop
+    while (Engine::Window::ShouldClose() == false) {
+        float dt = GetDeltaTime();
+
+        // Pass the raw pointers into the dynamically routed hardware backend
+        Engine::GameEngine::ExecuteGameEngineBackend(
+            particles.pX.data(), particles.pY.data(), particles.pZ.data(),
+            particles.vX.data(), particles.vY.data(), particles.vZ.data(),
+            particles.activeCount, dt, 500.0f
+        );
+
+        Engine::Renderer::RenderFrame();
+    }
+    return 0;
+}
 */
