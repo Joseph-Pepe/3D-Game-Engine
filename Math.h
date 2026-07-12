@@ -1552,7 +1552,7 @@ struct alignas(16) SIMDQuaternion {
 
         // 1. BATCHED SIMD TRANSCENDENTAL EVALUATION
         // Pack all three scalar angles into a single 128-bit register. (X=p, Y=y, Z=r, W=0)
-        Engine::Math::SIMD::Float4 angles = Set(p, y, r, 0.0f);
+        Engine::Math::SIMD::Float4 angles = Engine::Math::SIMD::Set(p, y, r, 0.0f);
 
         // This replaces 6 scalar (std::sin, std::cos) standard library calls (~300 cycles) with 2 SIMD polynomial expansions (~40 cycles total).
         // Float4 sines   = FastSin(angles);
