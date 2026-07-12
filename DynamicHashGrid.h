@@ -1,124 +1,296 @@
 #pragma once
+
 #include "Math.h"
-#include <span>
 #include <vector>
+#include <span>
+#include <concepts>
+#include <algorithm>
+#include <print>
+#include <bit> // Required for std::bit_ceil
 
 // ==================================================================================
-// DYNAMIC SPATIAL HASH GRID (BROAD-PHASE ENTITY PHYSICS)
+// TRANSIENT SPATIAL HASH GRID (NETWORK & AI)
 // ==================================================================================
 /*
-    - Rebuilt every frame. Zero heap allocations during the game loop.
+    - Perfect for Sparse, Unbounded, Macro-Level Systems (e.g., small number of items [500 to 5,000] scattered randomly across vast distances).
+    - Never use this for dense, high-frequency physics (e.g. 100,000 colliding particles) b/c its a performance killer.
     - Used for physical game objects (Crates, Enemies, Vehicles).
     - Maps unbounded 3D coordinates into a fixed-size 1D array of "Buckets".
-    - We rebuild the grid from scratch every tick, takes less than a millisecond for 50,000 entities.
-    - Also known as Dynamic Octrees.
-    - As the player drives a car through the city, the car's absolute double position changes. 
-    - Before the physics step, you snap the camera to the player, converting all cars and creates within a few kilometers into 32-bit camera relative floats.
-    - It instantly finds the crates that it needs to test for collisions against, ignoring the other 5,000 crates in the world.
 */
 
-struct SpatialHashCell {
-    uint32_t startIndex; // Where in the sorted entity array does this cell begin?
-    uint32_t count;      // How many entities are in this cell?
-};
+namespace Engine::Database {
 
-class SpatialHashGrid {
-private:
-    float m_cellSize;
-    float m_invCellSize;
-    uint32_t m_tableSize;
+    struct SpatialCell {
+        uint32_t startIndex; // Where in the sorted entity array does this cell begin?
+        uint32_t count;      // How many entities are in this cell?
+    };
 
-    // The Grid Buckets
-    std::vector<SpatialHashCell> m_cells;
-    
-    // The Entity Indices, sorted so that entities in the same cell sit next to each other
-    std::vector<uint32_t> m_sortedEntityIndices;
-    
-    // Internal buffers for the counting sort
-    std::vector<uint32_t> m_entityCellHashes;
-    std::vector<uint32_t> m_cellCounts;
+    // Concept to ensure whatever we store can be mapped back to a 3D coordinate
+    template <typename T>
+    concept HasSpatialPosition = requires(T a) {
+        { a.position.x } -> std::convertible_to<float>;
+        { a.position.y } -> std::convertible_to<float>;
+        { a.position.z } -> std::convertible_to<float>;
+    };
 
-    // --- SPATIAL HASH FUNCTION ---
-    // Uses prime numbers to scramble the grid coordinates into a semi-random bucket
-    FORCE_INLINE uint32_t HashCoords(int x, int y, int z) const {
-        const uint32_t p1 = 73856093;
-        const uint32_t p2 = 19349663;
-        const uint32_t p3 = 83492791;
+    template <typename PayloadType>
+    class TransientSpatialGrid {
+    private:
+        float m_cellSize;
+        float m_invCellSize;
+        uint32_t m_tableMask; // Power-of-2 mask for ultra-fast bitwise modulo
+
+        // The Grid Buckets
+        std::vector<SpatialCell> m_cells;
+        std::vector<PayloadType> m_sortedPayloads;
         
-        uint32_t hash = (static_cast<uint32_t>(x) * p1) ^ 
-                        (static_cast<uint32_t>(y) * p2) ^ 
-                        (static_cast<uint32_t>(z) * p3);
-                        
-        return hash % m_tableSize;
-    }
+        // Internal buffers for the counting sort
+        std::vector<uint32_t> m_hashes;
+        std::vector<uint32_t> m_cellCounts;
 
-public:
-    void Initialize(float cellSize, uint32_t maxEntities, uint32_t tableSize = 100003) {
-        m_cellSize = cellSize;
-        m_invCellSize = 1.0f / cellSize;
-        m_tableSize = tableSize;
+        // --- SPATIAL HASH FUNCTION ---
+        // Uses prime numbers to scramble the grid coordinates into a semi-random bucket
+        FORCE_INLINE uint32_t HashCoords(int32_t x, int32_t y, int32_t z) const {
+            const uint32_t p1 = 73856093;
+            const uint32_t p2 = 19349663;
+            const uint32_t p3 = 83492791;
+            
+            uint32_t hash = (static_cast<uint32_t>(x) * p1) ^ 
+                            (static_cast<uint32_t>(y) * p2) ^ 
+                            (static_cast<uint32_t>(z) * p3);
+                            
+            // Bitwise (&) is significantly faster than integer divison of modulo.
+            return hash & m_tableMask; // Zero-cost hardware modulo
+        }
 
-        m_cells.resize(tableSize);
-        m_cellCounts.resize(tableSize);
-        m_sortedEntityIndices.resize(maxEntities);
-        m_entityCellHashes.resize(maxEntities);
-    }
+    public:
+        // Table size MUST be a power of 2 (e.g., 4096, 8192, 16384)
+        void Initialize(float cellSize, uint32_t maxItems, uint32_t tableSize = 8192) {
+            // Assert power of two for the bitmask
+            if ((tableSize & (tableSize - 1)) != 0) {
+                std::println("[ERROR] TransientSpatialGrid tableSize must be a power of 2.");
+                return;
+            }
 
-    // --- BUILD THE GRID (O(n) Time) ---
-    // Pass in your Local (32-bit float) positions. Do NOT pass Large World Coordinates here.
-    // LWC coordinates should be converted to camera-relative floats before physics ticks.
-    void BuildGrid(std::span<const Vector3D> entityPositions, size_t activeEntities) {
-        
-        // 1. Reset cell counts to zero
-        std::fill(m_cellCounts.begin(), m_cellCounts.end(), 0);
+            m_cellSize = cellSize;
+            m_invCellSize = 1.0f / cellSize;
+            m_tableMask = tableSize - 1;
 
-        // 2. Compute Hashes & Count elements per cell
-        for (size_t i = 0; i < activeEntities; ++i) {
-            int gridX = static_cast<int>(std::floor(entityPositions[i].data[0] * m_invCellSize));
-            int gridY = static_cast<int>(std::floor(entityPositions[i].data[1] * m_invCellSize));
-            int gridZ = static_cast<int>(std::floor(entityPositions[i].data[2] * m_invCellSize));
+            m_cells.resize(tableSize);
+            m_cellCounts.resize(tableSize);
+            m_sortedPayloads.resize(maxItems);
+            m_hashes.resize(maxItems);
+        }
+
+        // --- THE O(N) BATCH BUILDER ---
+        void Build(std::span<const PayloadType> items, std::span<const Vector3D> positions) {
+            size_t count = items.size();
+
+            // 1. Reset cell counts to zero
+            std::fill(m_cellCounts.begin(), m_cellCounts.end(), 0);
+
+            // 2. Compute Hashes & Count elements per cell
+            for (size_t i = 0; i < count; ++i) {
+                // Scalar float-to-int conversion mapped to SSE/NEON via compiler
+                int32_t gridX = static_cast<int32_t>(positions[i].x * m_invCellSize);
+                int32_t gridY = static_cast<int32_t>(positions[i].y * m_invCellSize);
+                int32_t gridZ = static_cast<int32_t>(positions[i].z * m_invCellSize);
+
+                uint32_t hash = HashCoords(gridX, gridY, gridZ);
+                m_hashes[i] = hash;
+                m_cellCounts[hash]++;
+            }
+
+            // 3. Prefix Sum (Calculate memory offsets)
+            uint32_t offset = 0;
+            for (uint32_t i = 0; i <= m_tableMask; ++i) {
+                m_cells[i] = { offset, m_cellCounts[i] };
+                offset += m_cellCounts[i];
+                m_cellCounts[i] = 0; // Reset for scatter pass
+            }
+
+            // 4. Scatter (Perfect memory alignment)
+            for (size_t i = 0; i < count; ++i) {
+                uint32_t hash = m_hashes[i];
+                uint32_t dest = m_cells[hash].startIndex + m_cellCounts[hash];
+                
+                m_sortedPayloads[dest] = items[i];
+                m_cellCounts[hash]++;
+            }
+        }
+
+        // --- ZERO-ALLOCATION QUERY ---
+        [[nodiscard]] FORCE_INLINE std::span<const PayloadType> QueryCell(const Vector3D& pos) const {
+            int32_t gridX = static_cast<int32_t>(pos.x * m_invCellSize);
+            int32_t gridY = static_cast<int32_t>(pos.y * m_invCellSize);
+            int32_t gridZ = static_cast<int32_t>(pos.z * m_invCellSize);
 
             uint32_t hash = HashCoords(gridX, gridY, gridZ);
-            m_entityCellHashes[i] = hash;
-            m_cellCounts[hash]++;
+            const SpatialCell& cell = m_cells[hash];
+
+            if (cell.count == 0) return {};
+            return std::span<const PayloadType>(&m_sortedPayloads[cell.startIndex], cell.count);
+        }
+    };
+}
+
+namespace Engine::Systems {
+
+    // ==============================================================
+    // USE CASE 1: AI SENSORY & PERCEPTION
+    // ==============================================================
+    struct AIStimulus {
+        uint32_t sourceEntityID;
+        float intensity; // e.g., how loud the gunshot was
+        enum class Type : uint8_t { Visual, Audio, Damage } type;
+    };
+
+    class AIPerceptionSystem {
+        Engine::Database::TransientSpatialGrid<AIStimulus> m_stimulusGrid;
+
+    public:
+        void Initialize() {
+            // 10-meter cells. Maximum 5000 active events per frame.
+            m_stimulusGrid.Initialize(10.0f, 5000, 4096); 
         }
 
-        // 3. Prefix Sum: Calculate the starting index for each cell
-        uint32_t currentOffset = 0;
-        for (uint32_t i = 0; i < m_tableSize; ++i) {
-            m_cells[i].startIndex = currentOffset;
-            m_cells[i].count = m_cellCounts[i]; // Store count for the query phase
-            currentOffset += m_cellCounts[i];
+        void ProcessAITick(const Vector3D& aiPosition) {
+            // The AI instantly queries its cell to "hear" or "see" everything nearby
+            auto events = m_stimulusGrid.QueryCell(aiPosition);
             
-            // Reset the counter so we can use it as a running offset in Step 4
-            m_cellCounts[i] = 0; 
+            for (const auto& stimulus : events) {
+                if (stimulus.type == AIStimulus::Type::Audio) {
+                    // Trigger investigation behavior...
+                }
+            }
+        }
+    };
+
+    // ==============================================================
+    // USE CASES 2: NETWORK INTEREST & REPLICATION
+    // ==============================================================
+    struct NetworkEntity {
+        uint32_t networkID;
+        uint16_t prefabID;
+    };
+
+    class NetworkStream {
+    public:
+        void Serialize(uint32_t data) { /* Network byte packing logic */ }
+    };
+
+    class NetworkReplicationSystem {
+        Engine::Database::TransientSpatialGrid<NetworkEntity> m_relevanceGrid;
+
+    public:
+        void Initialize() {
+            // 50-meter cells. Max 100,000 replicated objects.
+            m_relevanceGrid.Initialize(50.0f, 100000, 16384); 
         }
 
-        // 4. Scatter: Place the entity indices into the perfectly contiguous sorted array
-        for (size_t i = 0; i < activeEntities; ++i) {
-            uint32_t hash = m_entityCellHashes[i];
+        void ReplicateToPlayer(const Vector3D& playerPos, class NetworkStream& stream) {
+            // 1. Gather all entities in the player's 50m sector
+            auto relevantEntities = m_relevanceGrid.QueryCell(playerPos);
+
+            // 2. Serialize ONLY the entities the player can actually see
+            for (const auto& entity : relevantEntities) {
+                stream.Serialize(entity.networkID);
+            }
             
-            // Look up where this cell starts, add the running offset, and insert
-            uint32_t destIndex = m_cells[hash].startIndex + m_cellCounts[hash];
-            m_sortedEntityIndices[destIndex] = static_cast<uint32_t>(i);
-            
-            m_cellCounts[hash]++; // Increment offset for the next entity in this cell
+            // 3. To handle multiple cells (e.g., 150m view distance), just query 
+            // the adjacent gridX/Y/Z offsets and stream those spans too!
         }
-    }
+    };
+}
 
-    // --- QUERY THE GRID ---
-    // Returns a span of entity indices that share the same grid cell.
-    FORCE_INLINE std::span<const uint32_t> GetEntitiesInCell(const Vector3D& position) const {
-        int gridX = static_cast<int>(std::floor(position.data[0] * m_invCellSize));
-        int gridY = static_cast<int>(std::floor(position.data[1] * m_invCellSize));
-        int gridZ = static_cast<int>(std::floor(position.data[2] * m_invCellSize));
+// ==================================================================================
+// USE CASE 3: INFINITE CHUNK HASH DATABASE (PERSISTENT DATA)
+// ==================================================================================
 
-        uint32_t hash = HashCoords(gridX, gridY, gridZ);
+namespace Engine::Database {
+
+    struct ChunkKey {
+        int32_t x, y, z;
         
-        const SpatialHashCell& cell = m_cells[hash];
-        if (cell.count == 0) return {};
+        // C++20/26 Spaceship operator for free equality generation
+        auto operator<=>(const ChunkKey&) const = default;
+    };
 
-        // Because we sorted the array, we just return a lightweight view of the memory!
-        return std::span<const uint32_t>(&m_sortedEntityIndices[cell.startIndex], cell.count);
-    }
-};
+    struct WorldChunk {
+        ChunkKey key;
+        float* terrainData; // Pointer to massive VRAM/RAM buffers
+        bool isActive;
+    };
+
+    class WorldChunkDatabase {
+    private:
+        static constexpr uint32_t EMPTY_HASH = 0xFFFFFFFF;
+        
+        struct HashSlot {
+            uint32_t hash = EMPTY_HASH;
+            ChunkKey key;
+            uint32_t chunkIndex; // Index into m_denseChunks
+        };
+
+        std::vector<HashSlot> m_hashTable;
+        std::vector<WorldChunk> m_denseChunks; // Contiguous array of actual loaded chunks
+        
+        uint32_t m_tableMask;
+        uint32_t m_activeChunks;
+
+        FORCE_INLINE uint32_t HashInteger(const ChunkKey& key) const {
+            uint32_t h = (static_cast<uint32_t>(key.x) * 73856093) ^ 
+                         (static_cast<uint32_t>(key.y) * 19349663) ^ 
+                         (static_cast<uint32_t>(key.z) * 83492791);
+            return h & m_tableMask;
+        }
+
+    public:
+        void Initialize(uint32_t maxChunks = 4096) {
+            // Keep table 2x larger than max chunks to prevent linear probing pileups
+            uint32_t tableSize = std::bit_ceil(maxChunks * 2); 
+            m_tableMask = tableSize - 1;
+
+            m_hashTable.resize(tableSize);
+            m_denseChunks.reserve(maxChunks);
+            m_activeChunks = 0;
+        }
+
+        // --- O(1) CACHE-FRIENDLY INSERTION ---
+        void InsertChunk(const ChunkKey& key, WorldChunk chunk) {
+            uint32_t hash = HashInteger(key);
+            uint32_t index = hash;
+
+            // Linear Probing: If a slot is taken by a different chunk, step forward
+            while (m_hashTable[index].hash != EMPTY_HASH) {
+                if (m_hashTable[index].key == key) {
+                    std::println("[WARNING] Chunk already exists at ({}, {}, {})", key.x, key.y, key.z);
+                    return;
+                }
+                index = (index + 1) & m_tableMask; // Wrap around safely
+            }
+
+            // Store the chunk in the dense contiguous array
+            m_denseChunks.push_back(chunk);
+
+            // Register the lookup
+            m_hashTable[index] = { hash, key, static_cast<uint32_t>(m_denseChunks.size() - 1) };
+            m_activeChunks++;
+        }
+
+        // --- O(1) CACHE-FRIENDLY LOOKUP ---
+        [[nodiscard]] WorldChunk* GetChunk(const ChunkKey& key) {
+            uint32_t hash = HashInteger(key);
+            uint32_t index = hash;
+
+            while (m_hashTable[index].hash != EMPTY_HASH) {
+                if (m_hashTable[index].key == key) {
+                    return &m_denseChunks[m_hashTable[index].chunkIndex];
+                }
+                index = (index + 1) & m_tableMask;
+            }
+
+            return nullptr; // Chunk is not loaded in memory
+        }
+    };
+}
