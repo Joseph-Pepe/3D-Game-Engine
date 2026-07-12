@@ -199,19 +199,22 @@ inline HardwareCapabilities g_Hardware = HardwareCapabilities::Detect();
 namespace Engine::GameEngine {
     // 1. The Generic Templated Physics Kernel, parameterized by 'Abi' (Application Binary Interface). The compiler will generate 5 different hardware versions.
     template <typename Abi>
-    void UpdateEngineSubsystems(float* xs, float* ys, float* zs, size_t count, float deltaTime) {
+    void UpdateEngineSubsystems(float* xs, float* ys, float* zs, size_t count, float deltaTime, float gravityVal, float mouseX, float mouseY, bool isMouseDown) {
         // 1. Run Physics (It uses the ABI)
         Engine::Physics::UpdateParticlesTemplate<Abi>(xs, ys, zs, count, deltaTime);
 
         // 2. Run Audio Mixing (It uses the ABI)
-        Engine::Audio::MixTracks<Abi>(count);
+        // Engine::Audio::MixTracks<Abi>(count);
 
         // 3. Run Culling (It uses the ABI)
-        Engine::Rendering::CullFrustum<Abi>(count);
+        // Engine::Rendering::CullFrustum<Abi>(count);
     }
 
     // 2. Define the type signature for our hardware math kernels (C++11)
-    using GameEngineBackendFn = void(*)(float* xs, float* ys, float* zs, size_t count, float deltaTime);
+    using GameEngineBackendFn = void(*)(float* xs, float* ys, float* zs, 
+                                    float* vx, float* vy, float* vz, 
+                                    size_t count, float deltaTime, float gravityVal, 
+                                    float mouseX, float mouseY, bool isMouseDown);
 
     // 3. The active target backend function pointer initialized securely to a safe scalar fallback (allows the Engine to swap the backend based on the silicon at runtime).
     inline GameEngineBackendFn ExecuteGameEngineBackend = nullptr; // void (*ExecuteGameEngineBackend)(float*, float*, float*, size_t, float)
