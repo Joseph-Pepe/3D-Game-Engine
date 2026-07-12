@@ -59,6 +59,31 @@
     - Hashing with prime numbers destroys cache locality because it scatters data in random memory addresses resulting in undetectable patterns, and starved registers waiting hundreds of cycles waiting on main memory. 
 */
 
+// --- C++26 COMPILE-TIME MORTON LUT GENERATION ---
+consteval std::array<uint32_t, 1024> GenerateMortonTable(uint32_t shift) {
+    // This function executes entirely during compilation (i.e., consteval).
+    std::array<uint32_t, 1024> table{};
+
+    // We use "masks" to define where the bits should land.
+    for (uint32_t i = 0; i < 1024; ++i) {
+        uint32_t v = i;
+
+        // Bit shift version uses standard ALU instructions that can be used on every CPU Architecture.
+        v = (v | (v << 16)) & 0x030000FF;  
+        v = (v | (v <<  8)) & 0x0300F00F;
+        v = (v | (v <<  4)) & 0x030C30C3;
+        v = (v | (v <<  2)) & 0x09249249;
+
+        // X bits (shift = 0) go to slots 0, 3, 6,  9...
+        // Y bits (shift = 1) go to slots 1, 4, 7, 10...
+        // Z bits (shift = 2) go to slots 2, 5, 8, 11...
+
+        // Interleaves the bits of X, Y, and Z to preserve 3D spatial cache locality (3D array flattening), optimizes L1/L2 cache
+        table[i] = v << shift;
+    }
+    return table;
+}
+
 // ===================================================
 // --- PHYSICAL COORDINATE GRID LOOKUP TABLE (LUT) ---
 // ===================================================
@@ -93,31 +118,6 @@ void InitMortonLUT() {
     }
 }
 */
-
-// --- C++26 COMPILE-TIME MORTON LUT GENERATION ---
-consteval std::array<uint32_t, 1024> GenerateMortonTable(uint32_t shift) {
-    // This function executes entirely during compilation (i.e., consteval).
-    std::array<uint32_t, 1024> table{};
-
-    // We use "masks" to define where the bits should land.
-    for (uint32_t i = 0; i < 1024; ++i) {
-        uint32_t v = i;
-
-        // Bit shift version uses standard ALU instructions that can be used on every CPU Architecture.
-        v = (v | (v << 16)) & 0x030000FF;  
-        v = (v | (v <<  8)) & 0x0300F00F;
-        v = (v | (v <<  4)) & 0x030C30C3;
-        v = (v | (v <<  2)) & 0x09249249;
-
-        // X bits (shift = 0) go to slots 0, 3, 6,  9...
-        // Y bits (shift = 1) go to slots 1, 4, 7, 10...
-        // Z bits (shift = 2) go to slots 2, 5, 8, 11...
-
-        // Interleaves the bits of X, Y, and Z to preserve 3D spatial cache locality (3D array flattening), optimizes L1/L2 cache
-        table[i] = v << shift;
-    }
-    return table;
-}
 
 // Blindingly fast scalar fallback is evaluated entirely at compile-time (i.e., constexpr) for static level geometry.
 FORCE_INLINE constexpr uint32_t getMortonCodeLUT(uint32_t x, uint32_t y, uint32_t z) {
