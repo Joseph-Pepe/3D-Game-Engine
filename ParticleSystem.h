@@ -290,7 +290,7 @@ namespace Engine::Physics {
         }
     }
 
-    // --- THE HARDWARE COLLISION TEMPLATE  ---
+    // --- THE HARDWARE COLLISION TEMPLATE (SOA PIPELINE) ---
     // NOTE: For batches we don't need to use is2DMode, because all we need to do is not pass in the z coordinates for batch processing.
     template <typename Abi>
     void SolveCollisionsTemplate(float* xs, float* ys, float* zs, 
