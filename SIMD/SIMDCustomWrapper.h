@@ -2485,8 +2485,11 @@ namespace Engine::ISAArch {
         friend inline simd floor(const simd& a) requires std::is_floating_point_v<T> { return simd::from_native(Traits::floor(a.m_data)); }
         friend inline simd ceil(const simd& a) requires std::is_floating_point_v<T> { return simd::from_native(Traits::ceil(a.m_data)); }
         friend inline simd sqrt(const simd& a) requires std::is_floating_point_v<T> { return simd::from_native(Traits::sqrt(a.m_data)); }
-        friend inline simd fmadd(const simd& a) requires std::is_floating_point_v<T> { return simd::from_native(Traits::fmadd(a.m_data)); }
-
+        
+        // Replicates: std::fma(a, b, c) -> (a * b) + c
+        friend inline simd fmadd(const simd& a, const simd& b, const simd& c) requires std::is_floating_point_v<T> {
+            return simd::from_native(Traits::fmadd(a.m_data, b.m_data, c.m_data));
+        }
 
         // Float16 Memory Gateway
         static simd load_f16(const uint16_t* mem) requires std::is_floating_point_v<T> {
