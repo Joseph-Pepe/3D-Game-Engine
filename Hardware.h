@@ -174,13 +174,18 @@ struct HardwareCapabilities {
                 std::println("{:<20}: {}", std::meta::identifier_of(m), this->[:m:] ? "YES" : "NO");
             };
         #else
-            // C++23 Fallback
+            // --- Hardware Auto-Detect ---
             std::println("AVX:                {}", hasAVX ? "YES" : "NO");
             std::println("AVX2:               {}", hasAVX2 ? "YES" : "NO");
             std::println("FMA:                {}", hasFMA ? "YES" : "NO");
             std::println("AVX-512 F:          {}", hasAVX512F ? "YES" : "NO");
-            std::println("Legacy AMD BMI2:    {}", isLegacyAMD_BMI2 ? "YES (Warning: Microcode Trap)" : "NO");
+            std::println("Legacy AMD BMI2:    {}", isLegacyAMD_BMI2 ? "YES (BMI2 Microcoded)" : "NO (BMI2 CPU Detected)");
         #endif
+
+        // g_EngineSettings.isLegacyCPU = g_Hardware.isLegacyAMD_BMI2;
+        // if (g_EngineSettings.isLegacyCPU) {
+        //     std::println("[WARNING] Slow BMI2 CPU detected. Forcing L1 Cache LUT fallback.");
+        // }
         
         std::println("=============================");
     }
