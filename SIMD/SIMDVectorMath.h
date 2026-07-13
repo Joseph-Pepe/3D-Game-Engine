@@ -772,7 +772,7 @@ namespace Engine::Physics {
         // Pre-allocate memory to avoid heap fragmentation
         void Initialize(size_t maxParticles) {
             // ALWAYS pad to the nearest hardware boundary! Pads arrays to nearest batch multiple to prevent cache straddling and bounds check violations.
-            size_t paddedParticles = (maxParticles + NATIVE_BATCH_SIZE - 1) & ~(NATIVE_BATCH_SIZE - 1);
+            size_t paddedParticles = (maxParticles + NATIVE_BATCH_SIZE - 1uz) & ~(NATIVE_BATCH_SIZE - 1uz);
             size_t batchCount = paddedParticles / NATIVE_BATCH_SIZE; 
 
             // Use the uninitialized resize backdoor to guarantee zero-overhead allocation
@@ -797,7 +797,8 @@ namespace Engine::Physics {
         // 2. Iterate over the batches (NOT individual particles) or chunk of particles.
         size_t activeBatches = (activeCount + NATIVE_BATCH_SIZE - 1) / NATIVE_BATCH_SIZE;
 
-        // We can iterate directly over the span size up to the active batch count.
+        // --- HARDWARE BOUNDING (N/8) ---
+        // We can iterate directly over the span size up to the active batch count (e.g., processes 100,000 particles with 12,500 iterations).
         for (size_t i = 0; i < activeBatches; ++i) {
             // 3. Load velocities into registers
             NativeFloatSIMDBatch velX = velocities[i].x;   // AVX-512: __m512 velX = _mm512_load_ps(velocities[i].x); = vX
