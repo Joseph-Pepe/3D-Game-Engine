@@ -179,6 +179,7 @@ struct HardwareCapabilities {
             std::println("AVX2:               {}", hasAVX2 ? "YES" : "NO");
             std::println("FMA:                {}", hasFMA ? "YES" : "NO");
             std::println("AVX-512 F:          {}", hasAVX512F ? "YES" : "NO");
+            std::println("BMI2:               {}", hasBMI2 ? "YES" : "NO");
             std::println("Legacy AMD BMI2:    {}", isLegacyAMD_BMI2 ? "YES (BMI2 Microcoded)" : "NO (BMI2 CPU Detected)");
         #endif
 
