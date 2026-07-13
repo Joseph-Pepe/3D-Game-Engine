@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <type_traits>
 #include <format>
+#include <utility>
 #include <print> // std::println
 
 // ==================================================
@@ -365,6 +366,14 @@ namespace Engine::ISAArch {
                 static inline register_type blend(mask_type mask, register_type true_v, register_type false_v) {
                     return _mm512_mask_blend_ps(mask, false_v, true_v);
                 }
+
+                static inline register_type concat(__m256 a, __m256 b) {
+                    return _mm512_insertf32x8(_mm512_castps256_ps512(a), b, 1);
+                }
+                static inline void split(register_type a, __m256& out_low, __m256& out_high) {
+                    out_low = _mm512_castps512_ps256(a);
+                    out_high = _mm512_extractf32x8_ps(a, 1);
+                }
                 
                 // AVX-512 FMA
                 static inline register_type fmadd(register_type a, register_type b, register_type c) {
@@ -374,6 +383,9 @@ namespace Engine::ISAArch {
                 static inline float reduce_add(register_type a) {
                     return _mm512_reduce_add_ps(a); // AVX-512 finally has native horizontal reduction!
                 }
+
+                static inline float reduce_min(register_type a) { return _mm512_reduce_min_ps(a); }
+                static inline float reduce_max(register_type a) { return _mm512_reduce_max_ps(a); }
 
                 // --- AVX-512 FLOAT ARITHMETIC ---
                 static inline register_type sub(register_type a, register_type b) { return _mm512_sub_ps(a, b); }
@@ -485,6 +497,25 @@ namespace Engine::ISAArch {
 
                 static inline bool mask_any(mask_type a) { return !_ktestz_mask16_blank(a, a); } // Generates a hardware 'KTEST' instruction. Checks if the mask is empty entirely inside the vector mask registers (without touching standard scalar comparison registers).
                 static inline bool mask_all(mask_type a) { return a == 0xFF; }
+
+                static inline int mask_popcount(mask_type a) {
+                    #ifdef _MSC_VER
+                        return __popcnt16(a);
+                    #else
+                        return __builtin_popcount(a);
+                    #endif
+                }
+                
+                static inline int mask_find_first_set(mask_type a) {
+                    if (a == 0) return -1;
+                    #ifdef _MSC_VER
+                        unsigned long index;
+                        _BitScanForward(&index, a);
+                        return static_cast<int>(index);
+                    #else
+                        return __builtin_ctz(a);
+                    #endif
+                }
 
                 template <int i0, int i1, int i2, int i3, int i4, int i5, int i6, int i7>
                 static inline register_type shuffle(register_type a) { return a; } // (AVX-512 cross-lane swizzling is highly complex, omit for brevity unless needed)
@@ -681,6 +712,8 @@ namespace Engine::ISAArch {
 
                 static inline register_type blend(mask_type mask, register_type true_v, register_type false_v) { return _mm512_mask_blend_epi32(mask, false_v, true_v); }
                 static inline int32_t reduce_add(register_type a) { return _mm512_reduce_add_epi32(a); }
+                static inline float reduce_min(register_type a) { return _mm512_reduce_min_ps(a); }
+                static inline float reduce_max(register_type a) { return _mm512_reduce_max_ps(a); }
                 static inline register_type gather(const int32_t* base_addr, __m512i indices) { return _mm512_i32gather_epi32(indices, base_addr, 4); }
                 static inline bool mask_any(mask_type a) { return a != 0; }
                 static inline bool mask_all(mask_type a) { return a == 0xFFFF; }
@@ -789,8 +822,43 @@ namespace Engine::ISAArch {
                     return _mm_cvtss_f32(sums);
                 }
 
+                static inline float reduce_min(register_type a) {
+                    __m128 shuf = _mm_movehdup_ps(a);
+                    __m128 mins = _mm_min_ps(a, shuf);
+                    shuf = _mm_movehl_ps(shuf, mins);
+                    mins = _mm_min_ss(mins, shuf);
+                    return _mm_cvtss_f32(mins);
+                }
+                static inline float reduce_max(register_type a) {
+                    __m128 shuf = _mm_movehdup_ps(a);
+                    __m128 maxs = _mm_max_ps(a, shuf);
+                    shuf = _mm_movehl_ps(shuf, maxs);
+                    maxs = _mm_max_ss(maxs, shuf);
+                    return _mm_cvtss_f32(maxs);
+                }
+
                 static inline bool mask_any(mask_type a) { return _mm_movemask_ps(a) != 0; }
                 static inline bool mask_all(mask_type a) { return _mm_movemask_ps(a) == 0x0F; }
+
+                // static inline int mask_popcount(mask_type a) {
+                //     int mask_val = _mm_movemask_ps(a); // Use _mm_movemask_ps for SSE4.1
+                //     #ifdef _MSC_VER
+                //         return __popcnt(mask_val);
+                //     #else
+                //         return __builtin_popcount(mask_val);
+                //     #endif
+                // }
+                // static inline int mask_find_first_set(mask_type a) {
+                //     int mask_val = _mm_movemask_ps(a); // Use _mm_movemask_ps for SSE4.1
+                //     if (mask_val == 0) return -1;
+                //     #ifdef _MSC_VER
+                //         unsigned long index;
+                //         _BitScanForward(&index, mask_val);
+                //         return static_cast<int>(index);
+                //     #else
+                //         return __builtin_ctz(mask_val);
+                //     #endif
+                // }
 
                 template <int i0, int i1, int i2, int i3>
                 static inline register_type shuffle(register_type a) {
@@ -1110,6 +1178,7 @@ namespace Engine::ISAArch {
                 }
                 static inline mask_type mask_and(mask_type a, mask_type b) { return _mm_and_si128(a, b); }
                 static inline mask_type mask_or(mask_type a, mask_type b) { return _mm_or_si128(a, b); }
+
                 static inline register_type blend(mask_type mask, register_type true_v, register_type false_v) { return _mm_blendv_epi8(false_v, true_v, mask); }
 
                 static inline int32_t reduce_add(register_type a) {
@@ -1149,6 +1218,20 @@ namespace Engine::ISAArch {
 
                 static inline register_type min(register_type a, register_type b) { return _mm256_min_ps(a, b); }
                 static inline register_type max(register_type a, register_type b) { return _mm256_max_ps(a, b); }
+
+                // ============================================
+                // VECTOR RESIZING (SPLIT & CONCAT)
+                // ============================================
+
+                // Glues two SSE vectors into one AVX2 vector
+                static inline register_type concat(__m128 a, __m128 b) {
+                    return _mm256_insertf128_ps(_mm256_castps128_ps256(a), b, 1);
+                }
+                // Splits an AVX2 vector into two SSE vectors
+                static inline void split(register_type a, __m128& out_low, __m128& out_high) {
+                    out_low = _mm256_castps256_ps128(a);
+                    out_high = _mm256_extractf128_ps(a, 1);
+                }
 
                 // 1 / sqrt(x)
                 static inline register_type rsqrt(register_type a) { 
@@ -1272,12 +1355,54 @@ namespace Engine::ISAArch {
                     return _mm_cvtss_f32(sums);
                 }
 
+                static inline float reduce_min(register_type a) {
+                    __m128 vlow = _mm256_castps256_ps128(a);
+                    __m128 vhigh = _mm256_extractf128_ps(a, 1);
+                    vlow = _mm_min_ps(vlow, vhigh);
+                    __m128 shuf = _mm_movehdup_ps(vlow);
+                    __m128 mins = _mm_min_ps(vlow, shuf);
+                    shuf = _mm_movehl_ps(shuf, mins);
+                    mins = _mm_min_ss(mins, shuf);
+                    return _mm_cvtss_f32(mins);
+                }
+                static inline float reduce_max(register_type a) {
+                    __m128 vlow = _mm256_castps256_ps128(a);
+                    __m128 vhigh = _mm256_extractf128_ps(a, 1);
+                    vlow = _mm_max_ps(vlow, vhigh);
+                    __m128 shuf = _mm_movehdup_ps(vlow);
+                    __m128 maxs = _mm_max_ps(vlow, shuf);
+                    shuf = _mm_movehl_ps(shuf, maxs);
+                    maxs = _mm_max_ss(maxs, shuf);
+                    return _mm_cvtss_f32(maxs);
+                }
+
                 static inline bool mask_any(mask_type a) { 
                     // Extracts the most significant bit of each of the 8 float lanes and packs them into an 8-bit integer inside a general purpose scalar register in 1 clock cycle. 
                     return _mm256_movemask_ps(a) != 0; 
                 }
                 static inline bool mask_all(mask_type a) { 
                     return _mm256_movemask_ps(a) == 0xFF; 
+                }
+
+                static inline int mask_popcount(mask_type a) {
+                    int mask_val = _mm256_movemask_ps(a); // Use _mm_movemask_ps for SSE4.1
+                    #ifdef _MSC_VER
+                        return __popcnt(mask_val);
+                    #else
+                        return __builtin_popcount(mask_val);
+                    #endif
+                }
+
+                static inline int mask_find_first_set(mask_type a) {
+                    int mask_val = _mm256_movemask_ps(a); // Use _mm_movemask_ps for SSE4.1
+                    if (mask_val == 0) return -1;
+                    #ifdef _MSC_VER
+                        unsigned long index;
+                        _BitScanForward(&index, mask_val);
+                        return static_cast<int>(index);
+                    #else
+                        return __builtin_ctz(mask_val);
+                    #endif
                 }
 
                 // Hardware Vector Swizzling (Symmetric across 128-bit lanes)
@@ -1718,6 +1843,9 @@ namespace Engine::ISAArch {
                     return vaddvq_f32(a); 
                 }
 
+                static inline float reduce_min(register_type a) { return vminvq_f32(a); }
+                static inline float reduce_max(register_type a) { return vmaxvq_f32(a); }
+
                 static inline bool mask_any(mask_type a) { 
                     // Modern ARM64 vector lane addition instruction: Checks if any lanes in a 128-bit vector are active.
                     return vaddvq_u32(a) != 0;
@@ -2000,6 +2128,25 @@ namespace Engine::ISAArch {
                 static inline bool mask_any(mask_type a) { return vmaxvq_u32(a) > 0; }
                 static inline bool mask_all(mask_type a) { return vminvq_u32(a) > 0; }
 
+                static inline int mask_popcount(mask_type a) {
+                    // Safely extract lanes to scalar. Each true lane is guaranteed to be 0xFFFFFFFF.
+                    int count = 0;
+                    if (vgetq_lane_u32(a, 0)) count++;
+                    if (vgetq_lane_u32(a, 1)) count++;
+                    if (vgetq_lane_u32(a, 2)) count++;
+                    if (vgetq_lane_u32(a, 3)) count++;
+                    return count;
+                }
+
+                static inline int mask_find_first_set(mask_type a) {
+                    // Extract lanes to scalar and find the first non-zero lane
+                    if (vgetq_lane_u32(a, 0)) return 0;
+                    if (vgetq_lane_u32(a, 1)) return 1;
+                    if (vgetq_lane_u32(a, 2)) return 2;
+                    if (vgetq_lane_u32(a, 3)) return 3;
+                    return -1;
+                }
+
                 template <int i0, int i1, int i2, int i3>
                 static inline register_type shuffle(register_type a) {
                     register_type res = vdupq_n_s32(0); 
@@ -2115,6 +2262,9 @@ namespace Engine::ISAArch {
             static inline mask_type mask_and(mask_type a, mask_type b) { return a && b; }
             static inline mask_type mask_or(mask_type a, mask_type b) { return a || b; }
 
+            static inline int mask_popcount(mask_type a) { return a ? 1 : 0; }
+            static inline int mask_find_first_set(mask_type a) { return a ? 0 : -1; }
+
             // Bitwise (Integers only via SFINAE)
             static inline register_type bit_xor(register_type a, register_type b) { return a ^ b; }
             static inline register_type bit_or(register_type a, register_type b)  { return a | b; }
@@ -2131,6 +2281,8 @@ namespace Engine::ISAArch {
 
             // Reduction: Scalar is already reduced
             static inline T reduce_add(register_type a) { return a; }
+            static inline T reduce_min(register_type a) { return a; }
+            static inline T reduce_max(register_type a) { return a; }
 
             // Gather: Direct array access using scalar index
             static inline register_type gather(const T* base_addr, uint32_t index) {
@@ -2234,6 +2386,19 @@ namespace Engine::ISAArch {
         friend inline bool any_of(const simd_mask& m) { return Traits::mask_any(m.m_mask); }
         friend inline bool all_of(const simd_mask& m) { return Traits::mask_all(m.m_mask); }
         friend inline bool none_of(const simd_mask& m) { return !Traits::mask_any(m.m_mask); }
+
+        // =======================================================
+        // MASK INTROSPECTION (ATA COMPACTION / STREAM COMPACTION)
+        // =======================================================
+        /*
+            - When a particle dies, its mask evaluates to true for "dead".
+            - popcount(...) lets us know how many particles died in that batch so you can decrement the activeCount.
+            - find_first_set(...) lets us know exactly hich array index needs to be overwritten by the particle at the end of the array.
+        */
+
+        friend inline int popcount(const simd_mask& m) { return Traits::mask_popcount(m.m_mask); }
+        friend inline int find_first_set(const simd_mask& m) { return Traits::mask_find_first_set(m.m_mask); }
+
     };
 
     // ==========================================
@@ -2480,6 +2645,18 @@ namespace Engine::ISAArch {
             return Traits::reduce_add(a.m_data);
         }
 
+        // ===================================================
+        // ADVANCED HORIZONTAL REDUCTIUON
+        // ===================================================
+        /*
+            - Used for frustum culling and AABB generation.
+            - hmin() gives left most edge of the box.
+            - hmax() gives right most edge.
+        */
+
+        friend inline T hmin(const simd& a) { return Traits::reduce_min(a.m_data); }
+        friend inline T hmax(const simd& a) { return Traits::reduce_max(a.m_data); }
+
         // --- UNARY OPERATORS ---
         friend inline simd operator-(const simd& a) {
             return simd::from_native(Traits::negate(a.m_data));
@@ -2507,6 +2684,65 @@ namespace Engine::ISAArch {
 
         friend inline simd operator>>(const simd& a, T shift) requires std::is_integral_v<T> {
             return simd::from_native(Traits::shift_r(a.m_data, static_cast<int>(shift)));
+        }
+
+        // ============================================
+        // VECTOR INITIALIZATION
+        // ============================================
+        /*  
+            - Allows us to generate a vector containing an ascending sequence of numbers (e.g., [0, 1, 2, 3, ...]).
+            - Instantly generates staggered offsets and indices.
+        */
+
+        // Generates [0, 1, 2, 3...] inside a single vector
+        static inline simd iota() {
+            // Can be implemented using a fast static constant array load in the traits, or by broadcasting a base value and adding a predefined sequence register.
+            alignas(64) T seq[size()];
+            for (int i = 0; i < size(); ++i) seq[i] = static_cast<T>(i);
+            return simd(seq); // Calls your explicit load constructor
+        }
+
+        // Generates [base, base+step, base+step*2...]
+        static inline simd iota(T base, T step) {
+            return simd(base) + (iota() * simd(step));
+        }
+
+        // ============================================
+        // VECTOR RESIZING (SPLIT & CONCAT)
+        // ============================================
+        
+        // Glues two half-width vectors into one full-width vector
+        // SFINAE ensures this only compiles if the current Abi is AVX2 or AVX-512
+        template <typename HalfAbi>
+        friend inline simd concat(const simd<T, HalfAbi>& a, const simd<T, HalfAbi>& b) 
+        requires (
+            std::is_same_v<T, float> && 
+            (
+                (std::is_same_v<Abi, simd_abi::avx2> && std::is_same_v<HalfAbi, simd_abi::sse41>) ||
+                (std::is_same_v<Abi, simd_abi::avx512> && std::is_same_v<HalfAbi, simd_abi::avx2>)
+            )
+        ) {
+            return simd::from_native(Traits::concat(a.native_handle(), b.native_handle()));
+        }
+        
+        // Splits this vector into a pair of half-width vectors
+        // SFINAE ensures this only compiles if the target HalfAbi makes sense for the current silicon
+        template <typename HalfAbi>
+        inline std::pair<simd<T, HalfAbi>, simd<T, HalfAbi>> split() const 
+        requires (
+            std::is_same_v<T, float> && 
+            (
+                (std::is_same_v<Abi, simd_abi::avx2> && std::is_same_v<HalfAbi, simd_abi::sse41>) ||
+                (std::is_same_v<Abi, simd_abi::avx512> && std::is_same_v<HalfAbi, simd_abi::avx2>)
+            )
+        ) {
+            typename detail::simd_traits<T, HalfAbi>::register_type low, high;
+            Traits::split(m_data, low, high);
+            
+            return {
+                simd<T, HalfAbi>::from_native(low),
+                simd<T, HalfAbi>::from_native(high)
+            };
         }
 
         // ============================================
