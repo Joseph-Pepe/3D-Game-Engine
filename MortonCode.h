@@ -131,9 +131,15 @@ FORCE_INLINE constexpr uint32_t getMortonCodeLUT(uint32_t x, uint32_t y, uint32_
     z &= 0x3FF;
 
     // Tells the compiler "I guarantee these are under 1024, do not generate bounds-checking assembly."
-    #if defined(__cpp_language) && __cpp_language >= 202600L
-        // C++26 [[assume]] attribute.
+    #if defined(__cpp_constexpr) && __cplusplus >= 202302L
+        // C++23 [[assume]] attribute.
         [[assume(x < 1024 && y < 1024 && z < 1024)]];
+    #elif defined(_MSC_VER)
+        // MSVC specific assume
+        __assume(x < 1024 && y < 1024 && z < 1024);
+    #elif defined(__clang__) || defined(__GNUC__)
+        // Clang/GCC specific assume (using __builtin_unreachable)
+        if (!(x < 1024 && y < 1024 && z < 1024)) __builtin_unreachable();
     #endif
 
     // (3) Memory Fetches and (2) Bitwise ORs!
