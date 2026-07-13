@@ -202,36 +202,44 @@ inline HardwareCapabilities g_Hardware = HardwareCapabilities::Detect();
     - Evaluates the global HardwareCapabilities generated at startup by Hardware.h.
     - Routes the execution path to the fastest available instruction set.
     - Prevents "Illegal Instruction" crashes on legacy CPUs while maximizing performance on modern ones.
+    - Threading and dispatching belongs strictly to the higher-level Engine Core or Game Loop, not buried in low-level kernels.
 */
 
 // Template Driven Dynamic Dispatch: Full-System Multi-Versioning via Static Polymorphism.
 namespace Engine::GameEngine {
     // 1. The Generic Templated Physics Kernel, parameterized by 'Abi' (Application Binary Interface). The compiler will generate 5 different hardware versions.
     template <typename Abi>
-    void UpdateEngineSubsystems(float* xs, float* ys, float* zs, float* vx, float* vy, float* vz, size_t count, float deltaTime, float gravityVal, float mouseX, float mouseY, bool isMouseDown) {
-        // 1. Run Physics (It uses the ABI)
-        Engine::Physics::template IntegrateParticlesTemplate<Abi>(xs, ys, zs, vx, vy, vz, count, deltaTime, gravityVal, mouseX, mouseY, isMouseDown);
+    void UpdateEngineSubsystems(float* xs, float* ys, float* zs, float* vx, float* vy, float* vz, size_t count, float deltaTime, float gravityVal, float mouseX, float mouseY, bool isMouseDown, const uint32_t* cellStartOffsets, const uint32_t* sortedIndices) {
 
-        // 2. Run Audio Mixing (It uses the ABI)
+        // 1. Morton Sort ...
+        // Engine::Physics::SortParticles(xs, ys, zs, ...);
+
+        // 2. Collisions
+        Engine::Physics::SolveCollisionsTemplate<Abi>(xs, ys, zs, vx, vy, vz, cellStartOffsets, sortedIndices, count);
+
+        // 3. Run Physics (It uses the ABI)
+        Engine::Physics::IntegrateParticlesTemplate<Abi>(xs, ys, zs, vx, vy, vz, count, deltaTime, gravityVal, mouseX, mouseY, isMouseDown);
+
+        // 4. Run Audio Mixing (It uses the ABI)
         // Engine::Audio::MixTracks<Abi>(count);
 
-        // 3. Run Culling (It uses the ABI)
+        // 5. Run Culling (It uses the ABI)
         // Engine::Rendering::CullFrustum<Abi>(count);
     }
 
-    // 2. Define the type signature for our hardware math kernels (C++11)
-    using GameEngineBackendFn = void(*)(float* xs, float* ys, float* zs, 
-                                    float* vx, float* vy, float* vz, 
-                                    size_t count, float deltaTime, float gravityVal, 
-                                    float mouseX, float mouseY, bool isMouseDown);
+    // 2. C++11: Define the type signature for our hardware math kernels. 
+    using GameEngineBackendFn = void(*)(float* xs,    float* ys,       float* zs, 
+                                        float* vx,    float* vy,       float* vz, 
+                                        size_t count, float deltaTime, float gravityVal, 
+                                        float mouseX, float mouseY,    bool isMouseDown, 
+                                        const uint32_t* cellStartOffsets, 
+                                        const uint32_t* sortedIndices);
 
-    // 3. The active target backend function pointer initialized securely to a safe scalar fallback (allows the Engine to swap the backend based on the silicon at runtime).
-    inline GameEngineBackendFn ExecuteGameEngineBackend = nullptr; // void (*ExecuteGameEngineBackend)(float*, float*, float*, size_t, float)
+    // 3. The active target backend function pointer initialized securely to a safe scalar fallback (allows the Engine to swap the backend based on the silicon at runtime).                              
+    inline GameEngineBackendFn ExecuteGameEngineBackend = nullptr; // void (*ExecuteGameEngineBackend)(float*, float*, float*, size_t, float, ...)
 
-    // The Benchmark Function Pointer Signature
+    // Benchmark  Signature
     using BenchmarkBackendFn = void(*)(float* xs, float* ys, float* zs, float* vx, float* vy, float* vz, size_t count, float deltaTime, float gravityVal, int64_t repeats);
-
-    // The Global Pointer
     inline BenchmarkBackendFn ExecuteBenchmarkBackend = nullptr;
     
     // 4. The Dispatch Initializer called once during Engine Boot.
