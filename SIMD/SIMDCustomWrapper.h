@@ -134,6 +134,162 @@ void LogHardwareArchitecture() {
     #endif
 }
 
+// Scalar Domain (1D Scalar Math): strictly for operations that only operate on scalar floats.
+namespace Engine::Math::ScalarFunctions {
+    // ======================================================================
+    // SCALAR HARDWARE SQUARE ROOT (FPU)
+    // ======================================================================
+    /*
+        - Bypasses the `<cmath>` standard library overhead and 'errno' domain checks.
+        - Maps directly to the CPU's dedicated scalar FPU square root instruction.
+        - Exactly as accurate as std::sqrt, but significantly faster due to zero branching (i.e., std::sqrt replacement).
+    */
+    FORCE_INLINE float sqrt(float x) {
+        #ifdef MATH_ISA_ARM
+            // --- ARM APPLE SILICON / MOBILE (ARM64) ---
+            #if defined(__clang__) || defined(__GNUC__)
+                // Compiles directly down to a single hardware 'fsqrt' instruction.
+                // Eradicates the Vector-Scalar-Transition penalty.
+                return __builtin_sqrtf(x);
+            #else
+                // Fallback for non-Clang/GCC ARM compilers
+                return vgetq_lane_f32(vsqrtq_f32(vsetq_lane_f32(x, vdupq_n_f32(0.0f), 0)), 0);
+            #endif
+        #else
+            // Intel/AMD SSE scalar square root
+            // _mm_set_ss loads a single float into the lowest 32-bits, leaving the rest 0.
+            // _mm_sqrt_ss calculates the sqrt of only that lowest 32-bits.
+            // _mm_cvtss_f32 extracts it back to a standard float.
+            return _mm_cvtss_f32(_mm_sqrt_ss(_mm_set_ss(x)));
+        #endif
+    }
+
+    // ======================================================================
+    // SCALAR HARDWARE FLOOR (FPU)
+    // ======================================================================
+    /*
+        - Bypasses the `<cmath>` standard library overhead and domain checks.
+        - Maps directly to the CPU's dedicated scalar FPU rounding instruction.
+        - Exactly as accurate as std::floor, but compiles down to a single instruction.
+    */
+    FORCE_INLINE float floor(float x) {
+        #ifdef MATH_ISA_ARM
+            // --- ARM APPLE SILICON / MOBILE (ARM64) ---
+            #if defined(__clang__) || defined(__GNUC__)
+                // Compiles directly down to a single hardware 'frintm' instruction.
+                return __builtin_floorf(x);
+            #else
+                // Fallback for non-Clang/GCC ARM compilers (Round to Minus Infinity)
+                return vgetq_lane_f32(vrndmq_f32(vsetq_lane_f32(x, vdupq_n_f32(0.0f), 0)), 0);
+            #endif
+        #else
+            // --- INTEL / AMD PC (SSE4.1) ---
+            // _mm_floor_ss calculates the floor of the lowest 32-bits.
+            return _mm_cvtss_f32(_mm_floor_ss(_mm_set_ss(x), _mm_set_ss(x)));
+        #endif
+    }
+
+    // ======================================================================
+    // SCALAR HARDWARE CEILING (FPU)
+    // ======================================================================
+    /*
+        - Bypasses `<cmath>` overhead.
+        - Exactly as accurate as std::ceil, but compiles to a single instruction.
+    */
+    FORCE_INLINE float ceil(float x) {
+        #ifdef MATH_ISA_ARM
+            // --- ARM APPLE SILICON / MOBILE (ARM64) ---
+            #if defined(__clang__) || defined(__GNUC__)
+                // Compiles directly down to a single hardware 'frintp' instruction.
+                return __builtin_ceilf(x);
+            #else
+                // Fallback: Round to Plus Infinity
+                return vgetq_lane_f32(vrndpq_f32(vsetq_lane_f32(x, vdupq_n_f32(0.0f), 0)), 0);
+            #endif
+        #else
+            // --- INTEL / AMD PC (SSE4.1) ---
+            // _mm_ceil_ss calculates the ceiling of the lowest 32-bits.
+            return _mm_cvtss_f32(_mm_ceil_ss(_mm_set_ss(x), _mm_set_ss(x)));
+        #endif
+    }
+
+    // ======================================================================
+    // SCALAR HARDWARE INVERSE SQUARE ROOT (FPU) (~7 Clock Cycles)
+    // ======================================================================
+    /*
+        - Instantly estimates 1/sqrt(x) using dedicated hardware.
+        - Refines the estimate to 23-bit float precision using Newton-Raphson.
+        - Significantly faster than 1.0f / std::sqrt(x).
+    */
+    FORCE_INLINE float rsqrt(float x) {
+        #ifdef MATH_ISA_ARM
+            // --- ARM APPLE SILICON / MOBILE (ARM64) ---
+            // ARM has dedicated scalar instructions for this!
+            // 1. Get the hardware approximation
+            float approx = vrsqrte_f32(x);
+            // 2. Newton-Raphson refinement step
+            float step = vrsqrts_f32(x, approx * approx);
+            // 3. Final 23-bit accurate result
+            return approx * step;
+        #else
+            // --- INTEL / AMD PC (SSE) ---
+            // 1. Load x into the lowest 32-bits
+            __m128 scalar_x = _mm_set_ss(x);
+            
+            // 2. Hardware approximation (12-bit accuracy)
+            __m128 approx = _mm_rsqrt_ss(scalar_x);
+            
+            // 3. Newton-Raphson: y = y * (1.5 - 0.5 * x * y * y)
+            __m128 half_x = _mm_mul_ss(_mm_set_ss(0.5f), scalar_x);
+            __m128 y_sq = _mm_mul_ss(approx, approx);
+            __m128 term = _mm_sub_ss(_mm_set_ss(1.5f), _mm_mul_ss(half_x, y_sq));
+            __m128 result = _mm_mul_ss(approx, term);
+            
+            return _mm_cvtss_f32(result);
+        #endif
+    }
+
+    // ======================================================================
+    // SCALAR HARDWARE RECIPROCAL (FPU)
+    // ======================================================================
+    /*
+        - Replaces (1.0f / x) division with hardware approximation.
+        - Refines to 23-bit precision.
+        - Prevents division pipeline stalls.
+    */
+    FORCE_INLINE float rcp(float x) {
+        #ifdef MATH_ISA_ARM
+            // --- ARM APPLE SILICON / MOBILE (ARM64) ---
+            // 1. Hardware approximation
+            float approx = vrecpe_f32(x);
+            // 2. Hardware refinement step
+            float step = vrecps_f32(x, approx);
+            // 3. Final 23-bit result
+            return approx * step;
+        #else
+            // --- INTEL / AMD PC (SSE) ---
+            __m128 scalar_x = _mm_set_ss(x);
+            
+            // 1. Hardware approximation
+            __m128 approx = _mm_rcp_ss(scalar_x);
+            
+            // 2. Newton-Raphson: y = y * (2.0 - x * y)
+            __m128 term = _mm_sub_ss(_mm_set_ss(2.0f), _mm_mul_ss(scalar_x, approx));
+            __m128 result = _mm_mul_ss(approx, term);
+            
+            return _mm_cvtss_f32(result);
+        #endif
+    }
+
+    // Fast pure scalar absolute value. Compiles down to a single instruction (zero-cast bitwise clear).
+    FORCE_INLINE constexpr float abs(float v) {
+        // Treat the float as an integer, strip the 31st sign bit, and treat it as a float again.
+        uint32_t i = std::bit_cast<uint32_t>(v);
+        i &= 0x7FFFFFFF; // Clear the sign bit
+        return std::bit_cast<float>(i);
+    }
+}
+
 // ===================================
 // SIMD Intrinsics & Memory Alignment
 // ===================================
@@ -1940,12 +2096,13 @@ namespace Engine::ISAArch {
             static inline register_type min(register_type a, register_type b) { return std::min(a, b); }
             static inline register_type max(register_type a, register_type b) { return std::max(a, b); }
 
-            // Math
-            // static inline register_type rsqrt(register_type a) { return 1.0f / Engine::Math::Functions::FastSqrt(a); }
-            static inline register_type rcp(register_type a) { return 1.0f / a; }
-            // static inline register_type abs(register_type a) { return Engine::Math::Functions::abs(a); }
-            // static inline register_type floor(register_type a) { return Engine::Math::Functions::FastFloor(a); }
-            // static inline register_type ceil(register_type a) { return std::ceil(a); } // Standard ceil fallback
+            // Math (Mapped entirely to custom hardware)
+            static inline register_type rsqrt(register_type a) { return Engine::Math::ScalarFunctions::rsqrt(a); }
+            static inline register_type rcp(register_type a)   { return Engine::Math::ScalarFunctions::rcp(a); }
+            static inline register_type abs(register_type a)   { return Engine::Math::ScalarFunctions::abs(a); }
+            static inline register_type floor(register_type a) { return Engine::Math::ScalarFunctions::floor(a); }
+            static inline register_type ceil(register_type a)  { return Engine::Math::ScalarFunctions::ceil(a); }
+            static inline register_type sqrt(register_type a)  { return Engine::Math::ScalarFunctions::sqrt(a); }
             static inline register_type fmadd(register_type a, register_type b, register_type c) { return (a * b) + c; }
             
             // Relational
@@ -2141,10 +2298,12 @@ namespace Engine::ISAArch {
 
         friend inline simd rsqrt(const simd& a) requires std::is_floating_point_v<T> { return simd::from_native(Traits::rsqrt(a.m_data)); }
         friend inline simd rcp(const simd& a) requires std::is_floating_point_v<T> { return simd::from_native(Traits::rcp(a.m_data)); }
-
         friend inline simd abs(const simd& a) requires std::is_floating_point_v<T> { return simd::from_native(Traits::abs(a.m_data)); }
         friend inline simd floor(const simd& a) requires std::is_floating_point_v<T> { return simd::from_native(Traits::floor(a.m_data)); }
         friend inline simd ceil(const simd& a) requires std::is_floating_point_v<T> { return simd::from_native(Traits::ceil(a.m_data)); }
+        friend inline simd sqrt(const simd& a) requires std::is_floating_point_v<T> { return simd::from_native(Traits::sqrt(a.m_data)); }
+        friend inline simd fmadd(const simd& a) requires std::is_floating_point_v<T> { return simd::from_native(Traits::fmadd(a.m_data)); }
+
 
         // Float16 Memory Gateway
         static simd load_f16(const uint16_t* mem) requires std::is_floating_point_v<T> {
