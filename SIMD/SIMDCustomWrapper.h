@@ -387,6 +387,25 @@ namespace Engine::ISAArch {
                 static inline float reduce_min(register_type a) { return _mm512_reduce_min_ps(a); }
                 static inline float reduce_max(register_type a) { return _mm512_reduce_max_ps(a); }
 
+                static inline int mask_popcount(mask_type a) {
+                    #ifdef _MSC_VER
+                        return __popcnt16(a);
+                    #else
+                        return __builtin_popcount(a);
+                    #endif
+                }
+                
+                static inline int mask_find_first_set(mask_type a) {
+                    if (a == 0) return -1;
+                    #ifdef _MSC_VER
+                        unsigned long index;
+                        _BitScanForward(&index, a);
+                        return static_cast<int>(index);
+                    #else
+                        return __builtin_ctz(a);
+                    #endif
+                }
+
                 // --- AVX-512 FLOAT ARITHMETIC ---
                 static inline register_type sub(register_type a, register_type b) { return _mm512_sub_ps(a, b); }
                 static inline register_type div(register_type a, register_type b) { return _mm512_div_ps(a, b); }
@@ -497,25 +516,6 @@ namespace Engine::ISAArch {
 
                 static inline bool mask_any(mask_type a) { return !_ktestz_mask16_blank(a, a); } // Generates a hardware 'KTEST' instruction. Checks if the mask is empty entirely inside the vector mask registers (without touching standard scalar comparison registers).
                 static inline bool mask_all(mask_type a) { return a == 0xFF; }
-
-                static inline int mask_popcount(mask_type a) {
-                    #ifdef _MSC_VER
-                        return __popcnt16(a);
-                    #else
-                        return __builtin_popcount(a);
-                    #endif
-                }
-                
-                static inline int mask_find_first_set(mask_type a) {
-                    if (a == 0) return -1;
-                    #ifdef _MSC_VER
-                        unsigned long index;
-                        _BitScanForward(&index, a);
-                        return static_cast<int>(index);
-                    #else
-                        return __builtin_ctz(a);
-                    #endif
-                }
 
                 template <int i0, int i1, int i2, int i3, int i4, int i5, int i6, int i7>
                 static inline register_type shuffle(register_type a) { return a; } // (AVX-512 cross-lane swizzling is highly complex, omit for brevity unless needed)
@@ -712,8 +712,6 @@ namespace Engine::ISAArch {
 
                 static inline register_type blend(mask_type mask, register_type true_v, register_type false_v) { return _mm512_mask_blend_epi32(mask, false_v, true_v); }
                 static inline int32_t reduce_add(register_type a) { return _mm512_reduce_add_epi32(a); }
-                static inline float reduce_min(register_type a) { return _mm512_reduce_min_ps(a); }
-                static inline float reduce_max(register_type a) { return _mm512_reduce_max_ps(a); }
                 static inline register_type gather(const int32_t* base_addr, __m512i indices) { return _mm512_i32gather_epi32(indices, base_addr, 4); }
                 static inline bool mask_any(mask_type a) { return a != 0; }
                 static inline bool mask_all(mask_type a) { return a == 0xFFFF; }
@@ -1855,6 +1853,25 @@ namespace Engine::ISAArch {
                     return vminvq_u32(a) > 0; 
                 }
 
+                static inline int mask_popcount(mask_type a) {
+                    // Safely extract lanes to scalar. Each true lane is guaranteed to be 0xFFFFFFFF.
+                    int count = 0;
+                    if (vgetq_lane_u32(a, 0)) count++;
+                    if (vgetq_lane_u32(a, 1)) count++;
+                    if (vgetq_lane_u32(a, 2)) count++;
+                    if (vgetq_lane_u32(a, 3)) count++;
+                    return count;
+                }
+
+                static inline int mask_find_first_set(mask_type a) {
+                    // Extract lanes to scalar and find the first non-zero lane
+                    if (vgetq_lane_u32(a, 0)) return 0;
+                    if (vgetq_lane_u32(a, 1)) return 1;
+                    if (vgetq_lane_u32(a, 2)) return 2;
+                    if (vgetq_lane_u32(a, 3)) return 3;
+                    return -1;
+                }
+
                 // Hardware Vector Swizzling
                 template <int i0, int i1, int i2, int i3>
                 static FORCE_INLINE register_type shuffle(register_type a) {
@@ -2461,6 +2478,7 @@ namespace Engine::ISAArch {
         friend inline simd max(const simd& a, const simd& b) { return simd::from_native(Traits::max(a.m_data, b.m_data)); }
         friend inline simd clamp(const simd& v, const simd& lo, const simd& hi) { return min(max(v, lo), hi); }
 
+        // requires std::is_floating_point_v<T> means this is a float only intrinsic instruction (i.e., floating-point constraint).
         friend inline simd rsqrt(const simd& a) requires std::is_floating_point_v<T> { return simd::from_native(Traits::rsqrt(a.m_data)); }
         friend inline simd rcp(const simd& a) requires std::is_floating_point_v<T> { return simd::from_native(Traits::rcp(a.m_data)); }
         friend inline simd abs(const simd& a) requires std::is_floating_point_v<T> { return simd::from_native(Traits::abs(a.m_data)); }
@@ -2654,8 +2672,8 @@ namespace Engine::ISAArch {
             - hmax() gives right most edge.
         */
 
-        friend inline T hmin(const simd& a) { return Traits::reduce_min(a.m_data); }
-        friend inline T hmax(const simd& a) { return Traits::reduce_max(a.m_data); }
+        friend inline T hmin(const simd& a) requires std::is_floating_point_v<T> { return Traits::reduce_min(a.m_data); }
+        friend inline T hmax(const simd& a) requires std::is_floating_point_v<T> { return Traits::reduce_max(a.m_data); }
 
         // --- UNARY OPERATORS ---
         friend inline simd operator-(const simd& a) {
