@@ -840,25 +840,25 @@ namespace Engine::ISAArch {
                 static inline bool mask_any(mask_type a) { return _mm_movemask_ps(a) != 0; }
                 static inline bool mask_all(mask_type a) { return _mm_movemask_ps(a) == 0x0F; }
 
-                // static inline int mask_popcount(mask_type a) {
-                //     int mask_val = _mm_movemask_ps(a); // Use _mm_movemask_ps for SSE4.1
-                //     #ifdef _MSC_VER
-                //         return __popcnt(mask_val);
-                //     #else
-                //         return __builtin_popcount(mask_val);
-                //     #endif
-                // }
-                // static inline int mask_find_first_set(mask_type a) {
-                //     int mask_val = _mm_movemask_ps(a); // Use _mm_movemask_ps for SSE4.1
-                //     if (mask_val == 0) return -1;
-                //     #ifdef _MSC_VER
-                //         unsigned long index;
-                //         _BitScanForward(&index, mask_val);
-                //         return static_cast<int>(index);
-                //     #else
-                //         return __builtin_ctz(mask_val);
-                //     #endif
-                // }
+                static inline int mask_popcount(mask_type a) {
+                    int mask_val = _mm_movemask_ps(a); // Use _mm_movemask_ps for SSE4.1
+                    #ifdef _MSC_VER
+                        return __popcnt(mask_val);
+                    #else
+                        return __builtin_popcount(mask_val);
+                    #endif
+                }
+                static inline int mask_find_first_set(mask_type a) {
+                    int mask_val = _mm_movemask_ps(a); // Use _mm_movemask_ps for SSE4.1
+                    if (mask_val == 0) return -1;
+                    #ifdef _MSC_VER
+                        unsigned long index;
+                        _BitScanForward(&index, mask_val);
+                        return static_cast<int>(index);
+                    #else
+                        return __builtin_ctz(mask_val);
+                    #endif
+                }
 
                 template <int i0, int i1, int i2, int i3>
                 static inline register_type shuffle(register_type a) {
