@@ -2,6 +2,7 @@
 #include <span>
 #include <algorithm> // For std::fill
 
+#include "EngineSettings.h"
 #include "SIMD/SIMDCustomWrapper.h" 
 #include "Memory.h"  // For your Arena allocator
 #include "MortonCode.h"
@@ -111,7 +112,7 @@ namespace Engine::Physics {
                     // Prevent Float Drift
                     if ((i & 255) == 0) {
                         float magSq = current_cos * current_cos + current_sin * current_sin;
-                        float invMag = 1.0f / std::sqrt(magSq); // Standard math is fine for initialization
+                        float invMag = 1.0f / Engine::Math::ScalarFunctions::sqrt(magSq); // Standard math is fine for initialization
                         current_cos *= invMag;
                         current_sin *= invMag;
                     }
@@ -377,9 +378,9 @@ namespace Engine::Physics {
                         // Now you can safely call the template!
                         uint32_t nHash = 0;
                         if constexpr (Is2D) {
-                            nHash = Engine::Math::GetMortonCode<IsLegacy>(gx + dx, gy + dy, 0) & 0x3FFFF;
+                            nHash = getMortonCode<IsLegacy>(gx + dx, gy + dy, 0) & 0x3FFFF;
                         } else {
-                            nHash = Engine::Math::GetMortonCode<IsLegacy>(gx + dx, gy + dy, gz + dz) & 0x3FFFF;
+                            nHash = getMortonCode<IsLegacy>(gx + dx, gy + dy, gz + dz) & 0x3FFFF;
                         }
 
                         // 3. USE THE OFFSETS! Instantly grab the exact memory bounds for this cell
