@@ -2547,7 +2547,6 @@ namespace Engine::ISAArch {
             */
             
             // 1. Core Constants
-            const simd INV_TWO_PI(0.159154943f);
             const simd TWO_PI_A(-6.28318501f);    // High precision chunk
             const simd TWO_PI_B(-2.96690463e-7f); // Low precision tail
 
