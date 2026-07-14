@@ -2531,11 +2531,6 @@ namespace Engine::ISAArch {
             const simd C3(-0.0001984087f); // -1/7!
             const simd C4(0.0000027525f);  //  1/9!
 
-            // 2. Range Reduction
-            // Map the arbitrary angle 'x' perfectly into the [-PI, PI] window.
-            // Math: cycles = floor((x / 2PI) + 0.5)
-            simd cycles = floor(fma(x, INV_TWO_PI, simd(0.5f)));
-
             // ==========================
             // FLOATING-POINT PRECISION
             // ==========================
@@ -2551,6 +2546,8 @@ namespace Engine::ISAArch {
             const simd TWO_PI_B(-2.96690463e-7f); // Low precision tail
 
             // 2. Range Reduction
+            // Map the arbitrary angle 'x' perfectly into the [-PI, PI] window.
+            // Math: cycles = floor((x / 2PI) + 0.5)
             simd cycles = floor(fma(x, INV_TWO_PI, simd(0.5f)));
 
             // Cody-Waite 2-part FMA subtraction preserves mantissa precision perfectly!
