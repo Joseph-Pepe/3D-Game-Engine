@@ -233,6 +233,11 @@ namespace Engine::ISAArch {
             xs.resize(paddedCount, 1.0f);
             ys.resize(paddedCount, 2.0f);
             zs.resize(paddedCount, 3.0f);
+
+            // Zero the values.
+            std::fill(xs.begin(), xs.end(), 0.0f);
+            std::fill(ys.begin(), ys.end(), 0.0f);
+            std::fill(zs.begin(), zs.end(), 0.0f);
         }
 
         struct SOA_Batch {
