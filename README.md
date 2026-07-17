@@ -37,7 +37,10 @@ This project uses CMake and vcpkg to ensure a frictionless, cross-platform build
 Ensure your local workstation has the required core build tools installed.
 * **Version Control:** Git installed and added to your system `PATH`.
 * **Build System:** CMake (v3.28 or newer).
-* **Windows:** Visual Studio 2022 (with the "Desktop development with C++" workload installed).
+* **Compilers:**
+  * **Windows:** Visual Studio 2022 (with the "Desktop development with C++" workload installed).
+  * **Linux:** GCC 13+ or Clang 17+.
+  * **macOS:** Xcode Command Line Tools.
 
 ### 2. Compilation (One-Click Setup)
 
