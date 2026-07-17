@@ -10,26 +10,67 @@
 #include <exception>
 #include <chrono>
 #include <new>
-#include <immintrin.h>     // REQUIRED for _mm_pause, _mm_prefetch, _mm256_zeroupper
 
 // C linkage header to see assembly.
 extern "C" void* SwapContext(void** current_rsp, void* target_rsp);
 
 // --- HARDWARE INTRINSICS ---
+#if defined(_M_X64) || defined(__x86_64__)
+    #include <immintrin.h> // REQUIRED for _mm_pause, _mm_prefetch, _mm256_zeroupper
+    #ifdef _MSC_VER
+        #include <intrin.h> // REQUIRED for __rdtsc on MSVC
+    #else
+        #include <x86intrin.h> // REQUIRED for __rdtsc on GCC/Clang
+    #endif
+#endif
+
 #ifndef _WIN32_WINNT
     #define _WIN32_WINNT 0x0600 // Vista or later required for modern Fiber APIs
 #endif
 
 #if defined(_WIN32) || defined(_MSC_VER)
     #include <windows.h> // Required for OS-level Fibers
-    #include <intrin.h>  // REQUIRED for __rdtsc on MSVC
 #else
-    #include <x86intrin.h> // REQUIRED for __rdtsc on GCC/Clang
     #error "POSIX ucontext or ASM fiber backend required for non-Windows platforms"
 
     #include <sys/mman.h>
     #include <unistd.h>
 #endif
+
+// --- CROSS-PLATFORM HARDWARE INTRINSICS ---
+inline void CPU_Pause() {
+    #if defined(_M_X64) || defined(__x86_64__)
+        _mm_pause(); // Rests the ALU on x86
+    #elif defined(__aarch64__) || defined(_M_ARM64)
+        __asm__ volatile("yield" ::: "memory"); // Rests the ALU on ARM64
+    #endif
+}
+
+inline uint64_t GetHardwareCycles() {
+    #if defined(_M_X64) || defined(__x86_64__)
+        return __rdtsc();
+    #elif defined(__aarch64__) || defined(_M_ARM64)
+        uint64_t val;
+        __asm__ volatile("mrs %0, cntvct_el0" : "=r" (val)); // Reads the ARM generic timer
+        return val;
+    #else
+        return 0;
+    #endif
+}
+
+inline void CPU_Prefetch(const void* ptr) {
+    #if defined(_M_X64) || defined(__x86_64__)
+        _mm_prefetch((const char*)ptr, _MM_HINT_T0);
+    #elif defined(__aarch64__) || defined(_M_ARM64)
+        __builtin_prefetch(ptr, 0, 3);
+    #endif
+}
+
+inline void CPU_ClearAVX() {
+    #if defined(__AVX__)
+        _mm256_zeroupper(); // Only exists and matters on AVX-capable x86 processors
+    #endif
+}
 
 // The Job System needs the fast PRNG from Math.h for the work-stealing logic!
 #include "Math.h"
@@ -238,6 +279,9 @@ struct alignas(8) FiberJob {
     // std::atomic<FiberState> state{FiberState::Ready};
     FixedFunction<void(), 64> payload; // Zero-allocation, move-only function wrapper.
 
+    // INTRUSIVE LIST NODE: Used strictly by the JobSystem when the fiber is asleep. Allows it to act as its own linked list node when its dead.
+    FiberJob* nextFree = nullptr;
+
     // Create a Fiber by manually allocating 64KB stack memory for our fibers.
     FiberJob() {
         // 1. Get system page size (Usually 4KB / 4096 bytes)
@@ -274,18 +318,35 @@ struct alignas(8) FiberJob {
         // 4. Align the stack pointer to a 16-byte boundary (Required by x64 ABI)
         void** sp = reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(topOfStack) & ~15ULL);
 
-        // 5. THE TRAMPOLINE (Simulating a function call)
-        // We push the FiberEntryPoint onto the stack as if it were a return address.
-        // When SwapContext hits its final `ret` instruction, it will pop this address 
-        // and jump to FiberEntryPoint.
-        sp -= 1; 
-        *sp = reinterpret_cast<void*>(FiberEntryPoint);
+        #if defined(_WIN32) && (defined(_M_X64) || defined(__x86_64__))
+            // --- WINDOWS x64 ---
+            // Push return address
+            sp -= 1; 
+            *sp = reinterpret_cast<void*>(FiberEntryPoint);
+            // Reserve 224 bytes (8 GPRs + 10 XMMs)
+            sp = reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(sp) - 224);
 
-        // 6. Reserve space for the Registers we push in SwapContext
-        // We pushed 8 integer registers (8 * 8 bytes = 64 bytes)
-        // We pushed 10 XMM registers (10 * 16 bytes = 160 bytes)
-        // Total = 224 bytes
-        sp = reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(sp) - 224);
+        #elif defined(__APPLE__) || defined(__linux__) && (defined(__x86_64__) || defined(_M_X64))
+            // --- POSIX x64 ---
+            // Push return address
+            sp -= 1; 
+            *sp = reinterpret_cast<void*>(FiberEntryPoint);
+            // Reserve 48 bytes (6 GPRs, 0 XMMs)
+            sp = reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(sp) - 48);
+
+        #elif defined(__aarch64__) || defined(_M_ARM64)
+            // --- ARM64 ---
+            // ARM64 'ret' doesn't pop from the stack; it jumps to the Link Register (x30).
+            // Our ASM pushes 160 bytes total (64 bytes SIMD + 96 bytes GPRs).
+            sp = reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(sp) - 160);
+            
+            // We must write the FiberEntryPoint into the exact slot where x30 will be popped.
+            // Based on our 'stp' sequence, x30 lands exactly 72 bytes up from the final Stack Pointer.
+            // (72 bytes / 8 bytes per uint64) = index 9.
+            reinterpret_cast<uint64_t*>(sp)[9] = reinterpret_cast<uint64_t>(FiberEntryPoint);
+        #else
+            #error "Unsupported architecture for Fiber Trampoline"
+        #endif
 
         // 7. Save the final starting pointer
         rsp = static_cast<void*>(sp);
@@ -323,6 +384,14 @@ struct alignas(8) FiberJob {
     //     }
     // }
 };
+
+// Must be exactly 16 bytes (128 bits) to map to cmpxchg16b / casp hardware instructions
+struct alignas(16) TaggedFiberPtr {
+    // Bundles memory address with a generation counter, ensuring the hardware compare_exchange instruction always detects if a node was popped and pushed back during a speculative read.
+    FiberJob* ptr;
+    uint64_t tag; // Generation counter prevents ABA
+};
+
 
 // ==================================================================================
 // 3. UNIFIED LOCK-FREE SCHEDULER (Stores void*)
@@ -524,9 +593,8 @@ private:
     // Pre-allocated storage for the actual fibers
     std::vector<std::unique_ptr<FiberJob>> fiberStorage;
 
-    // Spinlock-protected vector of ready-to-use fibers
-    alignas(CACHE_CHUNK_SIZE) std::atomic_flag fiberPoolLock = ATOMIC_FLAG_INIT;
-    std::vector<FiberJob*> freeFibers;
+    // --- ABA-PROTECTED LOCK-FREE FIBER POOL ---
+    alignas(CACHE_CHUNK_SIZE) std::atomic<TaggedFiberPtr> m_freeFiberHead;
 
     void ExecuteTask(void* job) {
         // Tagged Pointer Evaluation
@@ -573,7 +641,7 @@ private:
         } else { 
             // --- Stackless Coroutine Logic ---
             // PREFETCH THE COROUTINE FRAME! Triggers the MESI transfer across the CPU cores in the background before the pipeline hits the indirect jump.
-            _mm_prefetch((const char*)job, _MM_HINT_T0);
+            CPU_Prefetch((const char*)job);
 
             // It's a Stackless Coroutine! 
             auto coroHandle = std::coroutine_handle<>::from_address(job);
@@ -647,10 +715,13 @@ public:
         
         RegisterThread(); // Main UI Thread = Index 0
 
-        // PRE-ALLOCATE THE FIBER POOL (e.g., 256 Fibers)
+        // Initialize the lock-free head
+        m_freeFiberHead.store({nullptr, 0}, std::memory_order_relaxed);
+
+        // Pre-allocate the Fibers and safely push them into the lock-free stack
         for (int i = 0; i < 256; ++i) {
             auto job = std::make_unique<FiberJob>();
-            freeFibers.push_back(job.get());
+            ReleaseFiber(job.get()); // Pushes to the lock-free stack
             fiberStorage.push_back(std::move(job));
         }
 
@@ -679,7 +750,7 @@ public:
                     // ==========================================
                     // HARDWARE CYCLE COUNTERS
                     // ==========================================
-                    uint64_t chunkStartCycles = __rdtsc(); // __rdtsc() takes ~20 CPU cycles (<5 nanoseconds), std::chrono takes (40-100 nanoseconds) just to check the system clock.
+                    uint64_t chunkStartCycles = GetHardwareCycles(); // __rdtsc() takes ~20 CPU cycles (<5 nanoseconds), std::chrono takes (40-100 nanoseconds) just to check the system clock.
                     uint64_t activeCycles = 0;
                     uint64_t jobsThisFrame = 0;
 
@@ -736,7 +807,7 @@ public:
                         // 3. If we have a job, execute it!
                         if (job) {
                             // WE FOUND WORK: Start the hardware cycle counter!
-                            uint64_t jobStartCycles = __rdtsc(); // __rdtsc() counts literal CPU clock pulses  exactly when the AVX instructions fire.
+                            uint64_t jobStartCycles = GetHardwareCycles(); // __rdtsc() counts literal CPU clock pulses  exactly when the AVX instructions fire.
                             
                             // Let the system figure out if it's a Fiber or Coroutine!
                             this->ExecuteTask(job);
@@ -744,7 +815,7 @@ public:
                             // job.resume(); // Execute the heavy AVX2 math
 
                             // End cycle counter and add to total active cycles
-                            activeCycles += (__rdtsc() - jobStartCycles);
+                            activeCycles += (GetHardwareCycles() - jobStartCycles);
                             jobsThisFrame++;
                         } else {
                             // ==========================================
@@ -763,11 +834,11 @@ public:
                             // If we STILL don't have a job, enter Adaptive Backoff
                             // Spin for ~4,500,000 cycles (~1.5ms on a 3GHz CPU).
                             // This keeps the core hot for quick jobs, but lets it go to sleep quickly to prevent CPU thermal throttling.
-                            uint64_t spinStart = __rdtsc();
+                            uint64_t spinStart = GetHardwareCycles();
                             uint64_t spinTarget = 4500000; 
                             uint32_t spinCount = 0;
 
-                            while (__rdtsc() - spinStart < spinTarget) { // 16ms (60fps) or 8.3ms (120fps), 4-Core CPU (1 Main + 3 Workers)
+                            while (GetHardwareCycles() - spinStart < spinTarget) { // 16ms (60fps) or 8.3ms (120fps), 4-Core CPU (1 Main + 3 Workers)
                                 
                                 // Want to check for work frequently, but not constantly (i.e., reclaims gigabytes gigabytes of internal memory bus bandwidth and keeping the cores awake and ready to grab work in under a microsecond).
                                 // By checking every 64 cycles instead of every cycle, you reduce the atomic traffic on your memory bus by 98.4% during idle periods.
@@ -796,13 +867,13 @@ public:
                                         break; // We found work! Break out of the spin loop.
                                     }
                                 }
-                                _mm_pause(); // Rest the core (ALU)
+                                CPU_Pause(); // Rest the core (ALU)
                             }
                             
                             // 5. Sleep if spin-lock fails! If we spun for 500,000 cycles and STILL found nothing, go to sleep.
                             if (!job) {
                                 // Clean registers before handing control to the Windows/Linux OS Kernel
-                                _mm256_zeroupper();
+                                CPU_ClearAVX(); // Only executes on AVX hardware
 
                                 uint32_t currentSignal = wakeSignal.load(std::memory_order_acquire);
                                 sleepingThreads.fetch_add(1, std::memory_order_relaxed); // I am asleep!
@@ -813,13 +884,13 @@ public:
                                 // PREFETCH THE COROUTINE FRAME!
                                 // Triggers the MESI transfer across the CPU cores in the background 
                                 // before the pipeline hits the indirect jump.
-                                // _mm_prefetch((const char*)job, _MM_HINT_T0);
+                                // CPU_Prefetch((const char*)job, _MM_HINT_T0);
                                 
                                 // If the spin loop successfully grabbed a job, execute it immediately.
-                                uint64_t jobStartCycles = __rdtsc();
+                                uint64_t jobStartCycles = GetHardwareCycles();
                                 // job.resume();
                                 this->ExecuteTask(job);
-                                activeCycles += (__rdtsc() - jobStartCycles);
+                                activeCycles += (GetHardwareCycles() - jobStartCycles);
                                 jobsThisFrame++;
                             }
                         }
@@ -829,7 +900,7 @@ public:
                     // EXACT SILICON UTILIZATION RATIO  (MATHEMTICAL LOAD OF A CORE)
                     // =============================================================
                     // Calculate total cycles that passed during this ~100ms window
-                    uint64_t totalChunkCycles = __rdtsc() - chunkStartCycles;
+                    uint64_t totalChunkCycles = GetHardwareCycles() - chunkStartCycles;
                     
                     // Prevent divide-by-zero just in case the OS suspended the thread instantly
                     double exactUtilization = (totalChunkCycles > 0) ? (static_cast<double>(activeCycles) / static_cast<double>(totalChunkCycles)) : 0.0;
@@ -864,32 +935,43 @@ public:
         }
 
         // --- Safe Fiber Teardown ---
-        freeFibers.clear();
         fiberStorage.clear(); // This triggers ~FiberJob() which calls DeleteFiber
     }
 
     // --- FIBER POOL MANAGEMENT ---
     
     FiberJob* GetFreeFiber() {
-        // Spinlock to safely pop from the shared pool
-        while (fiberPoolLock.test_and_set(std::memory_order_acquire)) { _mm_pause(); }
+        TaggedFiberPtr head = m_freeFiberHead.load(std::memory_order_acquire);
         
-        // In a true AAA system, if the pool is empty, you'd dynamically allocate more.
-        assert(!freeFibers.empty() && "FATAL: Fiber pool exhausted!"); 
-        
-        FiberJob* job = freeFibers.back();
-        freeFibers.pop_back();
-        
-        fiberPoolLock.clear(std::memory_order_release);
-        return job;
+        while (head.ptr != nullptr) {
+            // Speculative read: if another thread overwrites this right now, the generation
+            // counter mismatch will cause the CAS to reject the garbage read.
+            FiberJob* nextPtr = head.ptr->nextFree;
+            
+            TaggedFiberPtr newHead = { nextPtr, head.tag + 1 };
+
+            if (m_freeFiberHead.compare_exchange_weak(head, newHead, std::memory_order_release, std::memory_order_acquire)) {
+                head.ptr->nextFree = nullptr; // Clean up
+                return head.ptr;
+            }
+        }
+
+        // if the pool is empty, you'd dynamically allocate more.
+        assert(false && "FATAL: Fiber pool exhausted! Allocate more up front."); 
+        return nullptr;
     }
 
     void ReleaseFiber(FiberJob* job) {
         job->payload = nullptr; // Free any captured variables in the std::function lambda
         
-        while (fiberPoolLock.test_and_set(std::memory_order_acquire)) { _mm_pause(); }
-        freeFibers.push_back(job);
-        fiberPoolLock.clear(std::memory_order_release);
+        TaggedFiberPtr head = m_freeFiberHead.load(std::memory_order_relaxed);
+        TaggedFiberPtr newHead;
+        
+        do {
+            job->nextFree = head.ptr;
+            newHead.ptr = job;
+            newHead.tag = head.tag + 1; // Increment generation counter
+        } while (!m_freeFiberHead.compare_exchange_weak(head, newHead, std::memory_order_release, std::memory_order_relaxed));
     }
 
     // --- SCHEDULING INTERFACES ---
@@ -982,9 +1064,9 @@ public:
                 }
             }
 
-            uint64_t airlockStart = __rdtsc();
-            while (__rdtsc() - airlockStart < 10000) {
-                _mm_pause();  
+            uint64_t airlockStart = GetHardwareCycles();
+            while (GetHardwareCycles() - airlockStart < 10000) {
+                CPU_Pause();  
             }
         }
     }
@@ -1080,10 +1162,10 @@ public:
 
             // --- Hardware Airlock: Burn exactly ~10,000 cycles (~3.3 microseconds on 3GHz CPU) ---                
             // Lets the workers wake up WITHOUT giving control back to the Windows OS Scheduler.
-            uint64_t airlockStart = __rdtsc();
-            while (__rdtsc() - airlockStart < 10000) {
+            uint64_t airlockStart = GetHardwareCycles();
+            while (GetHardwareCycles() - airlockStart < 10000) {
                 // Hardware Intrinsic Pause: Spin-lock rests the CPU's ALU to save power and allows hyper-threaded sibling cores to spin up (i.e., won't jitter anymore unlike this_thread::yield()).
-                _mm_pause();  
+                CPU_Pause();  
             }
         }
         
@@ -1096,7 +1178,7 @@ public:
         // --- Local Telemetry Tracking ---
         uint64_t localActiveCycles = 0;
         uint64_t localJobsCompleted = 0;
-        uint64_t telemetryStartCycles = __rdtsc();
+        uint64_t telemetryStartCycles = GetHardwareCycles();
         
         while (counter.load(std::memory_order_acquire) > 0) {
             void* job = queues[tl_workerIndex]->Pop();
@@ -1139,26 +1221,26 @@ public:
 
             if (job) {
                 // PREFETCH THE COROUTINE FRAME!
-                _mm_prefetch((const char*)job, _MM_HINT_T0);
+                CPU_Prefetch((const char*)job);
 
                 // 1. START HARDWARE TIMER
-                uint64_t jobStartCycles = __rdtsc();
+                uint64_t jobStartCycles = GetHardwareCycles();
                 // job.resume(); 
 
                 this->ExecuteTask(job);
 
                 // 2. END TIMER & ACCUMULATE
-                localActiveCycles += (__rdtsc() - jobStartCycles);
+                localActiveCycles += (GetHardwareCycles() - jobStartCycles);
                 localJobsCompleted++;
             }
             else {
-                _mm_pause(); 
+                CPU_Pause(); 
             }
         }
 
         // --- Flush Telemetry to the UI ---
         // Once the entire dispatch chunk is done, calculate how hard this specific thread worked.
-        uint64_t totalCyclesElapsed = __rdtsc() - telemetryStartCycles;
+        uint64_t totalCyclesElapsed = GetHardwareCycles() - telemetryStartCycles;
         
         if (totalCyclesElapsed > 0) {
             double exactUtilization = static_cast<double>(localActiveCycles) / static_cast<double>(totalCyclesElapsed);
@@ -1169,7 +1251,7 @@ public:
         }
 
         // Clean the calling thread (usually the UI thread) before it returns to ImGui/OpenGL
-        _mm256_zeroupper();
+        CPU_ClearAVX();
     }
 };
 
