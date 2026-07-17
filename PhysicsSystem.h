@@ -10,7 +10,7 @@
 
 // Engine Dependencies
 #include "Memory.h"    // For AlignedVector
-#include "JobSystem.h" // For parallel dispatch and thread IDs
+#include "FiberJobSystem/JobSystem.h" // For parallel dispatch and thread IDs
 #include "Math.h"      // For Morton codes and vector math
 #include "SIMD/AVX-256/SIMDVectorAVX256.h"
 #include "SIMD/SIMDCustomWrapper.h"
@@ -398,446 +398,446 @@ public:
     }
 
     // --- BUILD SPATIAL GRID (O(N) Counting Sort) RUNS EVERY SINGLE FRAME ---
-    // FORCE_INLINE void buildSpatialGridParallel(int activeCount) {
-    //     [[assume(activeCount >= 0)]];
+    FORCE_INLINE void buildSpatialGridParallel(int activeCount) {
+        [[assume(activeCount >= 0)]];
 
-    //     uint32_t threadCount = g_JobSystem.nextWorkerId.load(std::memory_order_relaxed);
+        uint32_t threadCount = g_JobSystem.nextWorkerId.load(std::memory_order_relaxed);
 
-    //     // Cache to local consts. The compiler locks these into registers!
-    //     const bool localIs2D = g_EngineSettings.is2DMode;
-    //     const bool localIsLegacy = g_EngineSettings.isLegacyCPU;
+        // Cache to local consts. The compiler locks these into registers!
+        const bool localIs2D = g_EngineSettings.is2DMode;
+        const bool localIsLegacy = g_EngineSettings.isLegacyCPU;
 
-    //     // -- SCALAR PREFIX SUM (SLOWER THAN PARALLEL) --
-    //     // Granular chunks! (Targeting ~1024 to 4096 particles per chunk) This ensures idle threads always have tiny, bite-sized tasks to steal.
-    //     // const uint32_t targetChunksPerThread = 8;
-    //     // uint32_t CHUNK_SIZE = std::max(1u, (uint32_t)(activeCount / (threadCount * targetChunksPerThread)));
-    //     // CHUNK_SIZE = std::clamp(CHUNK_SIZE, 1024u, 4096u);
+        // -- SCALAR PREFIX SUM (SLOWER THAN PARALLEL) --
+        // Granular chunks! (Targeting ~1024 to 4096 particles per chunk) This ensures idle threads always have tiny, bite-sized tasks to steal.
+        // const uint32_t targetChunksPerThread = 8;
+        // uint32_t CHUNK_SIZE = std::max(1u, (uint32_t)(activeCount / (threadCount * targetChunksPerThread)));
+        // CHUNK_SIZE = std::clamp(CHUNK_SIZE, 1024u, 4096u);
 
-    //     // =========================================================
-    //     // PHASE 1: PARALLEL HASH & HISTOGRAM (Lock-Free, Dual-Path)
-    //     // =========================================================
+        // =========================================================
+        // PHASE 1: PARALLEL HASH & HISTOGRAM (Lock-Free, Dual-Path)
+        // =========================================================
 
-    //     // -- PARALLEL PREFIX SUM (EXTREMELY FAST) --
-    //     // [u]: compiler treats it as an unsigned integer to prevent any signed bitwise overflow.
-    //     uint32_t CHUNK_SIZE = std::max(2048u, (uint32_t)(activeCount / (threadCount * 8)));
-    //     CHUNK_SIZE = (CHUNK_SIZE + 7) & ~7;  // Pad for AVX2
+        // -- PARALLEL PREFIX SUM (EXTREMELY FAST) --
+        // [u]: compiler treats it as an unsigned integer to prevent any signed bitwise overflow.
+        uint32_t CHUNK_SIZE = std::max(2048u, (uint32_t)(activeCount / (threadCount * 8)));
+        CHUNK_SIZE = (CHUNK_SIZE + 7) & ~7;  // Pad for AVX2
 
-    //     // --- AVX2 CODE TAKES ROUGHLY 15-20 CYCLES TO PROCESS 8 PARTICLES ---
-    //     g_JobSystem.DispatchAndWait(activeCount, CHUNK_SIZE, [&](uint32_t start, uint32_t end) {
+        // --- AVX2 CODE TAKES ROUGHLY 15-20 CYCLES TO PROCESS 8 PARTICLES ---
+        g_JobSystem.DispatchAndWait(activeCount, CHUNK_SIZE, [&](uint32_t start, uint32_t end) {
 
-    //         // Grab the ID of the thread actually executing this chunk (even if stolen)
-    //         // Safe to use Worker ID here because Histograms are communicative. 
-    //         // It doesn't matter who counts the particle, just that the total is correct.
-    //         uint32_t workerId = tl_workerIndex; 
+            // Grab the ID of the thread actually executing this chunk (even if stolen)
+            // Safe to use Worker ID here because Histograms are communicative. 
+            // It doesn't matter who counts the particle, just that the total is correct.
+            uint32_t workerId = tl_workerIndex; 
 
-    //         // Calculate AVX boundary so we don't read past the array
-    //         uint32_t alignedEnd = start + ((end - start) & ~7u);
+            // Calculate AVX boundary so we don't read past the array
+            uint32_t alignedEnd = start + ((end - start) & ~7u);
 
-    //         float* ENGINE_RESTRICT r_pX = std::assume_aligned<32>(pX.data());
-    //         float* ENGINE_RESTRICT r_pY = std::assume_aligned<32>(pY.data());
-    //         float* ENGINE_RESTRICT r_pZ = std::assume_aligned<32>(pZ.data());
-    //         uint32_t* ENGINE_RESTRICT r_particleCellIndices = std::assume_aligned<32>(particleCellIndices.data());
+            float* ENGINE_RESTRICT r_pX = std::assume_aligned<32>(pX.data());
+            float* ENGINE_RESTRICT r_pY = std::assume_aligned<32>(pY.data());
+            float* ENGINE_RESTRICT r_pZ = std::assume_aligned<32>(pZ.data());
+            uint32_t* ENGINE_RESTRICT r_particleCellIndices = std::assume_aligned<32>(particleCellIndices.data());
 
-    //         // Pre-load constants for the AVX2 loop
-    //         __m256 vWorldOffset = _mm256_set1_ps(WORLD_SIZE * 0.5f);
-    //         __m256 vInvCellSize = _mm256_set1_ps(INV_CELL_SIZE);
-    //         __m256i vHashMask   = _mm256_set1_epi32(HASH_MASK);
-    //         __m256i vZero       = _mm256_setzero_si256();
+            // Pre-load constants for the AVX2 loop
+            __m256 vWorldOffset = _mm256_set1_ps(WORLD_SIZE * 0.5f);
+            __m256 vInvCellSize = _mm256_set1_ps(INV_CELL_SIZE);
+            __m256i vHashMask   = _mm256_set1_epi32(HASH_MASK);
+            __m256i vZero       = _mm256_setzero_si256();
 
-    //         // The maximum boundary for our 1024-size LUT
-    //         __m256i vMaxGrid = _mm256_set1_epi32(1023);
+            // The maximum boundary for our 1024-size LUT
+            __m256i vMaxGrid = _mm256_set1_epi32(1023);
 
-    //         // SOFTWARE WRITE-COMBINING BUFFER: 256 integers = 1 Kilobyte. 1KB sits permanently inside the L1 CPU Cache.
-    //         alignas(64) uint32_t hashBuffer[256]; 
-    //         uint32_t bufferIdx = 0;
+            // SOFTWARE WRITE-COMBINING BUFFER: 256 integers = 1 Kilobyte. 1KB sits permanently inside the L1 CPU Cache.
+            alignas(64) uint32_t hashBuffer[256]; 
+            uint32_t bufferIdx = 0;
 
-    //         // Temporary array to extract hashes back to scalar for the histogram update
-    //         // alignas(32) uint32_t extractedHashes[8];
+            // Temporary array to extract hashes back to scalar for the histogram update
+            // alignas(32) uint32_t extractedHashes[8];
             
-    //         // ----------------------------------------------------
-    //         // 1. THE AVX2 FAST PATH (8 Particles at a time)
-    //         // ----------------------------------------------------
-    //         for (uint32_t i = start; i < alignedEnd; i += 8) {
-    //             // Load Positions
-    //             // __m256 px = _mm256_load_ps(&pX[i]);
-    //             // __m256 py = _mm256_load_ps(&pY[i]);
-    //             __m256 px = _mm256_load_ps(r_pX + i);
-    //             __m256 py = _mm256_load_ps(r_pY + i);
+            // ----------------------------------------------------
+            // 1. THE AVX2 FAST PATH (8 Particles at a time)
+            // ----------------------------------------------------
+            for (uint32_t i = start; i < alignedEnd; i += 8) {
+                // Load Positions
+                // __m256 px = _mm256_load_ps(&pX[i]);
+                // __m256 py = _mm256_load_ps(&pY[i]);
+                __m256 px = _mm256_load_ps(r_pX + i);
+                __m256 py = _mm256_load_ps(r_pY + i);
 
-    //             // Shift Coordinates to positive space
-    //             px = _mm256_add_ps(px, vWorldOffset);
-    //             py = _mm256_add_ps(py, vWorldOffset);
+                // Shift Coordinates to positive space
+                px = _mm256_add_ps(px, vWorldOffset);
+                py = _mm256_add_ps(py, vWorldOffset);
 
-    //             // Convert Floats to Grid Integers (Hardware Truncation)
-    //             __m256i gridX = _mm256_cvttps_epi32(_mm256_mul_ps(px, vInvCellSize));
-    //             __m256i gridY = _mm256_cvttps_epi32(_mm256_mul_ps(py, vInvCellSize));
-    //             __m256i gridZ = vZero;
+                // Convert Floats to Grid Integers (Hardware Truncation)
+                __m256i gridX = _mm256_cvttps_epi32(_mm256_mul_ps(px, vInvCellSize));
+                __m256i gridY = _mm256_cvttps_epi32(_mm256_mul_ps(py, vInvCellSize));
+                __m256i gridZ = vZero;
 
-    //             if (!localIs2D) {
-    //                 // __m256 pz = _mm256_load_ps(&pZ[i]);
-    //                 __m256 pz = _mm256_load_ps(r_pZ + i);
-    //                 pz = _mm256_add_ps(pz, vWorldOffset);
-    //                 gridZ = _mm256_cvttps_epi32(_mm256_mul_ps(pz, vInvCellSize));
+                if (!localIs2D) {
+                    // __m256 pz = _mm256_load_ps(&pZ[i]);
+                    __m256 pz = _mm256_load_ps(r_pZ + i);
+                    pz = _mm256_add_ps(pz, vWorldOffset);
+                    gridZ = _mm256_cvttps_epi32(_mm256_mul_ps(pz, vInvCellSize));
 
-    //                 // Clamp Z axis if we are in 3D mode
-    //                 gridZ = _mm256_max_epi32(vZero, _mm256_min_epi32(gridZ, vMaxGrid));
-    //             }
+                    // Clamp Z axis if we are in 3D mode
+                    gridZ = _mm256_max_epi32(vZero, _mm256_min_epi32(gridZ, vMaxGrid));
+                }
 
-    //             // THE AVX2 CLAMP: Restricts integers between 0 and 1023 instantly across all 8 particles to ensure that an exploding particle will never generate an out-of-bounds integer before hashing.
-    //             gridX = _mm256_max_epi32(vZero, _mm256_min_epi32(gridX, vMaxGrid));
-    //             gridY = _mm256_max_epi32(vZero, _mm256_min_epi32(gridY, vMaxGrid));
+                // THE AVX2 CLAMP: Restricts integers between 0 and 1023 instantly across all 8 particles to ensure that an exploding particle will never generate an out-of-bounds integer before hashing.
+                gridX = _mm256_max_epi32(vZero, _mm256_min_epi32(gridX, vMaxGrid));
+                gridY = _mm256_max_epi32(vZero, _mm256_min_epi32(gridY, vMaxGrid));
 
-    //             // SIMULTANEOUS HASHING (AVX2 Integer Math)
-    //             // If Legacy is off, we still use the AVX2 math here because _pdep_u32 cannot process 8 numbers at once.
-    //             __m256i hashes = getMortonCode_AVX2(gridX, gridY, gridZ);
-    //             hashes = _mm256_and_si256(hashes, vHashMask);
+                // SIMULTANEOUS HASHING (AVX2 Integer Math)
+                // If Legacy is off, we still use the AVX2 math here because _pdep_u32 cannot process 8 numbers at once.
+                __m256i hashes = getMortonCode_AVX2(gridX, gridY, gridZ);
+                hashes = _mm256_and_si256(hashes, vHashMask);
 
-    //             // Store 8 hashes back to the main array simultaneously
-    //             // _mm256_storeu_si256((__m256i*)&particleCellIndices[i], hashes);
+                // Store 8 hashes back to the main array simultaneously
+                // _mm256_storeu_si256((__m256i*)&particleCellIndices[i], hashes);
 
-    //             // Use the restricted pointer for clean, unaliased storing
-    //             _mm256_store_si256((__m256i*)(r_particleCellIndices + i), hashes);
+                // Use the restricted pointer for clean, unaliased storing
+                _mm256_store_si256((__m256i*)(r_particleCellIndices + i), hashes);
 
-    //             // Write to our L1 Cache buffer instead of main memory! Ensures AVX2 pipeline never stalls and reduces memory bus contention.
-    //             _mm256_store_si256((__m256i*)&hashBuffer[bufferIdx], hashes);
-    //             bufferIdx += 8;
+                // Write to our L1 Cache buffer instead of main memory! Ensures AVX2 pipeline never stalls and reduces memory bus contention.
+                _mm256_store_si256((__m256i*)&hashBuffer[bufferIdx], hashes);
+                bufferIdx += 8;
 
-    //             // When the L1 buffer is full, flush it to the L3 Cache histogram in one big batch
-    //             if (bufferIdx == 256) {
-    //                 for (uint32_t k = 0; k < 256; ++k) {
-    //                     // Flat array math: (Worker ID * Total Cells) + Hash
-    //                     threadLocalCounts[(workerId * TOTAL_CELLS) + hashBuffer[k]]++;
-    //                 }
-    //                 bufferIdx = 0; // Reset buffer
-    //             }
+                // When the L1 buffer is full, flush it to the L3 Cache histogram in one big batch
+                if (bufferIdx == 256) {
+                    for (uint32_t k = 0; k < 256; ++k) {
+                        // Flat array math: (Worker ID * Total Cells) + Hash
+                        threadLocalCounts[(workerId * TOTAL_CELLS) + hashBuffer[k]]++;
+                    }
+                    bufferIdx = 0; // Reset buffer
+                }
 
-    //         }
+            }
 
-    //         // Flush any remaining hashes in the buffer before moving to the scalar remainder!
-    //         for (uint32_t k = 0; k < bufferIdx; ++k) {
-    //             threadLocalCounts[(workerId * TOTAL_CELLS) + hashBuffer[k]]++;
-    //         }
+            // Flush any remaining hashes in the buffer before moving to the scalar remainder!
+            for (uint32_t k = 0; k < bufferIdx; ++k) {
+                threadLocalCounts[(workerId * TOTAL_CELLS) + hashBuffer[k]]++;
+            }
 
-    //         // ----------------------------------------------------
-    //         // 2. THE SCALAR REMAINDER (LUT Fallback)
-    //         // ----------------------------------------------------
+            // ----------------------------------------------------
+            // 2. THE SCALAR REMAINDER (LUT Fallback)
+            // ----------------------------------------------------
 
-    //         // Pre-load SSE constants outside the loop to keep registers hot
-    //         __m128 vMinGrid128 = _mm_setzero_ps();
-    //         __m128 vMaxGrid128 = _mm_set_ss(1023.0f);
+            // Pre-load SSE constants outside the loop to keep registers hot
+            __m128 vMinGrid128 = _mm_setzero_ps();
+            __m128 vMaxGrid128 = _mm_set_ss(1023.0f);
 
-    //         // --- C++20 TEMPLATED LAMBDA DISPATCHER ---
-    //         auto processScalarRemainder = [&]<bool Is2D, bool IsLegacy>() {
-    //             // Clean up the remaining 1 to 7 particles using ultra-fast L1 cache table
-    //             for (uint32_t i = alignedEnd; i < end; ++i) {
-    //                 // Shift coordinates from (-1000, 1000) to (0, 2000) so grid math is positive
-    //                 float shiftedX = r_pX[i] + (WORLD_SIZE * 0.5f);
-    //                 float shiftedY = r_pY[i] + (WORLD_SIZE * 0.5f);
+            // --- C++20 TEMPLATED LAMBDA DISPATCHER ---
+            auto processScalarRemainder = [&]<bool Is2D, bool IsLegacy>() {
+                // Clean up the remaining 1 to 7 particles using ultra-fast L1 cache table
+                for (uint32_t i = alignedEnd; i < end; ++i) {
+                    // Shift coordinates from (-1000, 1000) to (0, 2000) so grid math is positive
+                    float shiftedX = r_pX[i] + (WORLD_SIZE * 0.5f);
+                    float shiftedY = r_pY[i] + (WORLD_SIZE * 0.5f);
 
-    //                 // std::clamp: Guarantees the index never exceeds our 1024 LUT bounds to prevent segfaults (i.e., particles won't crash the engine if they wander slightly off-grid)
-    //                 // [15-20 clock cycles] to perform a single floating-point division, [4 clock cycles] to perform a single floating-point multiplication
-    //                 // uint32_t gridX = (uint32_t)std::clamp((int)(shiftedX * INV_CELL_SIZE), 0, 1023);
-    //                 // uint32_t gridY = (uint32_t)std::clamp((int)(shiftedY * INV_CELL_SIZE), 0, 1023);
-    //                 // uint32_t gridZ = (uint32_t)std::clamp((int)(shiftedZ * INV_CELL_SIZE), 0, 1023);
+                    // std::clamp: Guarantees the index never exceeds our 1024 LUT bounds to prevent segfaults (i.e., particles won't crash the engine if they wander slightly off-grid)
+                    // [15-20 clock cycles] to perform a single floating-point division, [4 clock cycles] to perform a single floating-point multiplication
+                    // uint32_t gridX = (uint32_t)std::clamp((int)(shiftedX * INV_CELL_SIZE), 0, 1023);
+                    // uint32_t gridY = (uint32_t)std::clamp((int)(shiftedY * INV_CELL_SIZE), 0, 1023);
+                    // uint32_t gridZ = (uint32_t)std::clamp((int)(shiftedZ * INV_CELL_SIZE), 0, 1023);
 
-    //                 // --- BRANCHLESS SSE CLAMP ---
-    //                 /*
-    //                     - Executes directly on the Vector ALU ports.
-    //                     - Takes ~3-4 clock cycles to complete, every single time.
-    //                     - Truncates the scalar float in the SSE register directly into 32-bit integer in one step.
-    //                 */
-    //                 // 1. Multiply by inverse cell size directly inside the SSE register
-    //                 __m128 vx = _mm_set_ss(shiftedX * INV_CELL_SIZE);
-    //                 __m128 vy = _mm_set_ss(shiftedY * INV_CELL_SIZE);
+                    // --- BRANCHLESS SSE CLAMP ---
+                    /*
+                        - Executes directly on the Vector ALU ports.
+                        - Takes ~3-4 clock cycles to complete, every single time.
+                        - Truncates the scalar float in the SSE register directly into 32-bit integer in one step.
+                    */
+                    // 1. Multiply by inverse cell size directly inside the SSE register
+                    __m128 vx = _mm_set_ss(shiftedX * INV_CELL_SIZE);
+                    __m128 vy = _mm_set_ss(shiftedY * INV_CELL_SIZE);
 
-    //                 // 2. Hardware Min/Max (0 branches, pure silicon math)
-    //                 vx = _mm_max_ss(vMinGrid128, _mm_min_ss(vx, vMaxGrid128));
-    //                 vy = _mm_max_ss(vMinGrid128, _mm_min_ss(vy, vMaxGrid128));
+                    // 2. Hardware Min/Max (0 branches, pure silicon math)
+                    vx = _mm_max_ss(vMinGrid128, _mm_min_ss(vx, vMaxGrid128));
+                    vy = _mm_max_ss(vMinGrid128, _mm_min_ss(vy, vMaxGrid128));
 
-    //                 // 3. Hardware truncation from float to integer
-    //                 uint32_t gridX = static_cast<uint32_t>(_mm_cvttss_si32(vx));
-    //                 uint32_t gridY = static_cast<uint32_t>(_mm_cvttss_si32(vy));
+                    // 3. Hardware truncation from float to integer
+                    uint32_t gridX = static_cast<uint32_t>(_mm_cvttss_si32(vx));
+                    uint32_t gridY = static_cast<uint32_t>(_mm_cvttss_si32(vy));
 
-    //                 // Hash to map 3D space into a fixed-size 1D array.
-    //                 uint32_t hash;
+                    // Hash to map 3D space into a fixed-size 1D array.
+                    uint32_t hash;
 
-    //                 // [Hot loop]: using global toggles is safe in hot loops b/c its static ([false] for 1 million cycles or [true] for 1 million cycles).
-    //                 // Compile-time branch: Z-math is entirely deleted from the 2D binary path
-    //                 if constexpr (Is2D) {
-    //                     // Fast 2D Path: Morton Encoding (pass 0 for Z)
-    //                     hash = getMortonCode<IsLegacy>(gridX, gridY, 0) & HASH_MASK;
-    //                 } 
-    //                 else {
-    //                     // True 3D Path: Morton Encoding
-    //                     float shiftedZ = r_pZ[i] + (WORLD_SIZE * 0.5f);
+                    // [Hot loop]: using global toggles is safe in hot loops b/c its static ([false] for 1 million cycles or [true] for 1 million cycles).
+                    // Compile-time branch: Z-math is entirely deleted from the 2D binary path
+                    if constexpr (Is2D) {
+                        // Fast 2D Path: Morton Encoding (pass 0 for Z)
+                        hash = getMortonCode<IsLegacy>(gridX, gridY, 0) & HASH_MASK;
+                    } 
+                    else {
+                        // True 3D Path: Morton Encoding
+                        float shiftedZ = r_pZ[i] + (WORLD_SIZE * 0.5f);
 
-    //                     // Branchless Z-Clamp
-    //                     __m128 vz = _mm_set_ss(shiftedZ * INV_CELL_SIZE);
-    //                     vz = _mm_max_ss(vMinGrid128, _mm_min_ss(vz, vMaxGrid128));
-    //                     uint32_t gridZ = static_cast<uint32_t>(_mm_cvttss_si32(vz));
+                        // Branchless Z-Clamp
+                        __m128 vz = _mm_set_ss(shiftedZ * INV_CELL_SIZE);
+                        vz = _mm_max_ss(vMinGrid128, _mm_min_ss(vz, vMaxGrid128));
+                        uint32_t gridZ = static_cast<uint32_t>(_mm_cvttss_si32(vz));
 
-    //                     /* [ALU Bitwise Operator (&)]
-    //                         - The modulo (%) operator compiles to a slow integer division instruction (idiv on x86) that costs 15-20 clock cycles.
-    //                         - hash = getMortonCode(gridX, gridY, gridZ) % TOTAL_CELLS;
-    //                         - It cannot be easily pipelined. 
-    //                         - Doing this 9 times (2D) or 27 times (3D) per particle, for 100,000 particles, means you are burning over 40 million clock cycles per frame.
+                        /* [ALU Bitwise Operator (&)]
+                            - The modulo (%) operator compiles to a slow integer division instruction (idiv on x86) that costs 15-20 clock cycles.
+                            - hash = getMortonCode(gridX, gridY, gridZ) % TOTAL_CELLS;
+                            - It cannot be easily pipelined. 
+                            - Doing this 9 times (2D) or 27 times (3D) per particle, for 100,000 particles, means you are burning over 40 million clock cycles per frame.
 
-    //                         - The bitwise AND (&) operator executes in 1 clock cycle (15-20x faster).
-    //                         - By forcing TOTAL_CELLS to be a strict power of 2 (e.g., 264,144 instead of 250,001) this allow us to replace modulo (%) with the AND (&) bitwise operator to boost performance.
-    //                         - This adjustment alone to use (&) can improve frame rates by 5-7fps compared to modulo (%).
-    //                         - The bitwise XOR (^) prevents diagonal symmetry bugs
-    //                     */
-    //                     hash = getMortonCode<IsLegacy>(gridX, gridY, gridZ) & HASH_MASK;
-    //                 }
+                            - The bitwise AND (&) operator executes in 1 clock cycle (15-20x faster).
+                            - By forcing TOTAL_CELLS to be a strict power of 2 (e.g., 264,144 instead of 250,001) this allow us to replace modulo (%) with the AND (&) bitwise operator to boost performance.
+                            - This adjustment alone to use (&) can improve frame rates by 5-7fps compared to modulo (%).
+                            - The bitwise XOR (^) prevents diagonal symmetry bugs
+                        */
+                        hash = getMortonCode<IsLegacy>(gridX, gridY, gridZ) & HASH_MASK;
+                    }
 
-    //                 // Save the hash so we don't calculate it twice, and increment the histogram
-    //                 r_particleCellIndices[i] = hash;
+                    // Save the hash so we don't calculate it twice, and increment the histogram
+                    r_particleCellIndices[i] = hash;
 
-    //                 // Flat Array Math: (Worker ID * Total Cells) + Hash (i.e., flat mapping)
-    //                 threadLocalCounts[(workerId * TOTAL_CELLS) + hash]++; // Thread-local write! Zero false sharing, zero atomics.
-    //             }
-    //         };
+                    // Flat Array Math: (Worker ID * Total Cells) + Hash (i.e., flat mapping)
+                    threadLocalCounts[(workerId * TOTAL_CELLS) + hash]++; // Thread-local write! Zero false sharing, zero atomics.
+                }
+            };
 
-    //         // --- DISPATCH THE KERNEL ---
-    //         // Evaluates the runtime global booleans exactly once, jumping to the pure assembly path.
-    //         if (localIs2D) {
-    //             if (localIsLegacy) processScalarRemainder.template operator()<true, true>();
-    //             else               processScalarRemainder.template operator()<true, false>();
-    //         } else {
-    //             if (localIsLegacy) processScalarRemainder.template operator()<false, true>();
-    //             else               processScalarRemainder.template operator()<false, false>();
-    //         }
-    //     });
+            // --- DISPATCH THE KERNEL ---
+            // Evaluates the runtime global booleans exactly once, jumping to the pure assembly path.
+            if (localIs2D) {
+                if (localIsLegacy) processScalarRemainder.template operator()<true, true>();
+                else               processScalarRemainder.template operator()<true, false>();
+            } else {
+                if (localIsLegacy) processScalarRemainder.template operator()<false, true>();
+                else               processScalarRemainder.template operator()<false, false>();
+            }
+        });
 
-    //     // ==========================================
-    //     // PHASE 2: PARALLEL GLOBAL PREFIX SUM (SCAN)
-    //     // ==========================================
+        // ==========================================
+        // PHASE 2: PARALLEL GLOBAL PREFIX SUM (SCAN)
+        // ==========================================
 
-    //     // We slice the 262,144 cells into 64 chunks of 4096 cells each.
-    //     constexpr uint32_t PREFIX_CHUNK_SIZE = 4096;
-    //     constexpr uint32_t NUM_CHUNKS = TOTAL_CELLS / PREFIX_CHUNK_SIZE; 
+        // We slice the 262,144 cells into 64 chunks of 4096 cells each.
+        constexpr uint32_t PREFIX_CHUNK_SIZE = 4096;
+        constexpr uint32_t NUM_CHUNKS = TOTAL_CELLS / PREFIX_CHUNK_SIZE; 
         
-    //     // Stack-allocated array to hold the total particle count of each chunk
-    //     uint32_t chunkTotals[NUM_CHUNKS] = {0};
+        // Stack-allocated array to hold the total particle count of each chunk
+        uint32_t chunkTotals[NUM_CHUNKS] = {0};
 
-    //     /* [Job System]
-    //         1. Calculates the sums in parallel.
-    //         2. Perform a lightning fast 64 iteration stitch on the main thread.
-    //         3. Fan back out.
-    //     */
+        /* [Job System]
+            1. Calculates the sums in parallel.
+            2. Perform a lightning fast 64 iteration stitch on the main thread.
+            3. Fan back out.
+        */
 
-    //     // --- STEP 2A: Local Chunk Reduction (Parallel, Extremely Fast) ---
-    //     g_JobSystem.DispatchAndWait(TOTAL_CELLS, PREFIX_CHUNK_SIZE, [&](uint32_t start, uint32_t end) {
-    //         uint32_t chunkIdx = start / PREFIX_CHUNK_SIZE;
-    //         uint32_t localRunningTotal = 0;
+        // --- STEP 2A: Local Chunk Reduction (Parallel, Extremely Fast) ---
+        g_JobSystem.DispatchAndWait(TOTAL_CELLS, PREFIX_CHUNK_SIZE, [&](uint32_t start, uint32_t end) {
+            uint32_t chunkIdx = start / PREFIX_CHUNK_SIZE;
+            uint32_t localRunningTotal = 0;
 
-    //         // Extract the thread local counts!
-    //         uint32_t* ENGINE_RESTRICT r_threadLocalCounts = std::assume_aligned<64>(threadLocalCounts.data());
-    //         uint32_t* ENGINE_RESTRICT r_cellStartOffset = std::assume_aligned<64>(cellStartOffset.data());
-    //         uint64_t* ENGINE_RESTRICT r_cellOccupancyMask = std::assume_aligned<64>(cellOccupancyMask.data());
+            // Extract the thread local counts!
+            uint32_t* ENGINE_RESTRICT r_threadLocalCounts = std::assume_aligned<64>(threadLocalCounts.data());
+            uint32_t* ENGINE_RESTRICT r_cellStartOffset = std::assume_aligned<64>(cellStartOffset.data());
+            uint64_t* ENGINE_RESTRICT r_cellOccupancyMask = std::assume_aligned<64>(cellOccupancyMask.data());
 
-    //         for (uint32_t cell = start; cell < end; ++cell) {
-    //             // Save the start of this cell so solveCollisions() can find it!
-    //             // cellStartOffset[cell] = localRunningTotal; // Store the local offset temporarily
-    //             r_cellStartOffset[cell] = localRunningTotal;
-    //             uint32_t cellCount = 0;
+            for (uint32_t cell = start; cell < end; ++cell) {
+                // Save the start of this cell so solveCollisions() can find it!
+                // cellStartOffset[cell] = localRunningTotal; // Store the local offset temporarily
+                r_cellStartOffset[cell] = localRunningTotal;
+                uint32_t cellCount = 0;
 
-    //             // Accumulate all threads' contributions for this specific cell
-    //             for (uint32_t t = 0; t < threadCount; ++t) {
-    //                 uint32_t flatIndex = (t * TOTAL_CELLS) + cell;
+                // Accumulate all threads' contributions for this specific cell
+                for (uint32_t t = 0; t < threadCount; ++t) {
+                    uint32_t flatIndex = (t * TOTAL_CELLS) + cell;
 
-    //                 // 1. Read the data into the ALU
-    //                 cellCount += r_threadLocalCounts[flatIndex];
+                    // 1. Read the data into the ALU
+                    cellCount += r_threadLocalCounts[flatIndex];
 
-    //                 // 2. ZERO-ON-READ: Zero the memory while it is still hot in the L1 Cache! This instantly prepares the buffer for the NEXT frame for free.
-    //                 // Requires no Read-For-Ownership (RFO) penalty from the main RAM.
-    //                 r_threadLocalCounts[flatIndex] = 0;
-    //             }
-    //             localRunningTotal += cellCount;
+                    // 2. ZERO-ON-READ: Zero the memory while it is still hot in the L1 Cache! This instantly prepares the buffer for the NEXT frame for free.
+                    // Requires no Read-For-Ownership (RFO) penalty from the main RAM.
+                    r_threadLocalCounts[flatIndex] = 0;
+                }
+                localRunningTotal += cellCount;
 
-    //             // ==========================================
-    //             // POPULATE THE L1 CULLING MASK
-    //             // ==========================================
-    //             // Shift right by 6 (>> 6) is identical to dividing by 64.
-    //             // Bitwise AND 63 (& 63) is identical to modulo 64.
-    //             if (cellCount > 0) {
-    //                 // Set the bit to 1 (Occupied)
-    //                 r_cellOccupancyMask[cell >> 6] |= (1ULL << (cell & 63));
-    //             } else {
-    //                 // Set the bit to 0 (Empty) to clean up from the previous frame
-    //                 r_cellOccupancyMask[cell >> 6] &= ~(1ULL << (cell & 63));
-    //             }
-    //         }
-    //         // Save the total sum of this chunk for the Main Thread to read
-    //         chunkTotals[chunkIdx] = localRunningTotal;
-    //     });
+                // ==========================================
+                // POPULATE THE L1 CULLING MASK
+                // ==========================================
+                // Shift right by 6 (>> 6) is identical to dividing by 64.
+                // Bitwise AND 63 (& 63) is identical to modulo 64.
+                if (cellCount > 0) {
+                    // Set the bit to 1 (Occupied)
+                    r_cellOccupancyMask[cell >> 6] |= (1ULL << (cell & 63));
+                } else {
+                    // Set the bit to 0 (Empty) to clean up from the previous frame
+                    r_cellOccupancyMask[cell >> 6] &= ~(1ULL << (cell & 63));
+                }
+            }
+            // Save the total sum of this chunk for the Main Thread to read
+            chunkTotals[chunkIdx] = localRunningTotal;
+        });
 
-    //     // --- STEP 2B: Global Scan (Main Thread, Extremely Fast) ---
-    //     // Instead of 2,000,000 iterations, the Main Thread now only does exactly 64 iterations!
-    //     // Evaluates in less than 1 microsecond.
-    //     uint32_t globalOffsets[NUM_CHUNKS] = {0};
-    //     uint32_t globalTotal = 0;
+        // --- STEP 2B: Global Scan (Main Thread, Extremely Fast) ---
+        // Instead of 2,000,000 iterations, the Main Thread now only does exactly 64 iterations!
+        // Evaluates in less than 1 microsecond.
+        uint32_t globalOffsets[NUM_CHUNKS] = {0};
+        uint32_t globalTotal = 0;
         
-    //     for (uint32_t i = 0; i < NUM_CHUNKS; ++i) {
-    //         globalOffsets[i] = globalTotal;
-    //         globalTotal += chunkTotals[i];
-    //     }
+        for (uint32_t i = 0; i < NUM_CHUNKS; ++i) {
+            globalOffsets[i] = globalTotal;
+            globalTotal += chunkTotals[i];
+        }
 
-    //     // --- STEP 2C: Apply Global Offsets & Setup Scatter Buffer (Parallel, Extremely Fast) ---
-    //     // By parallelizing the buffer setup, we completely eliminate the need for 
-    //     // the slow std::memcpy on the main thread!
-    //     g_JobSystem.DispatchAndWait(TOTAL_CELLS, PREFIX_CHUNK_SIZE, [&](uint32_t start, uint32_t end) {
-    //         uint32_t chunkIdx = start / PREFIX_CHUNK_SIZE;
-    //         uint32_t globalBase = globalOffsets[chunkIdx];
+        // --- STEP 2C: Apply Global Offsets & Setup Scatter Buffer (Parallel, Extremely Fast) ---
+        // By parallelizing the buffer setup, we completely eliminate the need for 
+        // the slow std::memcpy on the main thread!
+        g_JobSystem.DispatchAndWait(TOTAL_CELLS, PREFIX_CHUNK_SIZE, [&](uint32_t start, uint32_t end) {
+            uint32_t chunkIdx = start / PREFIX_CHUNK_SIZE;
+            uint32_t globalBase = globalOffsets[chunkIdx];
 
-    //         uint32_t* ENGINE_RESTRICT r_cellStartOffset = std::assume_aligned<64>(cellStartOffset.data());
-    //         uint32_t* ENGINE_RESTRICT r_currentInsertPos = std::assume_aligned<64>(currentInsertPos.data());
+            uint32_t* ENGINE_RESTRICT r_cellStartOffset = std::assume_aligned<64>(cellStartOffset.data());
+            uint32_t* ENGINE_RESTRICT r_currentInsertPos = std::assume_aligned<64>(currentInsertPos.data());
 
-    //         for (uint32_t cell = start; cell < end; ++cell) {
-    //             // Add the chunk's global base to the local offsets calculated in Step 2A
-    //             // cellStartOffset[cell] += globalBase;
+            for (uint32_t cell = start; cell < end; ++cell) {
+                // Add the chunk's global base to the local offsets calculated in Step 2A
+                // cellStartOffset[cell] += globalBase;
                 
-    //             // Simultaneously initialize the working copy for Phase 3A (Atomic Scatter)
-    //             // currentInsertPos[cell] = cellStartOffset[cell]; 
+                // Simultaneously initialize the working copy for Phase 3A (Atomic Scatter)
+                // currentInsertPos[cell] = cellStartOffset[cell]; 
 
-    //             r_cellStartOffset[cell] += globalBase;
-    //             r_currentInsertPos[cell] = r_cellStartOffset[cell];
-    //         }
-    //     });
+                r_cellStartOffset[cell] += globalBase;
+                r_currentInsertPos[cell] = r_cellStartOffset[cell];
+            }
+        });
 
-    //     // ==========================================
-    //     // PHASE 2: SCALAR PREFIX SUM (SLOWER THAN PARALLEL)
-    //     // ==========================================
-    //     // uint32_t currentGlobalOffset = 0;
+        // ==========================================
+        // PHASE 2: SCALAR PREFIX SUM (SLOWER THAN PARALLEL)
+        // ==========================================
+        // uint32_t currentGlobalOffset = 0;
 
-    //     // for (uint32_t cell = 0; cell < TOTAL_CELLS; ++cell) {
-    //     //     // Save the global start of this cell so solveCollisions() can find it!
-    //     //     cellStartOffset[cell] = currentGlobalOffset;
+        // for (uint32_t cell = 0; cell < TOTAL_CELLS; ++cell) {
+        //     // Save the global start of this cell so solveCollisions() can find it!
+        //     cellStartOffset[cell] = currentGlobalOffset;
 
-    //     //     for (uint32_t t = 0; t < threadCount; ++t) {
-    //     //         currentGlobalOffset += threadLocalCounts[t][cell];
-    //     //     }
-    //     // }
+        //     for (uint32_t t = 0; t < threadCount; ++t) {
+        //         currentGlobalOffset += threadLocalCounts[t][cell];
+        //     }
+        // }
 
-    //     // // Quickly copy offsets for Phase 3A
-    //     // std::memcpy copies megabytes of data and hogs the main memory bus.
-    //     // std::memcpy(currentInsertPos.data(), cellStartOffset.data(), TOTAL_CELLS * sizeof(uint32_t));
+        // // Quickly copy offsets for Phase 3A
+        // std::memcpy copies megabytes of data and hogs the main memory bus.
+        // std::memcpy(currentInsertPos.data(), cellStartOffset.data(), TOTAL_CELLS * sizeof(uint32_t));
 
-    //     // ==========================================
-    //     // PHASE 3A: ATOMIC SCATTER DESTINATIONS
-    //     // ==========================================
-    //     g_JobSystem.DispatchAndWait(activeCount, CHUNK_SIZE, [&](uint32_t start, uint32_t end) {
+        // ==========================================
+        // PHASE 3A: ATOMIC SCATTER DESTINATIONS
+        // ==========================================
+        g_JobSystem.DispatchAndWait(activeCount, CHUNK_SIZE, [&](uint32_t start, uint32_t end) {
 
-    //         uint32_t* ENGINE_RESTRICT r_particleCellIndices = std::assume_aligned<32>(particleCellIndices.data());
-    //         uint32_t* ENGINE_RESTRICT r_temp_destIndices = std::assume_aligned<32>(temp_destIndices.data());
-    //         uint32_t* ENGINE_RESTRICT r_temp_cellIndices = std::assume_aligned<32>(temp_cellIndices.data());
-    //         uint32_t* ENGINE_RESTRICT r_currentInsertPos = std::assume_aligned<64>(currentInsertPos.data());
+            uint32_t* ENGINE_RESTRICT r_particleCellIndices = std::assume_aligned<32>(particleCellIndices.data());
+            uint32_t* ENGINE_RESTRICT r_temp_destIndices = std::assume_aligned<32>(temp_destIndices.data());
+            uint32_t* ENGINE_RESTRICT r_temp_cellIndices = std::assume_aligned<32>(temp_cellIndices.data());
+            uint32_t* ENGINE_RESTRICT r_currentInsertPos = std::assume_aligned<64>(currentInsertPos.data());
 
-    //         for (uint32_t i = start; i < end; ++i) {
-    //             // uint32_t hash = particleCellIndices[i];
-    //             uint32_t hash = r_particleCellIndices[i];
+            for (uint32_t i = start; i < end; ++i) {
+                // uint32_t hash = particleCellIndices[i];
+                uint32_t hash = r_particleCellIndices[i];
 
-    //             // std::atomic_ref guarantees safety regardless of which worker steals the chunk.
-    //             // C++20: Safely increment the global insert position regardless of which thread stole this job!
-    //             std::atomic_ref<uint32_t> safeOffset(r_currentInsertPos[hash]);
+                // std::atomic_ref guarantees safety regardless of which worker steals the chunk.
+                // C++20: Safely increment the global insert position regardless of which thread stole this job!
+                std::atomic_ref<uint32_t> safeOffset(r_currentInsertPos[hash]);
 
-    //             // Store the exact destination index for this particle.
-    //             // temp_destIndices[i] = safeOffset.fetch_add(1, std::memory_order_relaxed);
+                // Store the exact destination index for this particle.
+                // temp_destIndices[i] = safeOffset.fetch_add(1, std::memory_order_relaxed);
 
-    //             // Keep the hash synced in the new sorted order
-    //             // We can safely move the hash now too
-    //             // temp_cellIndices[temp_destIndices[i]] = hash;
+                // Keep the hash synced in the new sorted order
+                // We can safely move the hash now too
+                // temp_cellIndices[temp_destIndices[i]] = hash;
 
-    //             r_temp_destIndices[i] = safeOffset.fetch_add(1, std::memory_order_relaxed);
-    //             r_temp_cellIndices[r_temp_destIndices[i]] = hash;
-    //         }
+                r_temp_destIndices[i] = safeOffset.fetch_add(1, std::memory_order_relaxed);
+                r_temp_cellIndices[r_temp_destIndices[i]] = hash;
+            }
             
-    //     });
+        });
 
-    //     // ==========================================
-    //     // PHASE 3B: MULTI-PASS MEMORY STREAMING (Cache Friendly)
-    //     // ==========================================
-    //     // It looks like more code and more loops, but to the silicon, it is significantly faster b/c it prevents the CPU execution units from idling and waiting for RAM.
-    //     // Now we move the data one component at a time. 
-    //     // The hardware prefetcher only has to track: pX (read), destIndices (read), temp_pX (write).
-    //     g_JobSystem.DispatchAndWait(activeCount, CHUNK_SIZE, [&](uint32_t start, uint32_t end) {
+        // ==========================================
+        // PHASE 3B: MULTI-PASS MEMORY STREAMING (Cache Friendly)
+        // ==========================================
+        // It looks like more code and more loops, but to the silicon, it is significantly faster b/c it prevents the CPU execution units from idling and waiting for RAM.
+        // Now we move the data one component at a time. 
+        // The hardware prefetcher only has to track: pX (read), destIndices (read), temp_pX (write).
+        g_JobSystem.DispatchAndWait(activeCount, CHUNK_SIZE, [&](uint32_t start, uint32_t end) {
 
-    //         // By proving these pointers don't overlap, the compiler unrolls these loops flawlessly
-    //         float* ENGINE_RESTRICT r_pX = std::assume_aligned<32>(pX.data());
-    //         float* ENGINE_RESTRICT r_pY = std::assume_aligned<32>(pY.data());
-    //         float* ENGINE_RESTRICT r_pZ = std::assume_aligned<32>(pZ.data());
+            // By proving these pointers don't overlap, the compiler unrolls these loops flawlessly
+            float* ENGINE_RESTRICT r_pX = std::assume_aligned<32>(pX.data());
+            float* ENGINE_RESTRICT r_pY = std::assume_aligned<32>(pY.data());
+            float* ENGINE_RESTRICT r_pZ = std::assume_aligned<32>(pZ.data());
             
-    //         float* ENGINE_RESTRICT r_temp_pX = std::assume_aligned<32>(temp_pX.data());
-    //         float* ENGINE_RESTRICT r_temp_pY = std::assume_aligned<32>(temp_pY.data());
-    //         float* ENGINE_RESTRICT r_temp_pZ = std::assume_aligned<32>(temp_pZ.data());
+            float* ENGINE_RESTRICT r_temp_pX = std::assume_aligned<32>(temp_pX.data());
+            float* ENGINE_RESTRICT r_temp_pY = std::assume_aligned<32>(temp_pY.data());
+            float* ENGINE_RESTRICT r_temp_pZ = std::assume_aligned<32>(temp_pZ.data());
 
-    //         float* ENGINE_RESTRICT r_vX = std::assume_aligned<32>(vX.data());
-    //         float* ENGINE_RESTRICT r_vY = std::assume_aligned<32>(vY.data());
-    //         float* ENGINE_RESTRICT r_vZ = std::assume_aligned<32>(vZ.data());
+            float* ENGINE_RESTRICT r_vX = std::assume_aligned<32>(vX.data());
+            float* ENGINE_RESTRICT r_vY = std::assume_aligned<32>(vY.data());
+            float* ENGINE_RESTRICT r_vZ = std::assume_aligned<32>(vZ.data());
 
-    //         float* ENGINE_RESTRICT r_temp_vX = std::assume_aligned<32>(temp_vX.data());
-    //         float* ENGINE_RESTRICT r_temp_vY = std::assume_aligned<32>(temp_vY.data());
-    //         float* ENGINE_RESTRICT r_temp_vZ = std::assume_aligned<32>(temp_vZ.data());
+            float* ENGINE_RESTRICT r_temp_vX = std::assume_aligned<32>(temp_vX.data());
+            float* ENGINE_RESTRICT r_temp_vY = std::assume_aligned<32>(temp_vY.data());
+            float* ENGINE_RESTRICT r_temp_vZ = std::assume_aligned<32>(temp_vZ.data());
 
-    //         uint32_t* ENGINE_RESTRICT r_temp_destIndices = std::assume_aligned<32>(temp_destIndices.data());
+            uint32_t* ENGINE_RESTRICT r_temp_destIndices = std::assume_aligned<32>(temp_destIndices.data());
 
-    //         // By separating these loops we stop thrashing the cache.
-    //         // Streams through pX linearly, looks up the destination, and writes. Then repeats this process for pY, pZ, etc..
-    //         for (uint32_t i = start; i < end; ++i) {
-    //             // uint32_t dest = temp_destIndices[i];
-    //             // temp_pX[dest] = pX[i]; // Move the data into the temporary SoA arrays
-    //             r_temp_pX[r_temp_destIndices[i]] = r_pX[i];
-    //         }
-    //         for (uint32_t i = start; i < end; ++i) {
-    //             // uint32_t dest = temp_destIndices[i];
-    //             // temp_pY[dest] = pY[i];
-    //             r_temp_pY[r_temp_destIndices[i]] = r_pY[i];
-    //         }
-    //         for (uint32_t i = start; i < end; ++i) {
-    //             // uint32_t dest = temp_destIndices[i];
-    //             // temp_pZ[dest] = pZ[i];
-    //             r_temp_pZ[r_temp_destIndices[i]] = r_pZ[i];
-    //         }
-    //         for (uint32_t i = start; i < end; ++i) {
-    //             // uint32_t dest = temp_destIndices[i];
-    //             // temp_vX[dest] = vX[i];
-    //             r_temp_vX[r_temp_destIndices[i]] = r_vX[i];
-    //         }
-    //         for (uint32_t i = start; i < end; ++i) {
-    //             // uint32_t dest = temp_destIndices[i];
-    //             // temp_vY[dest] = vY[i];
-    //             r_temp_vY[r_temp_destIndices[i]] = r_vY[i];
-    //         }
-    //         for (uint32_t i = start; i < end; ++i) {
-    //             // uint32_t dest = temp_destIndices[i];
-    //             // temp_vZ[dest] = vZ[i];
-    //             r_temp_vZ[r_temp_destIndices[i]] = r_vZ[i];
-    //         }
-    //     });
+            // By separating these loops we stop thrashing the cache.
+            // Streams through pX linearly, looks up the destination, and writes. Then repeats this process for pY, pZ, etc..
+            for (uint32_t i = start; i < end; ++i) {
+                // uint32_t dest = temp_destIndices[i];
+                // temp_pX[dest] = pX[i]; // Move the data into the temporary SoA arrays
+                r_temp_pX[r_temp_destIndices[i]] = r_pX[i];
+            }
+            for (uint32_t i = start; i < end; ++i) {
+                // uint32_t dest = temp_destIndices[i];
+                // temp_pY[dest] = pY[i];
+                r_temp_pY[r_temp_destIndices[i]] = r_pY[i];
+            }
+            for (uint32_t i = start; i < end; ++i) {
+                // uint32_t dest = temp_destIndices[i];
+                // temp_pZ[dest] = pZ[i];
+                r_temp_pZ[r_temp_destIndices[i]] = r_pZ[i];
+            }
+            for (uint32_t i = start; i < end; ++i) {
+                // uint32_t dest = temp_destIndices[i];
+                // temp_vX[dest] = vX[i];
+                r_temp_vX[r_temp_destIndices[i]] = r_vX[i];
+            }
+            for (uint32_t i = start; i < end; ++i) {
+                // uint32_t dest = temp_destIndices[i];
+                // temp_vY[dest] = vY[i];
+                r_temp_vY[r_temp_destIndices[i]] = r_vY[i];
+            }
+            for (uint32_t i = start; i < end; ++i) {
+                // uint32_t dest = temp_destIndices[i];
+                // temp_vZ[dest] = vZ[i];
+                r_temp_vZ[r_temp_destIndices[i]] = r_vZ[i];
+            }
+        });
 
-    //     // ==========================================
-    //     // PHASE 4: POINTER SWAP
-    //     // ==========================================
+        // ==========================================
+        // PHASE 4: POINTER SWAP
+        // ==========================================
 
-    //     // std::vector::swap does NOT copy data. It merely swaps the internal memory pointers.
-    //     // This is a wildly fast O(1) operation.
-    //     // pX.swap(temp_pX);
-    //     // pY.swap(temp_pY);
-    //     // pZ.swap(temp_pZ);
-    //     // vX.swap(temp_vX);
-    //     // vY.swap(temp_vY);
-    //     // vZ.swap(temp_vZ);
-    //     // particleCellIndices.swap(temp_cellIndices);
+        // std::vector::swap does NOT copy data. It merely swaps the internal memory pointers.
+        // This is a wildly fast O(1) operation.
+        // pX.swap(temp_pX);
+        // pY.swap(temp_pY);
+        // pZ.swap(temp_pZ);
+        // vX.swap(temp_vX);
+        // vY.swap(temp_vY);
+        // vZ.swap(temp_vZ);
+        // particleCellIndices.swap(temp_cellIndices);
 
-    //     // std::swap flips the memory addresses the spans are looking at in O(1) time.
-    //     std::swap(pX, temp_pX);
-    //     std::swap(pY, temp_pY);
-    //     std::swap(pZ, temp_pZ);
-    //     std::swap(vX, temp_vX);
-    //     std::swap(vY, temp_vY);
-    //     std::swap(vZ, temp_vZ);
-    //     std::swap(particleCellIndices, temp_cellIndices);
-    // }
+        // std::swap flips the memory addresses the spans are looking at in O(1) time.
+        std::swap(pX, temp_pX);
+        std::swap(pY, temp_pY);
+        std::swap(pZ, temp_pZ);
+        std::swap(vX, temp_vX);
+        std::swap(vY, temp_vY);
+        std::swap(vZ, temp_vZ);
+        std::swap(particleCellIndices, temp_cellIndices);
+    }
 
     // --- AVX2 SPATIAL HASH COLLISION SOLVER ---
     FORCE_INLINE void solveCollisions(int activeCount) {
