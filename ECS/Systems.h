@@ -3,7 +3,7 @@
 #include "EntityComponentSystem.h"
 #include "../PhysicsSystem.h"
 #include "../SIMD/SIMDVectorMath.h"
-#include "../JobSystem.h"
+#include "../FiberJobSystem/JobSystem.h"
 
 #if defined(_MSC_VER)
     #define RESTRICT __restrict
