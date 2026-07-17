@@ -2395,6 +2395,35 @@ namespace Engine::ISAArch {
             return simd_mask(Traits::mask_and(m_mask, b.template cast_to<T>().m_mask));
         }
 
+        // --- SCALAR LANE ACCESS ---
+        // Dynamically evaluates an individual lane's boolean state
+        FORCE_INLINE bool operator[](size_t index) const {
+            // Depending on the hardware ABI, the mask could be an integer (AVX512)
+            // or a full SIMD vector (AVX2/NEON/SSE). We use the popcount or movemask
+            // feature to extract the bitmask into a scalar integer safely.
+            
+            if constexpr (std::is_integral_v<typename Traits::mask_type>) {
+                // AVX-512 path: The mask is already a native integer bitfield
+                return (m_mask & (1ull << index)) != 0;
+            } else {
+                // AVX2 / SSE / NEON path: We must use the trait's mask evaluation.
+                // We extract the underlying bits to a standard integer.
+                // Note: Not all traits define an easy extraction, but we can do a scalar array cast.
+                using scalar_type = std::conditional_t<
+                    std::is_same_v<T, double> || std::is_same_v<T, uint64_t> || std::is_same_v<T, int64_t>, 
+                    uint64_t, 
+                    uint32_t
+                >;
+                
+                // Read the specific lane's bits. If the top bit is 1, the lane is true.
+                const scalar_type* raw_mask = reinterpret_cast<const scalar_type*>(&m_mask);
+                
+                // Mask lanes are traditionally all 1s (0xFFFFFFFF) or all 0s (0x0).
+                // If it is non-zero, the lane is evaluated as true.
+                return raw_mask[index] != 0;
+            }
+        }
+
         template <typename U>
         inline simd_mask operator||(const simd_mask<U, Abi>& b) const {
             return simd_mask(Traits::mask_or(m_mask, b.template cast_to<T>().m_mask));
