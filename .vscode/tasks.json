@@ -92,7 +92,7 @@
                 "${workspaceFolder}\\thirdparty\\imgui-master\\backends\\imgui_impl_glfw.cpp",
                 "${workspaceFolder}\\thirdparty\\imgui-master\\backends\\imgui_impl_opengl3.cpp",
                 "${workspaceFolder}\\thirdparty\\glad\\src\\gl.c",
-                "${workspaceFolder}\\FiberContext.obj",
+                "${workspaceFolder}\\FiberJobSystem\\FiberContext_Win64.obj",
 
                 //--- 3. LINKER SETTINGS (Connecting the .lib files) ---
                 "/link",
@@ -154,7 +154,7 @@
                 "${workspaceFolder}\\thirdparty\\imgui-master\\backends\\imgui_impl_glfw.cpp",
                 "${workspaceFolder}\\thirdparty\\imgui-master\\backends\\imgui_impl_opengl3.cpp",
                 "${workspaceFolder}\\thirdparty\\glad\\src\\gl.c",
-                "${workspaceFolder}\\FiberContext.obj",
+                "${workspaceFolder}\\FiberJobSystem\\FiberContext_Win64.obj",
 
                 
                 "/link",
