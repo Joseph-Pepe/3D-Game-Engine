@@ -24,12 +24,6 @@ This engine is built with a strict separation of concerns, focusing on multi-cor
     * **Work-Stealing Queue:** A 64-bit lock-free Chase-Lev deque immune to the ABA problem.
     * **Fiber Context Switching:** Custom assembly implementations for Windows x64 (MASM), POSIX x64 (System V AMD64 ABI), and ARM64 (AAPCS64) for ultra-fast (~3ns) context swaps.
 
-### Modern Render Hardware Abstraction Layer (Phase 2 - Upcoming)
-
-* **Multi-Threaded Command Generation:** Worker threads will generate binary packets of GPU instructions in parallel.
-* **Pipeline State Objects (PSOs):** Asynchronous hashing and caching of shader bytecode and rasterizer states.
-* **Bindless Descriptor Heaps:** Global memory arrays holding up to 1,000,000 textures, eliminating CPU binding overhead.
-
 ## Building the Engine
 
 This project uses CMake and vcpkg to ensure a frictionless, cross-platform build process.
