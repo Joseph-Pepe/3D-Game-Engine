@@ -1880,13 +1880,15 @@ namespace Engine::ISAArch {
                         return __builtin_shufflevector(a, a, i0, i1, i2, i3);
                     #else
                         // Fallback for GCC/MSVC on ARM
-                        // MSVC will aggressively fold this into a single instruction.
-                        register_type res = vdupq_n_f32(0.0f); 
-                        res = vsetq_lane_f32(vgetq_lane_f32(a, i0), res, 0);
-                        res = vsetq_lane_f32(vgetq_lane_f32(a, i1), res, 1);
-                        res = vsetq_lane_f32(vgetq_lane_f32(a, i2), res, 2);
-                        res = vsetq_lane_f32(vgetq_lane_f32(a, i3), res, 3);
-                        return res;
+                        // Zero-cost static mask generation for NEON Table Lookup
+                        alignas(16) static constexpr uint8_t mask_data[16] = {
+                            i0*4, i0*4+1, i0*4+2, i0*4+3,
+                            i1*4, i1*4+1, i1*4+2, i1*4+3,
+                            i2*4, i2*4+1, i2*4+2, i2*4+3,
+                            i3*4, i3*4+1, i3*4+2, i3*4+3
+                        };
+                        uint8x16_t tbl_mask = vld1q_u8(mask_data);
+                        return vreinterpretq_f32_u8(vqtbl1q_u8(vreinterpretq_u8_f32(a), tbl_mask));
                     #endif
                 }
 
