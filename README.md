@@ -24,6 +24,13 @@ This engine is built with a strict separation of concerns, focusing on multi-cor
     * **Work-Stealing Queue:** A 64-bit lock-free Chase-Lev deque immune to the ABA problem.
     * **Fiber Context Switching:** Custom assembly implementations for Windows x64 (MASM), POSIX x64 (System V AMD64 ABI), and ARM64 (AAPCS64) for ultra-fast (~3ns) context swaps.
 
+
+`SIMDCustomWrapper.h:` WideBatch (SOA) and FixedBatch4 (AOS) types will be used constantly instead of standard floats or math libraries.
+
+`Memory.h:` Review LocalLinearArena and ConcurrentPoolAllocator. Note: Standard new and delete are strictly forbidden in gameplay loops.
+
+`JobSystem.h:` DispatchAsync is used to fan out work to the CPU cores using C++20 coroutines, and YieldFiber handles deep context switching.
+
 ---
 
 ## Building the Engine 
