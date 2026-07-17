@@ -49,6 +49,6 @@ We provide master build scripts that automatically detect and download the vcpkg
 **Windows:**
 Open your command prompt, clone the repository, and run the batch script:
 ```cmd
-git clone [https://github.com/your-studio/aaa-engine.git](https://github.com/your-studio/aaa-engine.git)
-cd aaa-engine
-.\build.bat
+> git clone [https://github.com/your-studio/aaa-engine.git](https://github.com/your-studio/aaa-engine.git)
+> cd aaa-engine
+aaa-engine > .\build.bat
