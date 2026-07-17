@@ -56,9 +56,11 @@ add_executable(AAAEngine
 # CMake completely analyzes the code graph, precompiles files (.ifc/.pcm) 
 # and links dependencies in absolute topological order automatically.
 
+# these are the newly created modules
 target_sources(AAAEngine PUBLIC
   FILE_SET cxx_modules TYPE CXX_MODULES FILES
-    "SIMD/SIMDCustomWrapper.cppm"
+    "SIMD/SIMDCustomWrapper.cppm", 
+    "SIMD/SIMDVectorMath.cppm", 
 )
 
 # ==============================================================================
