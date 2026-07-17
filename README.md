@@ -39,8 +39,6 @@ Ensure your local workstation has the required core build tools installed.
 * **Build System:** CMake (v3.28 or newer).
 * **Compilers:**
   * **Windows:** Visual Studio 2022 (with the "Desktop development with C++" workload installed).
-  * **Linux:** GCC 13+ or Clang 17+.
-  * **macOS:** Xcode Command Line Tools.
 
 ### 2. Compilation (One-Click Setup)
 
