@@ -3,14 +3,34 @@
         {
             "label": "Assemble FiberContext",
             "type": "shell",
-            "command": "ml64.exe",
-            "args": [
-                "/c",
-                "/Cx",
-                "/Fo", "${workspaceFolder}\\FiberContext.obj",
-                "${workspaceFolder}\\FiberContext.asm"
-            ],
-            "problemMatcher": ["$msCompile"],
+            "windows": {
+                "command": "ml64.exe",
+                "args": [
+                    "/c",
+                    "/Cx",
+                    "/Fo", "${workspaceFolder}\\FiberJobSystem\\FiberContext_Win64.obj",
+                    "${workspaceFolder}\\FiberJobSystem\\FiberContext_Win64.asm"
+                ],
+                "problemMatcher": ["$msCompile"]
+            },
+            "linux": {
+                "command": "gcc",
+                "args": [
+                    "-c",
+                    "${workspaceFolder}/FiberJobSystem/FiberContext_POSIX64.S",
+                    "-o", "${workspaceFolder}/FiberJobSystem/FiberContext_POSIX64.o"
+                ],
+                "problemMatcher": ["$gcc"]
+            },
+            "osx": {
+                "command": "clang",
+                "args": [
+                    "-c",
+                    "${workspaceFolder}/FiberJobSystem/FiberContext_ARM64.S",
+                    "-o", "${workspaceFolder}/FiberJobSystem/FiberContext_ARM64.o"
+                ],
+                "problemMatcher": ["$gcc"]
+            },
             "group": "build"
         },
         {
