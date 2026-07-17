@@ -28,18 +28,6 @@ This engine is built with a strict separation of concerns, focusing on multi-cor
 
 This project uses CMake and vcpkg to ensure a frictionless, cross-platform build process.
 
-### Prerequisites
-
-You must have `vcpkg` installed on your machine.
-
-1.  Clone vcpkg:
-    ```bash
-    git clone [https://github.com/microsoft/vcpkg.git](https://github.com/microsoft/vcpkg.git)
-    ```
-2.  Bootstrap it:
-    * **Windows:** `.\vcpkg\bootstrap-vcpkg.bat`
-    * **Linux/macOS:** `./vcpkg/bootstrap-vcpkg.sh`
-
 ### Compilation (One-Click Setup)
 
 We provide master build scripts that automatically detect vcpkg, download dependencies (GLFW, ImGui, GLAD), configure CMake, and compile the engine optimized for your hardware.
