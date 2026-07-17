@@ -215,6 +215,7 @@ namespace Engine::GameEngine {
     // Direct, compile-time linked subsystems update! SIMDVector3D ensures the memory layout is baked into the binary at compile-time (e.g., cannot pass a 32-bytes wide (AVX2) SIMDVector3D into SSE4.1 (16-bytes wide)).
     FORCE_INLINE void ExecuteGameEngineBackend(std::span<Engine::Physics::SIMDVector3D> pos, 
                                              std::span<Engine::Physics::SIMDVector3D> vel, 
+                                            // std::span<Engine::Physics::SIMDVector3D> accVel,
                                              size_t count, float deltaTime, float gravityVal, 
                                              float mouseX, float mouseY, bool isMouseDown, 
                                              const Engine::Physics::ParticleSystem::ParticleHash* sortedHashes) {
