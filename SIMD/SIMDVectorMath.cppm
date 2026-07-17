@@ -1,6 +1,11 @@
-#pragma once
+// ==========================================================================
+// 1. THE GLOBAL MODULE FRAGMENT
+// ==========================================================================
+module;
 
-#include "SIMD/SIMDCustomWrapper.h"
+// #pragma once
+
+// #include "SIMD/SIMDCustomWrapper.h"
 #include "../FiberJobSystem/JobSystem.h"
 #include "../Memory.h"
 #include "../STLContainers/SmallVector.h"
@@ -25,6 +30,8 @@
 #include <new>         // C++17/26 hardware interference sizes
 #include <memory>      // C++20/26 std::assume_aligned
 
+import Engine.SIMD;
+
 // ======================================================================
 // TRINITY SIMD PERFORMANCE 
 // ======================================================================
@@ -46,10 +53,24 @@
     #endif
 #endif
 
+#if defined(_MSC_VER)
+    #define RESTRICT __restrict
+#else
+    #define RESTRICT __restrict__
+#endif
+
 // C++26 linear algebra (compiler dependent availability)
 #if __has_include(<linear_algebra>)
     #include <linear_algebra>
 #endif
+
+// ==========================================================================
+// 2. THE MODULE DECLARATION
+// ==========================================================================
+export module Engine.SIMD.VectorMath;
+
+// 3. IMPORT YOUR C++26 SIMD MODULE!
+import Engine.SIMD;
 
 // ======================================================================
 // C++26: NATIVE SIMD ARCHITECTURE for MSVC build v14.51 and newer.
@@ -62,7 +83,7 @@
     - Decouples the engine from Intel by changing the compiler target flag in CMake.
     - Engine::ISAArch::simd generated assembly is identical to manual intrinsics (1:1 match). You lose zero performance.
 */
-namespace Engine::ISAArch {
+export namespace Engine::ISAArch {
 
     // ======================================================================
     // HARDWARE PROBING
@@ -473,7 +494,7 @@ namespace Engine::ISAArch {
     };
 }
 
-namespace Engine::Physics {
+export namespace Engine::Physics {
     // --- 1. MATH LAYER (Custom Portable SIMD) --- 
     // Mapped directly to your custom Tier 1 SOA architecture (i.e., let the compiler decide the widest register available on the target hardware based on the silicon it detects at compile time).
     using NativeFloatSIMDBatch = Engine::ISAArch::simd<float, Engine::ISAArch::simd_abi::native<float>>;
