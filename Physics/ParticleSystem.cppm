@@ -1,14 +1,28 @@
-#pragma once
+// ==========================================================================
+// 1. THE GLOBAL MODULE FRAGMENT
+// Must contain ALL legacy C-headers and macros. Modules cannot import these.
+// ==========================================================================
+module;
+
+// ==========================================================================
+// 2. THE MODULE DECLARATION & C++26 IMPORTS
+// ==========================================================================
+
+// #pragma once
 #include <span>
 #include <algorithm> // For std::fill
 #include <vector>
 
 #include "EngineSettings.h"
-#include "SIMD/SIMDCustomWrapper.h" 
-#include "SIMD/SIMDVectorMath.h"
+
 #include "Memory.h"  // For your Arena allocator
 #include "MortonCode.h"
 #include "Math.h"
+
+import Engine.SIMD;             // #include "SIMD/SIMDCustomWrapper.cppm" 
+import Engine.SIMD.VectorMath;  // #include "SIMD/SIMDVectorMath.cppm"
+
+export module Engine.Physics.ParticleSystem;
 
 // =============================================================
 // ARRAY OF POINTERS (DESTROYS PERFORMANCE)
@@ -25,7 +39,7 @@
 // =============================================================
 // PARTICLE SYSTEM & PHYSICS ENGINE MODULE (AoSoA)
 // =============================================================
-namespace Engine::Physics {
+export namespace Engine::Physics {
 
     // A pure lightweight data container that stores data and manages memory arenas.
     struct ParticleSystem {
