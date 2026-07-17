@@ -1,10 +1,8 @@
-#pragma once
-#include <concepts>
-#include <cstdint>
-#include <type_traits>
-#include <format>
-#include <utility>
-#include <print> // std::println
+// ==========================================================================
+// 1. THE GLOBAL MODULE FRAGMENT
+// Must contain ALL legacy C-headers and macros. Modules cannot import these.
+// ==========================================================================
+module;
 
 // ==================================================
 // INSTRUCTION SET ARCHITECTURES (ISA)
@@ -24,25 +22,25 @@
     #include <immintrin.h> // SIMD intrinsics (AVX, SSE (128-bit), MMX (64-bit))
 
     // AVX512: Next-Gen (AVX512 silicon intrinsically includes AVX2 and SSE4.1)
-    #define ENGINE_ARCH_AVX512 1
+    #define INTERNAL_ARCH_AVX512 1
 
     // AVX512 implicitly guarantees AVX2 and SSE4.1 support 
-    #define ENGINE_ARCH_AVX2 1
-    #define ENGINE_ARCH_SSE41 1
-#elif defined(__AVX2__)
+    #define INTERNAL_ARCH_AVX2 1
+    #define INTERNAL_ARCH_SSE41 1
+#elif defined(__AVX2__) || defined(_MSC_VER) // MSVC enables AVX2 intrinsics via /arch:AVX2
     #include <immintrin.h>
 
     // AVX2: Xbox Series X/S, PS5, Modern PC
-    #define ENGINE_ARCH_AVX2 1
+    #define INTERNAL_ARCH_AVX2 1
 
     // AVX2 implicitly guarantees SSE4.1 support
-    #define ENGINE_ARCH_SSE41 1
+    #define INTERNAL_ARCH_SSE41 1
 #elif defined(__SSE4_1__)
     // SSE4.1: Legacy PC Fallback
     #include <immintrin.h> // immintrin handles all x86 SIMD headers
 
     // SSE 4.1 hardware (pre-2012 CPU) does not support Float16 compression, it belongs to the FC16 hardware extension.
-    #define ENGINE_ARCH_SSE41 1
+    #define INTERNAL_ARCH_SSE41 1
 
     // Enforces [SSE4.1 + FC16 extension]
     #if !defined(__F16C__) && (defined(__clang__) || defined(__GNUC__))
@@ -52,16 +50,16 @@
 #elif defined(__aarch64__) || defined(_M_ARM64)
     // ARM NEON: Apple Silicon, Switch 2, Android, Windows on ARM
     #include <arm_neon.h>
-    #define ENGINE_ARCH_NEON 1
+    #define INTERNAL_ARCH_NEON 1
+
+    // --- HARDWARE EXTENSIONS ---
+    #if defined(__ARM_FEATURE_SVE)   
+        // Apple Silicon (M4+)
+        #include <arm_sve.h>
+        #define INTERNAL_ARCH_SVE 1
+    #endif
 #else
     #error "Engine Compiler Error: Unsupported CPU architecture. AVX512, AVX2, NEON, or SSE4.1 instruction sets are strictly required."
-#endif
-
-// --- HARDWARE EXTENSIONS ---
-#if defined(__ARM_FEATURE_SVE)   
-    // Apple Silicon (M4+)
-    #include <arm_sve.h>
-    #define ENGINE_ARCH_SVE 1
 #endif
 
 // ===================================================
@@ -72,6 +70,8 @@
     - Vulkan/DirectX require 16-byte alignment for vec4.
     - Prevents the compiler from padding our structs differently on a Nintendo Switch vs PC. 
 */
+
+// Internal Macros (These will NOT leak to the rest of the other files)
 #define CACHE_CHUNK_ALIGN_16 alignas(16)
 #define CACHE_CHUNK_ALIGN_32 alignas(32)
 #define CACHE_CHUNK_ALIGN_64 alignas(64)
@@ -84,13 +84,13 @@
     - We use 'ivdep' to guarantee no memory aliasing, which gives the MSVC optimizer the green light to aggressively unroll it for us.
 */
 #if defined(_MSC_VER) && !defined(__clang__)
-    #define ENGINE_UNROLL_4 __pragma(loop(ivdep))
+    #define INTERNAL_UNROLL_4 __pragma(loop(ivdep))
 #elif defined(__clang__)
-    #define ENGINE_UNROLL_4 _Pragma("unroll 4")
+    #define INTERNAL_UNROLL_4 _Pragma("unroll 4")
 #elif defined(__GNUC__)
-    #define ENGINE_UNROLL_4 _Pragma("GCC unroll 4")
+    #define INTERNAL_UNROLL_4 _Pragma("GCC unroll 4")
 #else
-    #define ENGINE_UNROLL_4 // Fallback to nothing if unsupported
+    #define INTERNAL_UNROLL_4 // Fallback to nothing if unsupported
 #endif
 
 // ==================================================
@@ -123,20 +123,74 @@
     #define RESTRICT // Fallback to nothing if unsupported
 #endif
 
-void LogHardwareArchitecture() {
-    #if defined(ENGINE_ARCH_AVX512)
-        std::println("[AVX-512]: Supercomputer / Next-Gen (x86_64) architecture detected.");
-    #elif defined(ENGINE_ARCH_AVX2)
-        std::println("[AVX2]: Intel/AMD (x86_64) based architecture detected.");
-    #elif defined(ENGINE_ARCH_NEON)
-        std::println("[ARM64]: ARM based architecture detected.");
-    #elif defined(ENGINE_ARCH_SSE41)
-        std::println("[SSE4.1]: Legacy based architecture detected.");
+// ==========================================================================
+// 2. THE MODULE DECLARATION & C++26 IMPORTS
+// ==========================================================================
+
+#pragma once
+#include <concepts>
+#include <cstdint>
+#include <type_traits>
+#include <format>
+#include <bit>
+#include <utility>
+#include <print> // std::printlnModules need .h files?
+
+
+export module Engine.SIMD;
+
+// import std; // C++23/26 replaces all STL includes (<concepts>, <vector>, etc.)
+
+// ==========================================================================
+// 3. EXPORTED ENGINE ARCHITECTURE FLAGS
+// ==========================================================================
+export namespace Engine::Hardware {
+
+    #ifdef INTERNAL_ARCH_AVX512 
+        constexpr bool HasAVX512 =  true; 
+    #else  
+        constexpr bool HasAVX512 =  false; 
     #endif
+
+    #ifdef INTERNAL_ARCH_AVX2
+        constexpr bool HasAVX2 = true;
+    #else 
+        constexpr bool HasAVX2 = false;
+    #endif
+
+    #ifdef INTERNAL_ARCH_SSE41
+        constexpr bool HasSSE41 = true;
+    #else
+        constexpr bool HasSSE41 = false;
+    #endif
+
+    #ifdef INTERNAL_ARCH_SVE
+        constexpr bool HasSVE = true;
+    #else
+        constexpr bool HasSVE = false;
+    #endif
+
+    #ifdef INTERNAL_ARCH_NEON
+        constexpr bool HasNEON = true;
+    #else   
+        constexpr bool HasNEON = false;
+    #endif
+    
+    void LogHardwareArchitecture() {
+        if constexpr (HasAVX512) std::println("[AVX-512]: Supercomputer / Next-Gen (x86_64) architecture detected.");
+        else if constexpr (HasAVX2) std::println("[AVX2]: Intel/AMD (x86_64) based architecture detected.");
+        else if constexpr (HasSVE) std::println("[ARM-SVE]: ARM SVE based architecture detected.");
+        else if constexpr (HasNEON) std::println("[ARM64]: ARM based architecture detected.");
+        else if constexpr (HasSSE41) std::println("[SSE4.1]: Legacy based architecture detected.");
+    }
 }
 
+// ==========================================================================
+// 4. EXPORTED MATH & SIMD API
+// ==========================================================================
+
 // Scalar Domain (1D Scalar Math): strictly for operations that only operate on scalar floats.
-namespace Engine::Math::ScalarFunctions {
+export namespace Engine::Math::ScalarFunctions {
     // ======================================================================
     // SCALAR HARDWARE SQUARE ROOT (FPU)
     // ======================================================================
@@ -146,7 +200,7 @@ namespace Engine::Math::ScalarFunctions {
         - Exactly as accurate as std::sqrt, but significantly faster due to zero branching (i.e., std::sqrt replacement).
     */
     FORCE_INLINE float sqrt(float x) {
-        #ifdef MATH_ISA_ARM
+        #ifdef INTERNAL_ARCH_NEON
             // --- ARM APPLE SILICON / MOBILE (ARM64) ---
             #if defined(__clang__) || defined(__GNUC__)
                 // Compiles directly down to a single hardware 'fsqrt' instruction.
@@ -174,7 +228,7 @@ namespace Engine::Math::ScalarFunctions {
         - Exactly as accurate as std::floor, but compiles down to a single instruction.
     */
     FORCE_INLINE float floor(float x) {
-        #ifdef MATH_ISA_ARM
+        #ifdef INTERNAL_ARCH_NEON
             // --- ARM APPLE SILICON / MOBILE (ARM64) ---
             #if defined(__clang__) || defined(__GNUC__)
                 // Compiles directly down to a single hardware 'frintm' instruction.
@@ -198,7 +252,7 @@ namespace Engine::Math::ScalarFunctions {
         - Exactly as accurate as std::ceil, but compiles to a single instruction.
     */
     FORCE_INLINE float ceil(float x) {
-        #ifdef MATH_ISA_ARM
+        #ifdef INTERNAL_ARCH_NEON
             // --- ARM APPLE SILICON / MOBILE (ARM64) ---
             #if defined(__clang__) || defined(__GNUC__)
                 // Compiles directly down to a single hardware 'frintp' instruction.
@@ -223,7 +277,7 @@ namespace Engine::Math::ScalarFunctions {
         - Significantly faster than 1.0f / std::sqrt(x).
     */
     FORCE_INLINE float rsqrt(float x) {
-        #ifdef MATH_ISA_ARM
+        #ifdef INTERNAL_ARCH_NEON
             // --- ARM APPLE SILICON / MOBILE (ARM64) ---
             // ARM has dedicated scalar instructions for this!
             // 1. Get the hardware approximation
@@ -259,7 +313,7 @@ namespace Engine::Math::ScalarFunctions {
         - Prevents division pipeline stalls.
     */
     FORCE_INLINE float rcp(float x) {
-        #ifdef MATH_ISA_ARM
+        #ifdef INTERNAL_ARCH_NEON
             // --- ARM APPLE SILICON / MOBILE (ARM64) ---
             // 1. Hardware approximation
             float approx = vrecpe_f32(x);
@@ -315,13 +369,13 @@ namespace Engine::ISAArch {
 
         // C++26 'native' alias: Automatically deduces the best hardware vector length at compile time based on your compiler flags (e.g., /arch:AVX2).
         template <typename T>
-        #if ENGINE_ARCH_AVX512
+        #ifdef INTERNAL_ARCH_AVX512
             using native = avx512;   // Supercomputers (512-bit (16 floats))
-        #elif ENGINE_ARCH_AVX2
+        #elif defined(INTERNAL_ARCH_AVX2)
             using native = avx2;     // Xbox/PS5/PC (256-bit (8 floats))
-        #elif ENGINE_ARCH_NEON
+        #elif defined(INTERNAL_ARCH_NEON)
             using native = neon;     // Nintendo Switch 2 / Apple Silicon (128-bit (4 floats))
-        #elif ENGINE_ARCH_SSE41
+        #elif defined(INTERNAL_ARCH_SSE41)
             using native = sse41;    // Legacy PC Fallback (128-bit (4 floats))
         #else
             using native = scalar;   // Fallback
@@ -335,7 +389,7 @@ namespace Engine::ISAArch {
         // Primary template (Undefined)
         template <typename T, typename Abi> struct simd_traits;
 
-        #if ENGINE_ARCH_AVX512
+        #if INTERNAL_ARCH_AVX512
             // ========================================================
             // --- AVX-512 BACKEND (16-Wide Processing) ---
             // ========================================================
@@ -720,7 +774,7 @@ namespace Engine::ISAArch {
             };
         #endif
 
-        #if ENGINE_ARCH_AVX2 || ENGINE_ARCH_SSE41
+        #if INTERNAL_ARCH_AVX2 || INTERNAL_ARCH_SSE41
             // ========================================================
             // --- SSE4.1 BACKEND (128-bit x64 Base) ---
             // ========================================================
@@ -979,11 +1033,11 @@ namespace Engine::ISAArch {
                 
                 // Relational Unsigned Limits (XOR highest bit 0x80 to shift into signed range for the hardware comparator)
                 static inline mask_type cmp_gt(register_type a, register_type b) { 
-                    __m128i sign_flip = _mm_set1_epi8(char(0x80));
+                    __m128i sign_flip = _mm_set1_epi8(std::bit_cast<int8_t>(uint8_t{0x80}));
                     return _mm_cmpgt_epi8(_mm_xor_si128(a, sign_flip), _mm_xor_si128(b, sign_flip)); 
                 }
                 static inline mask_type cmp_lt(register_type a, register_type b) { 
-                    __m128i sign_flip = _mm_set1_epi8(char(0x80));
+                    __m128i sign_flip = _mm_set1_epi8(std::bit_cast<int8_t>(uint8_t{0x80}));
                     return _mm_cmpgt_epi8(_mm_xor_si128(b, sign_flip), _mm_xor_si128(a, sign_flip)); 
                 }
                 static inline mask_type cmp_eq(register_type a, register_type b) { return _mm_cmpeq_epi8(a, b); }
@@ -1086,11 +1140,11 @@ namespace Engine::ISAArch {
                 
                 // Relational [XOR the highest bit (0x80000000) of both vectors]
                 static inline mask_type cmp_gt(register_type a, register_type b) { 
-                    __m128i sign_flip = _mm_set1_epi32(0x80000000);
+                    __m128i sign_flip = _mm_set1_epi32(std::bit_cast<int32_t>(0x80000000U));
                     return _mm_cmpgt_epi32(_mm_xor_si128(a, sign_flip), _mm_xor_si128(b, sign_flip)); 
                 }
                 static inline mask_type cmp_lt(register_type a, register_type b) { 
-                    __m128i sign_flip = _mm_set1_epi32(0x80000000);
+                    __m128i sign_flip = _mm_set1_epi32(std::bit_cast<int32_t>(0x80000000U));
                     return _mm_cmpgt_epi32(_mm_xor_si128(b, sign_flip), _mm_xor_si128(a, sign_flip)); 
                 }
                 static inline mask_type cmp_eq(register_type a, register_type b) { return _mm_cmpeq_epi32(a, b); }
@@ -1194,9 +1248,9 @@ namespace Engine::ISAArch {
                     return _mm_set_epi32(base_addr[_mm_extract_epi32(indices, 3)], base_addr[_mm_extract_epi32(indices, 2)], base_addr[_mm_extract_epi32(indices, 1)], base_addr[_mm_extract_epi32(indices, 0)]);
                 }
             };
-        #endif // ENGINE_ARCH_AVX2 || ENGINE_ARCH_SSE41
+        #endif // INTERNAL_ARCH_AVX2 || INTERNAL_ARCH_SSE41
 
-        #if ENGINE_ARCH_AVX2
+        #if INTERNAL_ARCH_AVX2
             // ========================================================
             // --- AVX2 BACKEND (Xbox Series X, PS5, PC) ---
             // ========================================================
@@ -1523,11 +1577,11 @@ namespace Engine::ISAArch {
                 
                 // Relational Unsigned Limits
                 static inline mask_type cmp_gt(register_type a, register_type b) { 
-                    __m256i sign_flip = _mm256_set1_epi8(static_cast<char>(0x80));
+                    __m256i sign_flip = _mm256_set1_epi8(std::bit_cast<int8_t>(uint8_t{0x80}));
                     return _mm256_cmpgt_epi8(_mm256_xor_si256(a, sign_flip), _mm256_xor_si256(b, sign_flip)); 
                 }
                 static inline mask_type cmp_lt(register_type a, register_type b) { 
-                    __m256i sign_flip = _mm256_set1_epi8(static_cast<char>(0x80));
+                    __m256i sign_flip = _mm256_set1_epi8(std::bit_cast<int8_t>(uint8_t{0x80}));
                     return _mm256_cmpgt_epi8(_mm256_xor_si256(b, sign_flip), _mm256_xor_si256(a, sign_flip)); 
                 }
                 static inline mask_type cmp_eq(register_type a, register_type b) { return _mm256_cmpeq_epi8(a, b); }
@@ -1545,7 +1599,7 @@ namespace Engine::ISAArch {
 
                 static inline bool mask_any(mask_type a) { return _mm256_movemask_epi8(a) != 0; }
                 // _mm256_movemask_epi8 extracts the top bit of all 32 bytes. If all are true, the result is 32 1s (0xFFFFFFFF)
-                static inline bool mask_all(mask_type a) { return _mm256_movemask_epi8(a) == (int)0xFFFFFFFF; }
+                static inline bool mask_all(mask_type a) { return _mm256_movemask_epi8(a) == std::bit_cast<int32_t>(0xFFFFFFFFU); }
             };
 
             // --- AVX2 INT16 TRAITS (16 Elements per Register) ---
@@ -1590,7 +1644,7 @@ namespace Engine::ISAArch {
                 static inline register_type blend(mask_type mask, register_type true_v, register_type false_v) { return _mm256_blendv_epi8(false_v, true_v, mask); }
 
                 static inline bool mask_any(mask_type a) { return _mm256_movemask_epi8(a) != 0; }
-                static inline bool mask_all(mask_type a) { return _mm256_movemask_epi8(a) == (int)0xFFFFFFFF; }
+                static inline bool mask_all(mask_type a) { return _mm256_movemask_epi8(a) == std::bit_cast<int32_t>(0xFFFFFFFFU); }
 
                 template <typename Target>
                 static inline __m256 cast_to(register_type a) { static_assert(sizeof(Target) == 0, "SIMD Mismatch: Cannot cast 16x16-bit to 8x32-bit directly."); return _mm256_setzero_ps(); }
@@ -1629,11 +1683,11 @@ namespace Engine::ISAArch {
                 
                 // Relational (Unsigned Hardware Limits)
                 static inline mask_type cmp_gt(register_type a, register_type b) { 
-                    __m256i sign_flip = _mm256_set1_epi32(0x80000000);
+                    __m256i sign_flip = _mm256_set1_epi32(std::bit_cast<int32_t>(0x80000000U));
                     return _mm256_cmpgt_epi32(_mm256_xor_si256(a, sign_flip), _mm256_xor_si256(b, sign_flip)); 
                 }
                 static inline mask_type cmp_lt(register_type a, register_type b) { 
-                    __m256i sign_flip = _mm256_set1_epi32(0x80000000);
+                    __m256i sign_flip = _mm256_set1_epi32(std::bit_cast<int32_t>(0x80000000U));
                     return _mm256_cmpgt_epi32(_mm256_xor_si256(b, sign_flip), _mm256_xor_si256(a, sign_flip)); 
                 }
                 static inline mask_type cmp_eq(register_type a, register_type b) { return _mm256_cmpeq_epi32(a, b); }
@@ -1744,9 +1798,9 @@ namespace Engine::ISAArch {
                 static inline register_type shuffle(register_type a) { return _mm256_shuffle_epi32(a, _MM_SHUFFLE(i3, i2, i1, i0)); }
                 static inline register_type gather(const int32_t* base_addr, __m256i indices) { return _mm256_i32gather_epi32(reinterpret_cast<const int*>(base_addr), indices, 4); }
             };
-        #endif // ENGINE_ARCH_AVX2
+        #endif // INTERNAL_ARCH_AVX2
 
-        #if ENGINE_ARCH_NEON
+        #if INTERNAL_ARCH_NEON
             // ========================================================
             // --- NEON BACKEND (Nintendo Switch 2, Apple Silicon) ---
             // ========================================================
@@ -2236,13 +2290,13 @@ namespace Engine::ISAArch {
                 template <typename Target>
                 static inline float32x4_t cast_to(register_type a) { static_assert(sizeof(Target) == 0, "SIMD Mismatch: Cannot cast 8x16-bit to 4x32-bit directly."); return vdupq_n_f32(0.0f); }
             };
-        #endif // ENGINE_ARCH_NEON
+        #endif // INTERNAL_ARCH_NEON
 
         // ========================================================
         // --- SCALAR BACKEND (The Absolute Fallback) ---
         // ========================================================
         /*
-            - Used when vector hardware is unavailable or SIMD flag is disabled (ENGINE_ARCH_SCALAR).
+            - Used when vector hardware is unavailable or SIMD flag is disabled (INTERNAL_ARCH_SCALAR).
             - Ensures the exact same code will silently transition into standard scalar operations without compilation errors.
         */
         template <typename T> struct simd_traits<T, simd_abi::scalar> {
@@ -2325,10 +2379,10 @@ namespace Engine::ISAArch {
     // ==========================================
     // C++26 MASK FRONTEND
     // ==========================================
-    template <typename T, typename Abi = simd_abi::native<T>> class simd;
+    export template <typename T, typename Abi = simd_abi::native<T>> class simd;
 
     // C++26 strictly requires a separate mask type to safely handle SIMD conditionals
-    template <typename T, typename Abi = simd_abi::native<T>>
+    export template <typename T, typename Abi = simd_abi::native<T>>
     class simd_mask {
     private:
         using Traits = detail::simd_traits<T, Abi>;
@@ -2452,7 +2506,7 @@ namespace Engine::ISAArch {
     // ==========================================
     // C++26 SIMD FRONTEND
     // ==========================================
-    template <typename T, typename Abi>
+    export template <typename T, typename Abi>
     class simd {
     private:
         using Traits = detail::simd_traits<T, Abi>;
@@ -2832,7 +2886,7 @@ namespace Engine::ISAArch {
     // =========================================================
 
     // A lightweight proxy object that executes masked operations, overloads operators to perform a branchless hardware blend.
-    template <typename T, typename Abi>
+    export template <typename T, typename Abi>
     struct WhereExpression {
         const simd_mask<T, Abi>& mask;
         simd<T, Abi>& target; // Reference to the batch we are modifying
@@ -2866,13 +2920,13 @@ namespace Engine::ISAArch {
     };
 
     // The free function that mirrors std::simd::where
-    template <typename T, typename Abi>
+    export template <typename T, typename Abi>
     [[nodiscard]] FORCE_INLINE WhereExpression<T, Abi> where(const simd_mask<T, Abi>& mask, simd<T, Abi>& target) {
         return WhereExpression<T, Abi>{mask, target};
     }
 
     // The C++26 SIMD Casting.
-    template <typename ToType, typename FromType, typename Abi>
+    export template <typename ToType, typename FromType, typename Abi>
     inline simd<ToType, Abi> simd_cast(const simd<FromType, Abi>& from) {
         // Fetch the raw hardware cast from the traits, and explicitly construct the new SIMD type.
         // (Assuming from_data is accessed via a getter or friend declaration).
@@ -2886,16 +2940,16 @@ namespace Engine::ISAArch {
     // Maps to the widest available CPU register natively (e.g., 256-bit on AVX2, 128-bit on NEON).
     // Particle physics, Job Systems, Audio Processing, Culling loops.
     // WARNING: Do NOT use inside structs meant for network serialization or GPU buffers.
-    template <typename T>
+    export template <typename T>
     using WideBatch = simd<T, simd_abi::native<T>>;
     
     // Engine-wide typedefs for data processing
-    using WideFloat  = WideBatch<float>;          // High-throughput SOA physics and ECS iteration.
-    using WideDouble = WideBatch<double>;         // 64-bit Large World Coordinates (e.g., space simulator 10,000 asteroids orbit the sun at massive coordinates)
-    using WideInt16  = WideBatch<int16_t>;        // 16 lanes audio mixing (e.g., combine multiple sound effects into a master bus, mix 16 audio samples per clock cycle).
-    using WideInt32  = WideBatch<int32_t>;        // High-throughput SOA physics and ECS iteration.
-    using WideUInt8  = WideBatch<uint8_t>;        // 32 lanes voxel/color processing (e.g., image processing, post processing, particle color lifecycles, 8 RGBA pixels in a single clock cycle).
-    using WideUInt32 = WideBatch<uint32_t>;       
+    export using WideFloat  = WideBatch<float>;          // High-throughput SOA physics and ECS iteration.
+    export using WideDouble = WideBatch<double>;         // 64-bit Large World Coordinates (e.g., space simulator 10,000 asteroids orbit the sun at massive coordinates)
+    export using WideInt16  = WideBatch<int16_t>;        // 16 lanes audio mixing (e.g., combine multiple sound effects into a master bus, mix 16 audio samples per clock cycle).
+    export using WideInt32  = WideBatch<int32_t>;        // High-throughput SOA physics and ECS iteration.
+    export using WideUInt8  = WideBatch<uint8_t>;        // 32 lanes voxel/color processing (e.g., image processing, post processing, particle color lifecycles, 8 RGBA pixels in a single clock cycle).
+    export using WideUInt32 = WideBatch<uint32_t>;       
 
     // ========================================================
     // TIER 2: AOS (Array of Structs) - "The Geometric Standard"
@@ -2903,10 +2957,10 @@ namespace Engine::ISAArch {
     // Strictly locked to 128-bit (4 lanes) across ALL platforms.
     // On AVX2 systems, this deliberately steps down to SSE4.1 ABI.
     // Transform Matrices, Vectors, Quaternions, GPU Uniform Buffers.
-    template <typename T>
-    #if ENGINE_ARCH_NEON
+    export template <typename T>
+    #if INTERNAL_ARCH_NEON
         using FixedBatch4 = simd<T, simd_abi::neon>;
-    #elif ENGINE_ARCH_AVX512 || ENGINE_ARCH_AVX2 || ENGINE_ARCH_SSE41
+    #elif INTERNAL_ARCH_AVX512 || INTERNAL_ARCH_AVX2 || INTERNAL_ARCH_SSE41
         // ALL x86/x64 PC and Console platforms drop to SSE for 128-bit geometry
         using FixedBatch4 = simd<T, simd_abi::sse41>; 
     #else
@@ -2915,12 +2969,12 @@ namespace Engine::ISAArch {
     #endif
     
     // Engine-wide typedefs for geometry
-    using FixedFloat4  = FixedBatch4<float>;   // Guaranteed 16-byte aligned geometry/matrices for GPU uniform buffers.
-    using FixedDouble  = FixedBatch4<double>;
-    using FixedInt16_8 = FixedBatch4<int16_t>; // Note: A 128-bit 'Fixed' register holds EIGHT 16-bit values, not 4!
-    using FixedInt32   = FixedBatch4<int32_t>;
-    using FixedUInt8   = FixedBatch4<uint8_t>;
-    using FixedUInt32  = FixedBatch4<uint32_t>;
+    export using FixedFloat4  = FixedBatch4<float>;   // Guaranteed 16-byte aligned geometry/matrices for GPU uniform buffers.
+    export using FixedDouble  = FixedBatch4<double>;
+    export using FixedInt16_8 = FixedBatch4<int16_t>; // Note: A 128-bit 'Fixed' register holds EIGHT 16-bit values, not 4!
+    export using FixedInt32   = FixedBatch4<int32_t>;
+    export using FixedUInt8   = FixedBatch4<uint8_t>;
+    export using FixedUInt32  = FixedBatch4<uint32_t>;
 
     /*
         // 1. PERFECT GPU VEC4 (Guaranteed 16 Bytes on all consoles/PC)
