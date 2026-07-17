@@ -814,7 +814,7 @@ private:
     using IndexType   = std::conditional_t<ThreadSafe, std::atomic<size_t>, size_t>;
 
     // Align them to prevent false sharing.
-    alignas(ENGINE_CACHE_CHUNK_SIZE) NodePtrType m_freeListHead;  // Head of the linked list (only used for dead objects)
+    alignas(ENGINE_CACHE_CHUNK_SIZE) AtomicHeadType m_freeListHead;  // Head of the linked list (only used for dead objects)
     alignas(ENGINE_CACHE_CHUNK_SIZE) IndexType   m_bumpIndex;     // Tracks how many blocks we have allocated initially (The Lazy Bump Pointer)
 
 public:
