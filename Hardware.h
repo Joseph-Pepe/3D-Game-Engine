@@ -1,9 +1,11 @@
 #pragma once
 
 #include <print>
+#include <span>
 
 #include "SIMD/SIMDCustomWrapper.h" 
 #include "ParticleSystem.h"
+#include "JobSystem.h"
 
 // --- COMPILER INTRINSICS FOR CPUID (x86_64 ONLY) ---
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
@@ -14,6 +16,7 @@
     #else
         #define FORCE_INLINE inline __attribute__((always_inline))
         #include <x86intrin.h> // For GCC/Clang
+        #include <cpuid.h>     // Required for __cpuid and __cpuid_count
     #endif
     #define ENGINE_IS_X86 1
 #elif defined(__aarch64__) || defined(_M_ARM64) || defined(__ARM_NEON)
@@ -195,99 +198,168 @@ struct HardwareCapabilities {
 // Global Instance: C++17 INLINE Prevents linker crashes
 inline HardwareCapabilities g_Hardware = HardwareCapabilities::Detect();
 
-// ==================================================================================
-// DYNAMIC DISPATCH (RUNTIME HARDWARE ROUTING)
-// ==================================================================================
+// ===================================================
+// --- DYNAMIC DISPATCH (RUNTIME HARDWARE ROUTING) ---
+// ===================================================
 /*
     - Evaluates the global HardwareCapabilities generated at startup by Hardware.h.
     - Routes the execution path to the fastest available instruction set.
     - Prevents "Illegal Instruction" crashes on legacy CPUs while maximizing performance on modern ones.
-    - Threading and dispatching belongs strictly to the higher-level Engine Core or Game Loop, not buried in low-level kernels.
 */
 
-// Template Driven Dynamic Dispatch: Full-System Multi-Versioning via Static Polymorphism.
+// Dynamic Dispatch: Full-System Multi-Versioning via Static Polymorphism.
 namespace Engine::GameEngine {
-    // 1. The Generic Templated Physics Kernel, parameterized by 'Abi' (Application Binary Interface). The compiler will generate 5 different hardware versions.
-    template <typename Abi>
-    void UpdateEngineSubsystems(float* xs, float* ys, float* zs, float* vx, float* vy, float* vz, size_t count, float deltaTime, float gravityVal, float mouseX, float mouseY, bool isMouseDown, const uint32_t* cellStartOffsets, const uint32_t* sortedIndices) {
 
-        // 1. Morton Sort ...
-        // Engine::Physics::SortParticles(xs, ys, zs, ...);
+    constexpr size_t stride = Engine::Physics::NativeFloatSIMDBatch::size();
 
-        // 2. Collisions
-        Engine::Physics::SolveCollisionsTemplate<Abi>(xs, ys, zs, vx, vy, vz, cellStartOffsets, sortedIndices, count);
+    // Direct, compile-time linked subsystems update! SIMDVector3D ensures the memory layout is baked into the binary at compile-time (e.g., cannot pass a 32-bytes wide (AVX2) SIMDVector3D into SSE4.1 (16-bytes wide)).
+    FORCE_INLINE void ExecuteGameEngineBackend(std::span<Engine::Physics::SIMDVector3D> pos, 
+                                             std::span<Engine::Physics::SIMDVector3D> vel, 
+                                             size_t count, float deltaTime, float gravityVal, 
+                                             float mouseX, float mouseY, bool isMouseDown, 
+                                             const Engine::Physics::ParticleSystem::ParticleHash* sortedHashes) {
 
-        // 3. Run Physics (It uses the ABI)
-        Engine::Physics::IntegrateParticlesTemplate<Abi>(xs, ys, zs, vx, vy, vz, count, deltaTime, gravityVal, mouseX, mouseY, isMouseDown);
+        // =================================================
+        // THREAD-LEVEL PARALLELISM & DATA-LEVEL PARALLELISM
+        // =================================================
+        /*
+            - TLP (High-Level): Is handled by the job system, it slices a massive array (e.g., 100,000 particles) into a few large chunks and assigns those chunks to a thread pool (i.e., Outside Orchestrator).
+            - DLP  (Low-Level): Handled by SIMD (AVX2/NEON), it takes a single chunk assigned to a thread and process 8 or 16 floats simultaneously inside the CPU registers (i.e., Inside Math Kernel). 
+            - Threading and dispatching belongs strictly to the higher-level Engine Core or Game Loop, not buried in low-level kernels.
+            - We use the JobSystem as an outer wrapper that decides which thread gets to run the sequential kernel.
+            - Must dispatch two separate times to create a thread barrier (Sync Point).
 
-        // 4. Run Audio Mixing (It uses the ABI)
-        // Engine::Audio::MixTracks<Abi>(count);
+              1. All threads calculate collisions and write to vel (Barrier: wait all to finish).
+              2. All threads integrate and write to.
+        */
 
-        // 5. Run Culling (It uses the ABI)
-        // Engine::Rendering::CullFrustum<Abi>(count);
+        // A. Calculate how many SIMD batches we need to process (e.g., stride: 8 particles at a time (AVX2))
+        size_t totalBatches = (count + stride - 1uz) / stride; 
+        
+        // B. Calculate a fair chunk size for the OS threads to prevent queue contention
+        uint32_t threadCount = g_JobSystem.nextWorkerId.load(std::memory_order_relaxed);
+
+        // Ensures the chunks stay large enough to exploit spatial locality inside each hardware core's L1/L2 caches. Ensure we don't dispatch 0 sized chunks if we have very few particles.
+        uint32_t chunkSize = std::max(1u, static_cast<uint32_t>(totalBatches / (threadCount/* * 2 */)));
+
+        // ========================================================
+        // PHASE 1: NARROW PHASE COLLISIONS (READS POS, WRITES VEL)
+        // ========================================================
+        // 1. Calculate collisions entirely into velocity blocks first
+        if (sortedHashes != nullptr) {
+            // -- HIGH-LEVEL ORCHESTRATION (Outside the Math) --
+            // 2. Dispatch to the Job System! The main thread drops a job into the queue. The worker threads wake up.
+            g_JobSystem.DispatchAndWait(totalBatches, chunkSize, [&](uint32_t start, uint32_t end) {
+                // --- SIMD MATH KERNEL (Radio Silence) -- 
+                // 3. Threads process their assigned chunks simultaneously. This is the hot path. A single worker thread enters this loop and executes pure register math. 
+                Engine::Physics::SolveCollisions(pos, vel, sortedHashes, count, start, end);
+            });
+        }
+
+        // ============================================
+        // PHASE 2: INTEGRATION (READS VEL, WRITES POS)
+        // ============================================
+        // 2. ONLY THEN integrate velocity data forward into positions
+        g_JobSystem.DispatchAndWait(totalBatches, chunkSize, [&](uint32_t start, uint32_t end) {
+            Engine::Physics::IntegrateParticles(pos, vel, count, deltaTime, gravityVal, mouseX, mouseY, isMouseDown, start, end);
+        });
     }
 
-    // 2. C++11: Define the type signature for our hardware math kernels. 
-    using GameEngineBackendFn = void(*)(float* xs,    float* ys,       float* zs, 
-                                        float* vx,    float* vy,       float* vz, 
-                                        size_t count, float deltaTime, float gravityVal, 
-                                        float mouseX, float mouseY,    bool isMouseDown, 
-                                        const uint32_t* cellStartOffsets, 
-                                        const uint32_t* sortedIndices);
+    // Direct benchmark mapping
+    FORCE_INLINE void ExecuteBenchmark(std::span<Engine::Physics::SIMDVector3D> pos, 
+                                       std::span<Engine::Physics::SIMDVector3D> vel, 
+                                       size_t count, float deltaTime, float gravityVal, int64_t repeats) {
 
-    // 3. The active target backend function pointer initialized securely to a safe scalar fallback (allows the Engine to swap the backend based on the silicon at runtime).                              
-    inline GameEngineBackendFn ExecuteGameEngineBackend = nullptr; // void (*ExecuteGameEngineBackend)(float*, float*, float*, size_t, float, ...)
+        // Benchmarks run on a single dedicated background thread, so we pass 0 to totalBatches
+        size_t totalBatches = (count + stride - 1uz) / stride;
 
-    // Benchmark  Signature
-    using BenchmarkBackendFn = void(*)(float* xs, float* ys, float* zs, float* vx, float* vy, float* vz, size_t count, float deltaTime, float gravityVal, int64_t repeats);
-    inline BenchmarkBackendFn ExecuteBenchmarkBackend = nullptr;
+        Engine::Physics::BenchmarkParticles(pos, vel, count, deltaTime, gravityVal, repeats, 0, totalBatches);
+    }
+
+    // Template Driven Dynamic Dispatch: Full-System Multi-Versioning via Static Polymorphism & dynamic function pointers (Used when using floats instead of SIMDVector3D).
+    // // 1. The Generic Templated Physics Kernel, parameterized by 'Abi' (Application Binary Interface). The compiler will generate 5 different hardware versions.
+    // //  template <typename Abi>
+    // void UpdateEngineSubsystems(float* xs, float* ys, float* zs*, sfloat* vx, float* vy, float* vz, size_t count, float deltaTime, float gravityVal, float mouseX, float mouseY, bool isMouseDown, const uint32_t* cellStartOffsets, const uint32_t* sortedIndices) {
+
+    //     // 1. Morton Sort ...
+    //     // Let the Physics Module handle the entire simulation pipeline (Sort -> Collide -> Integrate)
+    //     // Engine::Physics::EngineTick(livePhysics, deltaTime /*, mouseWorldX, mouseWorldY, applyMouseForce*/);
+    //     // Engine::Physics::SortParticles(pos, ...);
+
+    //     // 2. Collisions (SAFETY CHECK: Only run if the grid actually exists!)
+    //     if (cellStartOffsets != nullptr && sortedIndices != nullptr) Engine::Physics::SolveCollisionsTemplate(pos, vel, cellStartOffsets, sortedIndices, count);
+
+    //     // 3. Run Physics (It uses the ABI)
+    //     Engine::Physics::IntegrateParticlesTemplate<Abi>(xs, ys, zs, vx, vy, vz, count, deltaTime, gravityVal, mouseX, mouseY, isMouseDown);
+
+    //     // 4. Run Audio Mixing (It uses the ABI)
+    //     // Engine::Audio::MixTracks<Abi>(count);
+
+    //     // 5. Run Culling (It uses the ABI)
+    //     // Engine::Rendering::CullFrustum<Abi>(count);
+    // }
+
+    // // 2. C++11: Define the type signature for our hardware math kernels. 
+    // using GameEngineBackendFn = void(*)(float* xs,    float* ys,       float* zs*, 
+    //                                     *float* vx,    float* vy,       float* vz*, 
+    //                                     size_t count, float deltaTime, float gravityVal, 
+    //                                     float mouseX, float mouseY,    bool isMouseDown, 
+    //                                     const uint32_t* cellStartOffsets, 
+    //                                     const uint32_t* sortedIndices);
+
+    // // 3. The active target backend function pointer initialized securely to a safe scalar fallback (allows the Engine to swap the backend based on the silicon at runtime).                              
+    // inline GameEngineBackendFn ExecuteGameEngineBackend = nullptr; // void (*ExecuteGameEngineBackend)(float*, float*, float*, size_t, float, ...)
+
+    // // Benchmark  Signature
+    // using BenchmarkBackendFn = void(*)(float* xs, float* ys, float* zs, float* vx, float* vy, float* vz, size_t count, float deltaTime, float gravityVal, int64_t repeats);
+    // inline BenchmarkBackendFn ExecuteBenchmarkBackend = nullptr;
     
-    // 4. The Dispatch Initializer called once during Engine Boot.
-    void InitializeDynamicDispatch() {
-        // Runs compile-time + runtime dynamic dispatch exactly once.
-        #if defined(ENGINE_ARCH_AVX512)
-            if (g_Hardware.hasAVX512F) {
-                // Route to the AVX-512 instantiation of our template! Enables us to execute the function in main () like this [Engine::GameEngine::ExecuteBenchmarkBackend(...)]
-                ExecuteGameEngineBackend = &UpdateEngineSubsystems<Engine::ISAArch::simd_abi::avx512>;
-                ExecuteBenchmarkBackend  = &Engine::Physics::BenchmarkParticlesTemplate<Engine::ISAArch::simd_abi::avx512>;
-                std::println("[ROUTING] AVX-512 Backend Selected.");
-                return;
-            }
-        #endif
+    // // 4. The Dispatch Initializer called once during Engine Boot.
+    // void InitializeDynamicDispatch() {
+    //     // Runs compile-time + runtime dynamic dispatch exactly once.
+    //     #if defined(ENGINE_ARCH_AVX512)
+    //         if (g_Hardware.hasAVX512F) {
+    //             // Route to the AVX-512 instantiation of our template! Enables us to execute the function in main () like this [Engine::GameEngine::ExecuteBenchmarkBackend(...)]
+    //             ExecuteGameEngineBackend = &UpdateEngineSubsystems<Engine::ISAArch::simd_abi::avx512>;
+    //             ExecuteBenchmarkBackend  = &Engine::Physics::BenchmarkParticlesTemplate<Engine::ISAArch::simd_abi::avx512>;
+    //             std::println("[ROUTING] AVX-512 Backend Selected.");
+    //             return;
+    //         }
+    //     #endif
 
-        #if defined(ENGINE_ARCH_AVX2)
-            if (g_Hardware.hasAVX2) {
-                // Route to the AVX2 instantiation of our template!
-                ExecuteGameEngineBackend = &UpdateEngineSubsystems<Engine::ISAArch::simd_abi::avx2>;
-                ExecuteBenchmarkBackend  = &Engine::Physics::BenchmarkParticlesTemplate<Engine::ISAArch::simd_abi::avx2>;
-                std::println("[ROUTING] AVX2 Backend Selected.");
-                return;
-            }
-        #endif
+    //     #if defined(ENGINE_ARCH_AVX2)
+    //         if (g_Hardware.hasAVX2) {
+    //             // Route to the AVX2 instantiation of our template!
+    //             ExecuteGameEngineBackend = &UpdateEngineSubsystems<Engine::ISAArch::simd_abi::avx2>;
+    //             ExecuteBenchmarkBackend  = &Engine::Physics::BenchmarkParticlesTemplate<Engine::ISAArch::simd_abi::avx2>;
+    //             std::println("[ROUTING] AVX2 Backend Selected.");
+    //             return;
+    //         }
+    //     #endif
 
-        #if defined(ENGINE_ARCH_NEON)
-            if (g_Hardware.hasNEON) {
-                // Route to the ARM NEON instantiation of our template!
-                ExecuteGameEngineBackend = &UpdateEngineSubsystems<Engine::ISAArch::simd_abi::neon>;
-                ExecuteBenchmarkBackend  = &Engine::Physics::BenchmarkParticlesTemplate<Engine::ISAArch::simd_abi::neon>;
-                std::println("[ROUTING] ARM NEON Backend Selected.");
-                return;
-            }
-        #endif
+    //     #if defined(ENGINE_ARCH_NEON)
+    //         if (g_Hardware.hasNEON) {
+    //             // Route to the ARM NEON instantiation of our template!
+    //             ExecuteGameEngineBackend = &UpdateEngineSubsystems<Engine::ISAArch::simd_abi::neon>;
+    //             ExecuteBenchmarkBackend  = &Engine::Physics::BenchmarkParticlesTemplate<Engine::ISAArch::simd_abi::neon>;
+    //             std::println("[ROUTING] ARM NEON Backend Selected.");
+    //             return;
+    //         }
+    //     #endif
 
-        #if defined(ENGINE_ARCH_SSE41)
-            // Route to the SSE4.1 instantiation of our template!
-            ExecuteGameEngineBackend = &UpdateEngineSubsystems<Engine::ISAArch::simd_abi::sse41>;
-            ExecuteBenchmarkBackend  = &Engine::Physics::BenchmarkParticlesTemplate<Engine::ISAArch::simd_abi::sse41>;
-            std::println("[ROUTING] SSE4.1 Legacy Backend Selected.");
-            return;
-        #endif
+    //     #if defined(ENGINE_ARCH_SSE41)
+    //         // Route to the SSE4.1 instantiation of our template!
+    //         ExecuteGameEngineBackend = &UpdateEngineSubsystems<Engine::ISAArch::simd_abi::sse41>;
+    //         ExecuteBenchmarkBackend  = &Engine::Physics::BenchmarkParticlesTemplate<Engine::ISAArch::simd_abi::sse41>;
+    //         std::println("[ROUTING] SSE4.1 Legacy Backend Selected.");
+    //         return;
+    //     #endif
 
-        // Absolute baseline fallback
-        ExecuteGameEngineBackend = &UpdateEngineSubsystems<Engine::ISAArch::simd_abi::scalar>;
-        ExecuteBenchmarkBackend  = &Engine::Physics::BenchmarkParticlesTemplate<Engine::ISAArch::simd_abi::scalar>;
-        std::println("[ROUTING] SCALAR Legacy Backend Selected.");
-    }
+    //     // Absolute baseline fallback
+    //     ExecuteGameEngineBackend = &UpdateEngineSubsystems<Engine::ISAArch::simd_abi::scalar>;
+    //     ExecuteBenchmarkBackend  = &Engine::Physics::BenchmarkParticlesTemplate<Engine::ISAArch::simd_abi::scalar>;
+    //     std::println("[ROUTING] SCALAR Legacy Backend Selected.");
+    // }
 }
 
 // ==================================================================================
