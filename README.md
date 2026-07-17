@@ -42,7 +42,7 @@ Ensure your local workstation has the required core build tools installed.
   * **Linux:** GCC 13+ or Clang 17+.
   * **macOS:** Xcode Command Line Tools.
 
-### 2. Compilation (One-Click Setup)
+### 2. Compilation (One-Command Setup)
 
 We provide master build scripts that automatically detect and download the vcpkg package manager, pull dependencies (GLFW, ImGui, GLAD), configure CMake, and compile the engine optimized for your hardware.
 
