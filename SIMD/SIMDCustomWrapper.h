@@ -13,7 +13,6 @@ module;
     - Legacy: Baseline Legacy PC | SSE4.1 (128 bit registers)
 */
 
-
 // --- HARDWARE DETECTION ---
 #if defined(__F16C__) && !defined(_MSC_VER)
     #include <f16cintrin.h> // Required for Clang/GCC on Linux
