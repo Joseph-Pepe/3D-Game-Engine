@@ -1,0 +1,8 @@
+# Because vcpkg downloads gigabytes of source code (and build files) directly into this engine folder, we must prevent git from tracking it.
+
+# Ignore the generated CMake build folder
+/build/
+
+# Ignore the vcpkg toolchain and downloaded dependency source code
+/vcpkg/
+!vcpkg.json
