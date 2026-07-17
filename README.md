@@ -8,7 +8,7 @@ This engine is built with a strict separation of concerns, focusing on multi-cor
 
 ### Core Systems (Phase 1)
 
-* **SIMD Math Library (C++26 Aligned): `SIMDCustomWrapper.h`**
+* **SIMD Math Library (C++26 Aligned): `SIMD/SIMDCustomWrapper.h`**
     * Utilizes architecture-specific intrinsics (AVX-512, AVX2, SSE4.1, ARM NEON).
     * Strict separation between CPU-bound Structural of Arrays (SOA - `WideBatch`) for physics/culling and GPU-bound Array of Structs (AOS - `FixedBatch4`) for geometry/uniforms.
     * Features Cody-Waite range reduction for extreme distance precision and Minimax polynomial approximation for trigonometric functions.
