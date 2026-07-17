@@ -169,6 +169,8 @@ ENGINE_FORCE_INLINE size_t GetPaddedCount(size_t count, size_t simdWidth = 8) {
 
 template <typename T, std::size_t Alignment = alignof(T)>
 class ArenaArray {
+    static_assert(std::is_trivially_destructible_v<T>, 
+    "[ArenaArray] Fatal: Type must be trivially destructible. Arena resets do NOT call destructors!");
 private:
     T* m_data;
     std::size_t m_size;
@@ -790,6 +792,14 @@ private:
         FreeNode* next;
     };
 
+
+    // --- 128-BIT TAGGED POINTER (ABA PROTECTION) ---
+    // Must be exactly 16 bytes and aligned to 16 bytes for hardware CAS instructions.
+    struct alignas(16) TaggedPointer {
+        FreeNode* ptr;
+        uint64_t tag; // The generation counter
+    };
+
     // --- COMPILE-TIME BLOCK SIZING ---
     // We must guarantee that the block is large enough to hold the object OR the free node,
     // and that every single block perfectly adheres to the hardware alignment (e.g., 64 bytes for AVX-512).
@@ -799,8 +809,8 @@ private:
     uint8_t* m_memory;  // Master block of perfectly aligned memory
     size_t m_capacity;  // Maximum number of objects this pool can hold
 
-    // Dynamically switch to atomics if ThreadSafe is true (std::atomic for thread safety)
-    using NodePtrType = std::conditional_t<ThreadSafe, std::atomic<FreeNode*>, FreeNode*>;
+    // We dynamically map the ThreadSafe head to a 128-bit atomic, and the local head to a raw pointer.
+    using AtomicHeadType = std::conditional_t<ThreadSafe, std::atomic<TaggedPointer>, FreeNode*>;
     using IndexType   = std::conditional_t<ThreadSafe, std::atomic<size_t>, size_t>;
 
     // Align them to prevent false sharing.
@@ -810,7 +820,13 @@ private:
 public:
     // O(1) Allocation from the OS. Zero initialization loops.
     PoolAllocator(size_t capacity) 
-        : m_capacity(capacity), m_bumpIndex(0), m_freeListHead(nullptr) {
+        : m_capacity(capacity), m_bumpIndex(0) {
+
+        if constexpr (ThreadSafe) {
+            m_freeListHead.store({nullptr, 0}, std::memory_order_relaxed);
+        } else {
+            m_freeListHead = nullptr;
+        }
         
         // Native aligned allocation guarantees the entire block starts on the correct boundary
         m_memory = static_cast<uint8_t*>(::operator new(capacity * BlockSize, std::align_val_t{Align}));
@@ -835,12 +851,20 @@ public:
     // --- BARE-METAL ALLOCATION ---
     [[nodiscard]] ENGINE_FORCE_INLINE T* Allocate() {
         if constexpr (ThreadSafe) {
-            // 1. FREE-LIST PATH (Thread-Safe Pop)
-            FreeNode* head = m_freeListHead.load(std::memory_order_acquire);
-            while (head != nullptr) {
-                // Attempt to move the head to the next node. If another thread beat us, loop and try again.
-                if (m_freeListHead.compare_exchange_weak(head, head->next, std::memory_order_release, std::memory_order_relaxed)) {
-                    return std::assume_aligned<Align>(reinterpret_cast<T*>(head));
+           // 1. FREE-LIST PATH (Thread-Safe Pop)
+            TaggedPointer head = m_freeListHead.load(std::memory_order_acquire);
+
+            while (head.ptr != nullptr) {
+
+                // Speculative read: if another thread overwrites this memory with game data right now,
+                // nextPtr becomes garbage. The CAS below will catch the tag mismatch and reject it.
+                FreeNode* nextPtr = head.ptr->next;
+                
+                // Construct the proposed new head state, bumping the generation counter
+                TaggedPointer newHead = { nextPtr, head.tag + 1 };
+
+                if (m_freeListHead.compare_exchange_weak(head, newHead, std::memory_order_release, std::memory_order_acquire)) {
+                    return std::assume_aligned<Align>(reinterpret_cast<T*>(head.ptr));
                 }
             }
 
@@ -900,11 +924,18 @@ public:
 
         if constexpr (ThreadSafe) {
             // 3. FREE-LIST PUSH (Thread-Safe Push)
-            FreeNode* head = m_freeListHead.load(std::memory_order_relaxed);
+            TaggedPointer head = m_freeListHead.load(std::memory_order_relaxed);
+            TaggedPointer newHead;
+            
             do {
-                node->next = head;
-            // Attempt to set the head to our new node. If another thread changed the head, update our 'head' variable and try again.
-            } while (!m_freeListHead.compare_exchange_weak(head, node, std::memory_order_release, std::memory_order_relaxed));
+                // Link our newly dead node to whatever is currently at the head
+                node->next = head.ptr;
+                
+                // Prepare the 128-bit swap package
+                newHead.ptr = node;
+                newHead.tag = head.tag + 1; // Increment generation counter
+                
+            } while (!m_freeListHead.compare_exchange_weak(head, newHead, std::memory_order_release, std::memory_order_relaxed));
         } else {
             // 3. Push it to the front of the Free List (LIFO order ensures cache-hot memory is reused first)
             node->next = m_freeListHead;
@@ -1010,7 +1041,6 @@ private:
         #else
             // Inform the kernel to release physical backing frames instantly
             madvise(ptr, size, MADV_DONTNEED);
-            mprotect(ptr, size, PROT_NONE);
         #endif
     }
 
