@@ -1,7 +1,7 @@
 #pragma once
 
 #include "SIMD/SIMDCustomWrapper.h"
-#include "../JobSystem.h"
+#include "../FiberJobSystem/JobSystem.h"
 #include "../Memory.h"
 #include "../STLContainers/SmallVector.h"
 
@@ -94,7 +94,7 @@ namespace Engine::ISAArch {
 
     // Dynamically requests standard C++17 aligned memory based on the native hardware SIMD width
     template<typename T>
-    using NativeAlignedVector = std::vector<T, AlignedAllocator<T, alignof(WideBatch<T>)>>;
+    using NativeAlignedVector = std::vector<T, AlignedAllocator<T, NATIVE_HARDWARE_ALIGNMENT>>;
 
     // Dynamically requests standard C++17 aligned memory for 128-bit GPU geometry
     template<typename T>
