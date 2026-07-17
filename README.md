@@ -24,15 +24,28 @@ This engine is built with a strict separation of concerns, focusing on multi-cor
     * **Work-Stealing Queue:** A 64-bit lock-free Chase-Lev deque immune to the ABA problem.
     * **Fiber Context Switching:** Custom assembly implementations for Windows x64 (MASM), POSIX x64 (System V AMD64 ABI), and ARM64 (AAPCS64) for ultra-fast (~3ns) context swaps.
 
-## Building the Engine
+---
+
+## Building the Engine 
 
 This project uses CMake and vcpkg to ensure a frictionless, cross-platform build process.
 
-### Compilation (One-Click Setup)
+### 1. System Prerequisites
+Ensure your local workstation has the required core build tools installed.
+* **Version Control:** Git installed and added to your system `PATH`.
+* **Build System:** CMake (v3.28 or newer).
+* **Compilers:**
+  * **Windows:** Visual Studio 2022 (with the "Desktop development with C++" workload installed).
+  * **Linux:** GCC 13+ or Clang 17+.
+  * **macOS:** Xcode Command Line Tools.
 
-We provide master build scripts that automatically detect vcpkg, download dependencies (GLFW, ImGui, GLAD), configure CMake, and compile the engine optimized for your hardware.
+### 2. Compilation (One-Click Setup)
+
+We provide master build scripts that automatically detect and download the vcpkg package manager, pull dependencies (GLFW, ImGui, GLAD), configure CMake, and compile the engine optimized for your hardware.
 
 **Windows:**
-Run the batch script from the root directory:
+Open your command prompt, clone the repository, and run the batch script:
 ```cmd
+git clone [https://github.com/your-studio/aaa-engine.git](https://github.com/your-studio/aaa-engine.git)
+cd aaa-engine
 .\build.bat
