@@ -1,8 +1,18 @@
-#pragma once
+// ==========================================================================
+// 1. THE GLOBAL MODULE FRAGMENT
+// Must contain ALL legacy C-headers and macros. Modules cannot import these.
+// ==========================================================================
+module;
+
+
+// ==========================================================================
+// 2. THE MODULE DECLARATION & C++26 IMPORTS
+// ==========================================================================
+
+// #pragma once
 
 #include "EntityComponentSystem.h"
 #include "../PhysicsSystem.h"
-#include "../SIMD/SIMDVectorMath.h"
 #include "../FiberJobSystem/JobSystem.h"
 
 #if defined(_MSC_VER)
@@ -12,6 +22,8 @@
 #else
     #define RESTRICT // Fallback to nothing if unsupported
 #endif
+
+import Engine.SIMD.VectorMath; // #include "../SIMD/SIMDVectorMath.h"
 
 
 /* [Wire ECS]: Data separated from logic in Data Oriented Design.
