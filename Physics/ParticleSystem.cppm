@@ -15,9 +15,9 @@ module;
 
 #include "../EngineSettings.h"
 
-#include "Memory.h"  // For your Arena allocator
-#include "MortonCode.h"
-#include "Math.h"
+#include "../Memory.h"  // For your Arena allocator
+#include "../MortonCode.h"
+#include "../Math.h"
 
 import Engine.SIMD;             // #include "SIMD/SIMDCustomWrapper.cppm" 
 import Engine.SIMD.VectorMath;  // #include "SIMD/SIMDVectorMath.cppm"
