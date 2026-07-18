@@ -22,7 +22,7 @@ export module Engine.Physics.ParticleSystem;
 
 // 3. IMPORT YOUR ENGINE MODULES
 import Engine.SIMD;             // #include "../SIMD/SIMDCustomWrapper.cppm" 
-import Engine.Math;             // #include "../SIMD/Math.h"
+import Engine.SIMD.Math;             // #include "../SIMD/Math.h"
 import Engine.SIMD.VectorMath;  // #include "../SIMD/SIMDVectorMath.cppm"
 
 // ==========================================================================
