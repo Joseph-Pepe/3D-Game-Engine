@@ -4,19 +4,12 @@
 // ==========================================================================
 module;
 
-// ==========================================================================
-// 2. THE MODULE DECLARATION & C++26 IMPORTS
-// ==========================================================================
-
 // #pragma once
 
 #include <print>
 #include <span>
 
 #include "../FiberjobSystem/JobSystem.h"
-
-import Engine.Physics.ParticleSystem; // #include "../Physics/ParticleSystem.h"
-
 
 // --- COMPILER INTRINSICS FOR CPUID (x86_64 ONLY) ---
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
@@ -50,9 +43,17 @@ import Engine.Physics.ParticleSystem; // #include "../Physics/ParticleSystem.h"
     #define ENGINE_HAS_CXX26_META_REFLECTION 0
 #endif
 
-
-
+// ==========================================================================
+// 2. THE MODULE DECLARATION & C++26 IMPORTS
+// ==========================================================================
 export module Engine.SIMD.Hardware;
+
+// 3. IMPORT YOUR ENGINE MODULES
+import Engine.Physics.ParticleSystem; // #include "../Physics/ParticleSystem.h"
+
+// ==========================================================================
+// 4. EXPORTED SYSTEMS
+// ==========================================================================
 
 // ===========================================================
 // HARDWARE DETECTION & DYNAMIC DISPATCH : BMI2 MICROCODE TRAP 
