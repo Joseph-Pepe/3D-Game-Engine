@@ -38,7 +38,7 @@ module;
 // ==========================================================================
 export module Engine.Physics.PhysicsSystem;
 
-impotr Engine.Physics.MortonCode; // #include "MortonCode.h"
+import Engine.Physics.MortonCode; // #include "MortonCode.h"
 
 import Engine.Memory.MemoryAllocator; // #include "Memory.h"  // For AlignedVector
 
