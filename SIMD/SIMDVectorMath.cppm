@@ -30,6 +30,7 @@ module;
 #include <new>         // C++17/26 hardware interference sizes
 #include <memory>      // C++20/26 std::assume_aligned
 
+// 3. IMPORT YOUR C++26 SIMD MODULE!
 import Engine.SIMD;
 
 // ======================================================================
@@ -69,8 +70,7 @@ import Engine.SIMD;
 // ==========================================================================
 export module Engine.SIMD.VectorMath;
 
-// 3. IMPORT YOUR C++26 SIMD MODULE!
-import Engine.SIMD;
+
 
 // ======================================================================
 // C++26: NATIVE SIMD ARCHITECTURE for MSVC build v14.51 and newer.
