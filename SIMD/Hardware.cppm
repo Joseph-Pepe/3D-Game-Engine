@@ -1,11 +1,20 @@
-#pragma once
+// ==========================================================================
+// 1. THE GLOBAL MODULE FRAGMENT
+// Must contain ALL legacy C-headers and macros. Modules cannot import these.
+// ==========================================================================
+module;
+
+// ==========================================================================
+// 2. THE MODULE DECLARATION & C++26 IMPORTS
+// ==========================================================================
+
+// #pragma once
 
 #include <print>
 #include <span>
 
-// #include "SIMD/SIMDCustomWrapper.h" 
-#include "ParticleSystem.h"
-#include "FiberjobSystem/JobSystem.h"
+#include "../Physics/ParticleSystem.h"
+#include "../FiberjobSystem/JobSystem.h"
 
 // --- COMPILER INTRINSICS FOR CPUID (x86_64 ONLY) ---
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
@@ -38,6 +47,8 @@
 #else
     #define ENGINE_HAS_CXX26_META_REFLECTION 0
 #endif
+
+export module Engine.SIMD.Hardware;
 
 // ===========================================================
 // HARDWARE DETECTION & DYNAMIC DISPATCH : BMI2 MICROCODE TRAP 
@@ -207,8 +218,8 @@ inline HardwareCapabilities g_Hardware = HardwareCapabilities::Detect();
     - Prevents "Illegal Instruction" crashes on legacy CPUs while maximizing performance on modern ones.
 */
 
-// Dynamic Dispatch: Full-System Multi-Versioning via Static Polymorphism.
-namespace Engine::GameEngine {
+// Dispatch: Full-System Multi-Versioning via Compile-Time Static Polymorphism.
+export namespace Engine::GameEngine {
 
     constexpr size_t stride = Engine::Physics::NativeFloatSIMDBatch::size();
 
@@ -277,7 +288,7 @@ namespace Engine::GameEngine {
         Engine::Physics::BenchmarkParticles(pos, vel, count, deltaTime, gravityVal, repeats, 0, totalBatches);
     }
 
-    // Template Driven Dynamic Dispatch: Full-System Multi-Versioning via Static Polymorphism & dynamic function pointers (Used when using floats instead of SIMDVector3D).
+    // Template Driven Dynamic Dispatch: Full-System Multi-Versioning via Runtime dynamic Polymorphism & dynamic function pointers (Used when using floats instead of SIMDVector3D).
     // // 1. The Generic Templated Physics Kernel, parameterized by 'Abi' (Application Binary Interface). The compiler will generate 5 different hardware versions.
     // //  template <typename Abi>
     // void UpdateEngineSubsystems(float* xs, float* ys, float* zs*, sfloat* vx, float* vy, float* vz, size_t count, float deltaTime, float gravityVal, float mouseX, float mouseY, bool isMouseDown, const uint32_t* cellStartOffsets, const uint32_t* sortedIndices) {
@@ -464,7 +475,8 @@ int main(int argc, char** argv) {
 // ==================================================================================
 /*
 #include "ParticleSystem.h"
-#include "Hardware.h" // Your dynamic dispatcher
+import Engine.SIMD.Hardware;  // #include "Hardware.h" // Your dynamic dispatcher
+
 
 int main() {
     // 1. Boot Hardware & Job System
