@@ -4,6 +4,28 @@
 // ==========================================================================
 module;
 
+// #pragma once
+
+#include <vector>
+#include <tuple>
+#include <string_view>
+#include <type_traits>
+#include <print>
+#include <immintrin.h> // AVX and AVX2 intrinsics
+#include <memory>
+#include <cstdint>
+#include <cstring> // Required for std::memcpy
+#include <algorithm>
+#include <cstddef>
+#include <ranges>
+#include <stdexcept>
+
+// Engine Dependencies
+#include "../Math.h"
+#include "../imgui.h"
+#include "../STLContainers/SmallVector.h"
+#include "../Memory.h"               // Required for AlignedAllocator
+
 // ==================================================================================
 // C++ 26 COMPILE-TIME STATIC REFLECTION
 // ==================================================================================
@@ -27,40 +49,19 @@ module;
 // ==========================================================================
 // 2. THE MODULE DECLARATION & C++26 IMPORTS
 // ==========================================================================
-
-// #pragma once
-
-#include <vector>
-#include <tuple>
-#include <string_view>
-#include <type_traits>
-#include <print>
-#include <immintrin.h> // AVX and AVX2 intrinsics
-#include <memory>
-#include <cstdint>
-#include <cstring> // Required for std::memcpy
-#include <algorithm>
-#include <cstddef>
-#include <ranges>
-#include <stdexcept>
-
-// Engine Dependencies
-#include "../Math.h"
-#include "../imgui.h"
-#include "../STLContainers/SmallVector.h"
-#include "../Memory.h"               // Required for AlignedAllocator
-
-
-import Engine.SIMD.VectorMath;  // #include "../SIMD/SIMDVectorMath.cppm" // Required for NATIVE_SIMD_BATCH_ALIGN, PhysicsChunkNative
-
 export module Engine.ECS.EntityComponentSystem;
 
-// ==================================================================================
-// THE COMPONENTS (POD STRUCTS)
-// ==================================================================================
-// No macros, no inheritance, just pure Plain Old Data (POD) structs.
+// 3. IMPORT YOUR ENGINE MODULES
+import Engine.SIMD.VectorMath;  // #include "../SIMD/SIMDVectorMath.cppm" // Required for NATIVE_SIMD_BATCH_ALIGN, PhysicsChunkNative
 
+// ==========================================================================
+// 4. EXPORTED SYSTEMS
+// ==========================================================================
 export namespace Engine::ECS {
+    // ==================================================================================
+    // THE COMPONENTS (POD STRUCTS)
+    // ==================================================================================
+    // No macros, no inheritance, just pure Plain Old Data (POD) structs.
     
     struct TransformComponent {
         Vector3D position{0.0f, 0.0f, 0.0f};
