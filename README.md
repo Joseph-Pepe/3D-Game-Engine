@@ -14,7 +14,7 @@ This engine is built with a strict separation of concerns, focusing on multi-cor
     * Features Cody-Waite range reduction for extreme distance precision and Minimax polynomial approximation for trigonometric functions.
     * Lock-free proxy objects for branchless conditional blending.
     * WideBatch (SOA) and FixedBatch4 (AOS) types will be used constantly instead of standard floats or math libraries.
-* **Memory Management: `Memory.h`**
+* **Memory Management: `Memory/MemoryAllocator.cppm`**
     * Bypasses the OS heap for high-frequency runtime loops to prevent fragmentation and latency.
     * **Virtual Memory Arena:** Dual-kernel (Windows/POSIX) integration for massive open-world streaming with zero physical RAM overhead until committed.
     * **Frame Allocator:** Zero-overhead double/triple buffering using contiguous byte blocks and placement new.
