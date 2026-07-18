@@ -73,9 +73,9 @@ inline void CPU_ClearAVX() {
 }
 
 // The Job System needs the fast PRNG from Math.h for the work-stealing logic!
-#include "Math.h"
+#include "../Math.h"
 #include "../FixedFunction.h"
-#include "RandGenMap.h"
+#include "../RandGenMap.h"
 
 // ==================================================================================
 // CROSS-PLATFORM CACHE LINE ALIGNMENT
