@@ -1,5 +1,10 @@
-#pragma once
-#include "Math.h" 
+// ==========================================================================
+// 1. THE GLOBAL MODULE FRAGMENT
+// Must contain ALL legacy C-headers and macros. Modules cannot import these.
+// ==========================================================================
+module;
+
+// #pragma once
 #include <span>
 #include <vector>
 #include <cstdint>
@@ -9,6 +14,17 @@
 #include <cmath>     // Required for std::abs()
 #include <immintrin.h> // Required for AVX/SSE intrinsics
 #include <cassert>   // Required for the assert() macro
+
+// ==========================================================================
+// 2. THE MODULE DECLARATION & C++26 IMPORTS
+// ==========================================================================
+export module Engine.SIMD.BVHGrid;
+
+import Engine.SIMD.Math; // #include "Math.h" 
+
+// ==========================================================================
+// 3. EXPORTED SYSTEMS
+// ==========================================================================
 
 
 // ==================================================================================
