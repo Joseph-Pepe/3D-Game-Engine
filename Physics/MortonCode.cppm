@@ -27,7 +27,7 @@ module;
 // ==========================================================================
 // 2. THE MODULE DECLARATION & C++26 IMPORTS
 // ==========================================================================
-export module Engine.Memory.MortonCode;
+export module Engine.Physics.MortonCode;
 
 // ====================================================
 // 2D & 3D COORDINATE SPACE
