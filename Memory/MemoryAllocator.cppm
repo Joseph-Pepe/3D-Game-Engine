@@ -1,6 +1,10 @@
-#pragma once
+// ==========================================================================
+// 1. THE GLOBAL MODULE FRAGMENT
+// Must contain ALL legacy C-headers and macros. Modules cannot import these.
+// ==========================================================================
+module;
 
-#include "SIMD/SIMDCustomWrapper.h"
+// #pragma once
 
 #include <vector>
 #include <new>
@@ -17,6 +21,13 @@
 
 #include <iostream>    // Required for std::cerr
 #include <string_view> // Required for C++26 Reflection string views
+
+// ==========================================================================
+// 2. THE MODULE DECLARATION & C++26 IMPORTS
+// ==========================================================================
+export module Engine.Memory;
+
+import Engine.SIMD; // #include "../SIMD/SIMDCustomWrapper.h"
 
 // ==================================================================================
 // COMPILER SPECIFIC MACROS
