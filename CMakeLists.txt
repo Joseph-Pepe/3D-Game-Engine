@@ -59,9 +59,11 @@ add_executable(AAAEngine
 # these are the newly created modules
 target_sources(AAAEngine PUBLIC
   FILE_SET cxx_modules TYPE CXX_MODULES FILES
-    "SIMD/SIMDCustomWrapper.cppm", 
-    "SIMD/SIMDVectorMath.cppm",
-    "Physics/ParticleSystem.cppm",
+    "SIMD/SIMDCustomWrapper.cppm" 
+    "SIMD/SIMDVectorMath.cppm"
+    "SIMD/Hardware.cppm"
+    "Physics/ParticleSystem.cppm"
+    "ECS/Systems.cppm"
     "ECS/EntityComponentSystem.cppm"
 )
 
