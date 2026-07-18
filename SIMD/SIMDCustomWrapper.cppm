@@ -4,6 +4,16 @@
 // ==========================================================================
 module;
 
+// #pragma once
+
+#include <concepts>
+#include <cstdint>
+#include <type_traits>
+#include <format>
+#include <bit>
+#include <utility>
+#include <print> // std::printlnModules need .h files?
+
 // ==================================================
 // INSTRUCTION SET ARCHITECTURES (ISA)
 // ==================================================
@@ -126,17 +136,6 @@ module;
 // ==========================================================================
 // 2. THE MODULE DECLARATION & C++26 IMPORTS
 // ==========================================================================
-
-#pragma once
-#include <concepts>
-#include <cstdint>
-#include <type_traits>
-#include <format>
-#include <bit>
-#include <utility>
-#include <print> // std::printlnModules need .h files?
-
-
 export module Engine.SIMD;
 
 // import std; // C++23/26 replaces all STL includes (<concepts>, <vector>, etc.)
@@ -186,7 +185,7 @@ export namespace Engine::Hardware {
 }
 
 // ==========================================================================
-// 4. EXPORTED MATH & SIMD API
+// 4. EXPORTED SYSTEMS
 // ==========================================================================
 
 // Scalar Domain (1D Scalar Math): strictly for operations that only operate on scalar floats.
