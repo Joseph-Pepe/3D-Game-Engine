@@ -1,4 +1,11 @@
-#pragma once
+// ==========================================================================
+// 1. THE GLOBAL MODULE FRAGMENT
+// Must contain ALL legacy C-headers and macros. Modules cannot import these.
+// ==========================================================================
+module;
+
+
+// #pragma once
 
 #include <array>
 #include <cstdint>
@@ -16,6 +23,11 @@
         #define FORCE_INLINE inline __attribute__((always_inline))
     #endif
 #endif
+
+// ==========================================================================
+// 2. THE MODULE DECLARATION & C++26 IMPORTS
+// ==========================================================================
+export module Engine.Memory.MortonCode;
 
 // ====================================================
 // 2D & 3D COORDINATE SPACE
