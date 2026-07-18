@@ -11,7 +11,6 @@ module;
 
 // #pragma once
 
-#include "EntityComponentSystem.h"
 #include "../PhysicsSystem.h"
 #include "../FiberJobSystem/JobSystem.h"
 
@@ -23,6 +22,7 @@ module;
     #define RESTRICT // Fallback to nothing if unsupported
 #endif
 
+import Engine.ECS.EntityComponentSystem; // #include "EntityComponentSystem.h"
 import Engine.SIMD.VectorMath; // #include "../SIMD/SIMDVectorMath.h"
 
 
