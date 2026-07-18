@@ -4,10 +4,6 @@
 // ==========================================================================
 module;
 
-// ==========================================================================
-// 2. THE MODULE DECLARATION & C++26 IMPORTS
-// ==========================================================================
-
 // #pragma once
 #include <span>
 #include <algorithm> // For std::fill
@@ -19,10 +15,18 @@ module;
 #include "../MortonCode.h"
 #include "../Math.h"
 
+// ==========================================================================
+// 2. THE MODULE DECLARATION & C++26 IMPORTS
+// ==========================================================================
+export module Engine.Physics.ParticleSystem;
+
+// 3. IMPORT YOUR ENGINE MODULES
 import Engine.SIMD;             // #include "SIMD/SIMDCustomWrapper.cppm" 
 import Engine.SIMD.VectorMath;  // #include "SIMD/SIMDVectorMath.cppm"
 
-export module Engine.Physics.ParticleSystem;
+// ==========================================================================
+// 4. EXPORTED SYSTEMS
+// ==========================================================================
 
 // =============================================================
 // ARRAY OF POINTERS (DESTROYS PERFORMANCE)
