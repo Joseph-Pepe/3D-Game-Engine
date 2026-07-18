@@ -1,4 +1,10 @@
-#pragma once
+// ==========================================================================
+// 1. THE GLOBAL MODULE FRAGMENT
+// Must contain ALL legacy C-headers and macros. Modules cannot import these.
+// ==========================================================================
+module;
+
+// #pragma once
 
 #include <vector>
 #include <cmath>
@@ -7,8 +13,6 @@
 
 #include <numbers> // C++20/26 Standardized Math Constants
 
-#include "Math.h"
-#include "BVHGrid.h"
 #include "GPURHI.h"
 
 // Check if the compiler has shipped the C++26 inplace_vector
@@ -55,6 +59,18 @@
 #else
     #define ENGINE_HAS_CXX26_META_REFLECTION 0
 #endif
+
+// ==========================================================================
+// 2. THE MODULE DECLARATION & C++26 IMPORTS
+// ==========================================================================
+export module Engine.SIMD.CameraSystem;
+ 
+import  module Engine.SIMD.Math; // #include "Math.h"
+import  module Engine.SIMD.BVHGrid; // #include "BVHGrid.h"
+
+// ==========================================================================
+// 3. EXPORTED SYSTEMS
+// ==========================================================================
 
 // ==================================================================================
 // 3D CAMERA & Catmull-Rom Spline
