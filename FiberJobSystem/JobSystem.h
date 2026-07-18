@@ -74,7 +74,7 @@ inline void CPU_ClearAVX() {
 
 // The Job System needs the fast PRNG from Math.h for the work-stealing logic!
 #include "Math.h"
-#include "FixedFunction.h"
+#include "../FixedFunction.h"
 #include "RandGenMap.h"
 
 // ==================================================================================
