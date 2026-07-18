@@ -13,8 +13,10 @@ module;
 #include <print>
 #include <span>
 
-#include "../Physics/ParticleSystem.h"
 #include "../FiberjobSystem/JobSystem.h"
+
+import Engine.Physics.ParticleSystem; // #include "../Physics/ParticleSystem.h"
+
 
 // --- COMPILER INTRINSICS FOR CPUID (x86_64 ONLY) ---
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
@@ -47,6 +49,8 @@ module;
 #else
     #define ENGINE_HAS_CXX26_META_REFLECTION 0
 #endif
+
+
 
 export module Engine.SIMD.Hardware;
 
