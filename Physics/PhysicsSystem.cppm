@@ -1,4 +1,10 @@
-#pragma once
+// ==========================================================================
+// 1. THE GLOBAL MODULE FRAGMENT
+// Must contain ALL legacy C-headers and macros. Modules cannot import these.
+// ==========================================================================
+module;
+
+// #pragma once
 
 #include <vector>
 #include <atomic>
@@ -9,18 +15,13 @@
 #include <cmath>      // REQUIRED for std::cos, std::sin
 
 // Engine Dependencies
-#include "Memory.h"    // For AlignedVector
+
 #include "FiberJobSystem/JobSystem.h" // For parallel dispatch and thread IDs
-#include "Math.h"      // For Morton codes and vector math
+
 #include "SIMD/AVX-256/SIMDVectorAVX256.h"
 // #include "SIMD/SIMDCustomWrapper.h"
 
 #include "EngineSettings.h"
-#include "MortonCode.h"
-
-import Engine.SIMD.Hardware // #include "Hardware.h"  // For AVX availability checks
-import Engine.SIMD;
-
 
 // Cross-platform restrict macro for pointer aliasing guarantees
 #if defined(_MSC_VER)
@@ -31,7 +32,23 @@ import Engine.SIMD;
     #define ENGINE_RESTRICT
 #endif
 
-class ParticlePhysicsSOA {
+
+// ==========================================================================
+// 2. THE MODULE DECLARATION & C++26 IMPORTS
+// ==========================================================================
+export module Engine.Physics.PhysicsSystem;
+
+impotr Engine.Physics.MortonCode; // #include "MortonCode.h"
+
+import Engine.Memory.MemoryAllocator; // #include "Memory.h"  // For AlignedVector
+
+import Engine.SIMD.Math;    // #include "Math.h"      // For vector math
+import Engine.SIMD.Hardware; // #include "Hardware.h"  // For AVX availability checks
+import Engine.SIMD;
+
+
+
+export class ParticlePhysicsSOA {
 public:
     
     std::span<float> pX, pY, pZ;
