@@ -25,7 +25,7 @@ module;
 // ==========================================================================
 // 2. THE MODULE DECLARATION & C++26 IMPORTS
 // ==========================================================================
-export module Engine.Memory;
+export module Engine.MemoryAllocator;
 
 import Engine.SIMD; // #include "../SIMD/SIMDCustomWrapper.h"
 
