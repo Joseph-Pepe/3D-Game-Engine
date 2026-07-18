@@ -3,6 +3,9 @@
 #include <vector>
 #include <immintrin.h>
 
+#include "../../FiberJobSystem/JobSystem.h"
+
+
 #if defined(__x86_64__) || defined(_M_X64)
     // A "Manager" class for a large collection of vectors (processes 4 vectors simultaneously).
     class VectorManagerSOA {
