@@ -13,7 +13,7 @@ module;
 
 #include "../Memory.h"  // For your Arena allocator
 #include "../MortonCode.h"
-#include "../Math.h"
+
 
 // ==========================================================================
 // 2. THE MODULE DECLARATION & C++26 IMPORTS
@@ -21,8 +21,9 @@ module;
 export module Engine.Physics.ParticleSystem;
 
 // 3. IMPORT YOUR ENGINE MODULES
-import Engine.SIMD;             // #include "SIMD/SIMDCustomWrapper.cppm" 
-import Engine.SIMD.VectorMath;  // #include "SIMD/SIMDVectorMath.cppm"
+import Engine.SIMD;             // #include "../SIMD/SIMDCustomWrapper.cppm" 
+import Engine.Math;             // #include "../SIMD/Math.h"
+import Engine.SIMD.VectorMath;  // #include "../SIMD/SIMDVectorMath.cppm"
 
 // ==========================================================================
 // 4. EXPORTED SYSTEMS
