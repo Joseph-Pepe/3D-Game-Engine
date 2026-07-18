@@ -1,12 +1,26 @@
-#pragma once
+// ==========================================================================
+// 1. THE GLOBAL MODULE FRAGMENT
+// Must contain ALL legacy C-headers and macros. Modules cannot import these.
+// ==========================================================================
+module;
 
-#include "Math.h"
+// #pragma once
+
+
 #include <vector>
 #include <span>
 #include <concepts>
 #include <algorithm>
 #include <print>
 #include <bit> // Required for std::bit_ceil
+
+// ==========================================================================
+// 2. THE MODULE DECLARATION & C++26 IMPORTS
+// ==========================================================================
+export module Engine.Systems.DynamicHashGrid;
+
+import Engine.SIMD.Math; // #include "Math.h"
+
 
 // ==================================================================================
 // TRANSIENT SPATIAL HASH GRID (NETWORK & AI)
@@ -18,7 +32,7 @@
     - Maps unbounded 3D coordinates into a fixed-size 1D array of "Buckets".
 */
 
-namespace Engine::Database {
+export namespace Engine::Database {
 
     struct SpatialCell {
         uint32_t startIndex; // Where in the sorted entity array does this cell begin?
@@ -134,7 +148,7 @@ namespace Engine::Database {
     };
 }
 
-namespace Engine::Systems {
+export namespace Engine::Systems {
 
     // ==============================================================
     // USE CASE 1: AI SENSORY & PERCEPTION
@@ -207,7 +221,7 @@ namespace Engine::Systems {
 // USE CASE 3: INFINITE CHUNK HASH DATABASE (PERSISTENT DATA)
 // ==================================================================================
 
-namespace Engine::Database {
+export namespace Engine::Database {
 
     struct ChunkKey {
         int32_t x, y, z;
