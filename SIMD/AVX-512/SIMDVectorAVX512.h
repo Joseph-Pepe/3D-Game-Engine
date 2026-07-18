@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../../FiberJobSystem/JobSystem.h"
 #include <immintrin.h> // AVX, SSE (128-bit), MMX (64-bit).
 #include <cmath>       // Trigonometry (C++26 constexpr supported)
 #include <print>       // Formatting
