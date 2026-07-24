@@ -22,7 +22,7 @@ A high-performance, future-proof 3D game engine and computational pipeline built
               |         DESKTOP NATIVE TARGET         |       |        WEB RUNTIME TARGET (WASM)       |
               +---------------------------------------+       +---------------------------------------+
               | Compiler: MSVC, GCC, Clang            |       | Compiler: Emscripten (emcc)           |
-              | Windowing: Raw Win32 / Cocoa / X11    |       | Windowing: HTML5 <canvas> DOM Hooks   |
+              | Windowing: Raw Win32 / Cocoa          |       | Windowing: HTML5 <canvas> DOM Hooks   |
               | Architecture: x86_64, ARM64, RISC-V   |       | Vectors: 128-bit WebAssembly SIMD     |
               | Threads: std::thread / OS Primitives  |       | Threads: Web Workers (-pthread)       |
               +---------------------------------------+       +---------------------------------------+
