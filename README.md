@@ -123,13 +123,14 @@ This engine is built with a strict separation of concerns, focusing on multi-cor
 This project uses CMake and vcpkg to ensure a frictionless, cross-platform build process.
 
 ### 1. System Prerequisites
-Ensure your local workstation has the required core build tools installed.
+
+Ensure your local workstation has the required core build tools installed and meets the minimum C++26 compiler baselines.
+
 * **Version Control:** Git installed and added to your system `PATH`.
 * **Build System:** CMake (v3.28 or newer).
 * **Compilers:**
-  * **Windows:** Visual Studio 2022 (with the "Desktop development with C++" workload installed).
-  * **Linux:** GCC 13+ or Clang 17+.
-  * **macOS:** Xcode Command Line Tools.
+  * **Windows:** Visual Studio 2025 / MSVC 19.42+ (or newer).
+  * **macOS:** GCC 14+ or Clang 18+.
 
 ### 2. Compilation (One-Command Setup)
 
