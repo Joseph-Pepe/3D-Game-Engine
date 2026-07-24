@@ -129,7 +129,7 @@ Ensure your local workstation has the required core build tools installed and me
 * **Version Control:** Git installed and added to your system `PATH`.
 * **Build System:** CMake (v3.28 or newer).
 * **Compilers:**
-  * **Windows:** Visual Studio 2025 / MSVC 19.42+ (or newer).
+  * **Windows:** Visual Studio 2025 / MSVC 14.52+ (or newer).
   * **macOS:** GCC 14+ or Clang 18+.
   * **Web Cross-Compilation:** Emscripten SDK (emsdk).
 
