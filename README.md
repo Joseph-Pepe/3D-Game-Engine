@@ -1,4 +1,4 @@
-# Greyreach Engine Core: Dual-Target Cross-Platform Game Engine
+# Greyreach Engine
 
 A high-performance, future-proof 3D game engine and computational pipeline built with ultra-modern **C++26** standards. This repository contains a single, unified codebase designed to deploy across two distinct paradigms:
 
