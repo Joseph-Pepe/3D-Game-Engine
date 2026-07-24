@@ -83,6 +83,8 @@ greyreach-core/
 │   └── app.js                   # Web Worker lifecycle & audio-context managers
 ├── CMakeLists.txt               # Unified Master Build System
 └── README.md                    # Project Documentation
+```
+
 ---
 
 # AAA Engine
