@@ -5,7 +5,38 @@ A high-performance, future-proof 3D game engine and computational pipeline built
 1. **Desktop Bare-Metal Version:** Zero frameworks, zero third-party dependencies. Direct interfaces to native OS kernels and low-level graphics/GPGPU APIs.
 2. **Web Application Version:** Compiled via Emscripten into WebAssembly (WASM64) utilizing WebAssembly SIMD, multi-threaded Web Workers, and WebGPU.
 
+---
 
+## 🏛️ Engine Architecture
+
+```text
+                              +-------------------------------------------------------+
+                              |                 CORE ENGINE CODEBASE                  |
+                              |  (C++26 Modules, Custom ECS, Reflection, Math, Audio) |
+                              +-------------------------------------------------------+
+                                                          |
+                                  +-----------------------+-----------------------+
+                                  |                                               |
+                                  v                                               v
+              +---------------------------------------+       +---------------------------------------+
+              |         DESKTOP NATIVE TARGET         |       |        WEB RUNTIME TARGET (WASM)       |
+              +---------------------------------------+       +---------------------------------------+
+              | Compiler: MSVC, GCC, Clang            |       | Compiler: Emscripten (emcc)           |
+              | Windowing: Raw Win32 / Cocoa / X11    |       | Windowing: HTML5 <canvas> DOM Hooks   |
+              | Architecture: x86_64, ARM64, RISC-V   |       | Vectors: 128-bit WebAssembly SIMD     |
+              | Threads: std::thread / OS Primitives  |       | Threads: Web Workers (-pthread)       |
+              +---------------------------------------+       +---------------------------------------+
+                    |                          |                    |                          |
+                    v                          v                    v                          v
+        +-----------------------+  +-----------------------+  +-----------------------+  +-----------------------+
+        |  CUSTOM GRAPHICS RHI  |  |   CUSTOM GPGPU RHI    |  |  WEBGPU RENDER PIPE   |  |  WEBGPU COMPUTE PIPE  |
+        +-----------------------+  +-----------------------+  +-----------------------+  +-----------------------+
+        | * Vulkan 1.3 Core     |  | * CUDA Driver API     |  | * Browser WebGPU Context | * WGSL Compute Shaders|
+        | * DirectX 12 Agility  |  | * HIP Driver (AMD)    |  | * Dynamic Translation |  | * Audio Generation    |
+        | * Metal 3 (Apple)     |  | * Metal Compute / MPS |  |   to Vulkan/Metal/DX12|  | * Particle Physics    |
+        | * GNM++ (Sony Console)|  | * SYCL Runtimes       |  |                       |  |                       |
+        +-----------------------+  +-----------------------+  +-----------------------+  +-----------------------+
+```
 
 ---
 
