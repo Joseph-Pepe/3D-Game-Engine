@@ -31,13 +31,58 @@ A high-performance, future-proof 3D game engine and computational pipeline built
         +-----------------------+  +-----------------------+  +-----------------------+  +-----------------------+
         |  CUSTOM GRAPHICS RHI  |  |   CUSTOM GPGPU RHI    |  |  WEBGPU RENDER PIPE   |  |  WEBGPU COMPUTE PIPE  |
         +-----------------------+  +-----------------------+  +-----------------------+  +-----------------------+
-        | * Vulkan 1.3 Core     |  | * CUDA Driver API     |  | * Browser WebGPU Context | * WGSL Compute Shaders|
-        | * DirectX 12 Agility  |  | * HIP Driver (AMD)    |  | * Dynamic Translation |  | * Audio Generation    |
-        | * Metal 3 (Apple)     |  | * Metal Compute / MPS |  |   to Vulkan/Metal/DX12|  | * Particle Physics    |
-        | * GNM++ (Sony Console)|  | * SYCL Runtimes       |  |                       |  |                       |
+        | * Vulkan (PC, Android)|  | * CUDA Driver API     |  | * Browser WebGPU      |  | * WGSL Compute Shaders|
+        | * DirectX 12 (Xbox)   |  | * HIP Driver (AMD)    |  |   Context             |  | * Audio Generation    |
+        | * Metal (Apple)       |  | * Metal Compute / MPS |  | * Dynamic Translation |  | * Particle Physics    |
+        | * GNM++ (Sony Console)|  | * SYCL Runtimes       |  |   to Vulkan/Metal/DX12|  |                       |
         +-----------------------+  +-----------------------+  +-----------------------+  +-----------------------+
 ```
 
+---
+
+### Key Technical Specs & C++26 Compliance
+
+* **Compile-Time Reflection (P2996):** Leverages `^^` and `[:...:]` splice operators for automatic, zero-overhead component serialization and ECS type-registration.
+* **Deterministic Errors:** Strictly utilizes `std::expected<T, E>` for predictable data pathways, bypassing runtime exceptions.
+* **Modern I/O:** Type-safe formatting via `std::println`.
+* **C++ Modules:** Complete architecture isolation via `export module` segmentation to accelerate compilation and prevent header pollution.
+* **Hardware Intrinsics:** Math vectors map directly to local hardware vectors (`AVX-512`/`AVX2` for x86_64, `NEON` for ARM64, and `RVV` for RISC-V).
+
+---
+
+## 📂 Project Directory Structure
+
+```text
+greyreach-core/
+├── .github/                     # CI/CD Workflows for multi-platform compilation
+├── assets/                      # Raw Engine Textures, Meshes, and Audio Waveforms
+├── cmake/                       # Platform-specific CMake toolchain profiles
+│   └── Emscripten.cmake         # Emscripten cross-compilation configurations
+├── src/                         # Unified C++26 Engine Source
+│   ├── core/                    # Core Subsystems (Shared between Web & Desktop)
+│   │   ├── ecs.cppm             # Custom Reflection-Driven Entity Component System
+│   │   ├── math_simd.cppm       # Hand-written Vector/Matrix Math with AVX/NEON/RVV
+│   │   └── audio_dsp.cppm       # C++ Music Generator & Synthesis Framework
+│   ├── platform/                # Platform Abstraction Layer
+│   │   ├── window/              # OS Windowing & Input Event Loop Implementations
+│   │   │   ├── win32_window.cpp # Raw Win32 API implementation
+│   │   │   ├── cocoa_window.mm  # Raw Objective-C++ Cocoa implementation
+│   │   │   └── web_window.cpp   # Web Canvas DOM / Emscripten interaction hooks
+│   │   ├── graphics_rhi/        # 3D Graphics Rendering Abstraction
+│   │   │   ├── vulkan_backend.cpp
+│   │   │   ├── dx12_backend.cpp
+│   │   │   ├── metal_backend.mm
+│   │   │   └── webgpu_backend.cpp
+│   │   └── gpgpu_rhi/           # Heavy Compute Parallel Abstraction
+│   │       ├── cuda_backend.cpp
+│   │       ├── hip_backend.cpp
+│   │       └── webgpu_compute.cpp
+│   └── main.cpp                 # Unified Desktop entry point & Web main_loop hook
+├── web/                         # Production Web Shell Setup
+│   ├── index.html               # Main page layout housing the HTML5 <canvas>
+│   └── app.js                   # Web Worker lifecycle & audio-context managers
+├── CMakeLists.txt               # Unified Master Build System
+└── README.md                    # Project Documentation
 ---
 
 # AAA Engine
