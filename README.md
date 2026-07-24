@@ -2,7 +2,7 @@
 
 A high-performance, future-proof 3D game engine and computational pipeline built with ultra-modern **C++26** standards. This repository contains a single, unified codebase designed to deploy across two distinct paradigms:
 
-1. **Desktop Bare-Metal Version:** Zero frameworks, zero third-party dependencies. Direct interfaces to native OS kernels and low-level graphics/GPGPU APIs.
+1. **Desktop Bare-Metal Version:** Zero frameworks/third-party dependencies. Direct interfaces to native OS kernels and low-level graphics/GPGPU APIs.
 2. **Web Application Version:** Compiled via Emscripten into WebAssembly (WASM64) utilizing WebAssembly SIMD, multi-threaded Web Workers, and WebGPU.
 
 ---
